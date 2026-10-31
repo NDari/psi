@@ -104,10 +104,10 @@ const KEY_ALIASES: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "content",
+        "text",
         &[
+            "content",
             "contents",
-            "text",
             "filetext",
             "data",
             "body",
@@ -621,7 +621,7 @@ mod tests {
         let err = fix("edit", r#"{"old_text": "x", "new_text": "y"}"#).unwrap_err();
         assert_eq!(
             err,
-            r#"edit is missing 'path'. Example: edit {"new_text":"x = 2","old_text":"x = 1","path":"app.py"}"#
+            r#"edit is missing 'path'. Example: edit {"path":"app.py","old_text":"x = 1","new_text":"x = 2"}"#
         );
         let err = fix("read", r#"{"path": "a", "offset": "ten"}"#).unwrap_err();
         assert!(

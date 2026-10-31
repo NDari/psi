@@ -78,7 +78,7 @@ pub fn build_messages(system: &str, branch: &[&Entry]) -> Vec<ChatMessage> {
                             calls.push(RawToolCall {
                                 id: id.clone(),
                                 name: name.clone(),
-                                arguments: raw.clone().unwrap_or_else(|| arguments.to_string()),
+                                arguments: history_arguments(raw.as_deref(), arguments),
                             });
                         }
                         // Thinking is never sent back (strip_from_history).
@@ -106,6 +106,19 @@ pub fn build_messages(system: &str, branch: &[&Entry]) -> Vec<ChatMessage> {
     }
     close_calls(&mut out, &mut pending, &answered);
     out
+}
+
+/// The arguments to send back for a past call: as the model wrote them, so
+/// the prompt cache holds, unless they are not valid JSON (a call cut off by
+/// the output limit). llama-server rejects a request whose history has such
+/// arguments, so those go back as `{}`; the call's result says what happened.
+fn history_arguments(raw: Option<&str>, parsed: &serde_json::Value) -> String {
+    match raw {
+        Some(r) if serde_json::from_str::<serde_json::Value>(r).is_ok() => r.to_owned(),
+        Some(_) => "{}".into(),
+        None if parsed.is_object() => parsed.to_string(),
+        None => "{}".into(),
+    }
 }
 
 fn push_user(out: &mut Vec<ChatMessage>, text: &str) {

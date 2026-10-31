@@ -5,6 +5,7 @@ use psi_ai::{Param, ParamKind, ToolSchema};
 use serde_json::{Map, Value, json};
 
 use crate::files::Seen;
+use crate::read;
 use crate::text::lines;
 use crate::{ToolCtx, ToolOutput, str_arg};
 
@@ -14,16 +15,18 @@ pub(crate) fn schema() -> ToolSchema {
         description: "Create a file, or replace a whole file. Read an existing file before replacing it. For small changes use edit.".into(),
         params: vec![
             Param::new("path", ParamKind::String, "File path, relative to the working directory or absolute").path(),
-            Param::new("content", ParamKind::String, "The complete new content"),
+            // Not "content": some chat templates sort keys, and the path
+            // must come before the long text or models drop it (H-05).
+            Param::new("text", ParamKind::String, "The complete new content of the file"),
             Param::new("intent", ParamKind::String, "Optional: one line on why").optional(),
         ],
-        example: json!({"path": "notes/todo.md", "content": "- first item\n"}),
+        example: json!({"path": "notes/todo.md", "text": "- first item\n"}),
     }
 }
 
 pub(crate) fn run(args: &Map<String, Value>, ctx: &ToolCtx) -> ToolOutput {
     let shown = str_arg(args, "path");
-    let content = str_arg(args, "content");
+    let content = str_arg(args, "text");
     let path = ctx.resolve(shown);
     // TODO(phase-3): refuse writes to ~/.psi and the workspace's .psi (D-27);
     // ask before writing gitignored paths.
@@ -40,18 +43,22 @@ pub(crate) fn run(args: &Map<String, Value>, ctx: &ToolCtx) -> ToolOutput {
             Ok(f) => f.check(&path, &current),
             Err(_) => Seen::Never,
         };
-        match seen {
-            Seen::Current => {}
-            Seen::Never => {
-                return ToolOutput::err(format!(
-                    "{shown} already exists and you have not read it. Read it first, then write; for a small change use edit."
-                ));
-            }
-            Seen::Changed => {
-                return ToolOutput::err(format!(
-                    "{shown} changed since you last read it. Read it again before replacing it."
-                ));
-            }
+        // The refusal reads the file for the model (it counts as the read),
+        // so the next write goes through: asking a small model to read first
+        // made Gemma 4 retry the same write 14 times.
+        let why = match seen {
+            Seen::Current => None,
+            Seen::Never => Some("already exists and you have not read it"),
+            Seen::Changed => Some("changed since you last read it"),
+        };
+        if let Some(why) = why {
+            let mut read_args = Map::new();
+            read_args.insert("path".into(), Value::String(shown.into()));
+            let current = read::run(&read_args, ctx);
+            return ToolOutput::err(format!(
+                "{shown} {why}, so it was not replaced. Its current content is below; call write again to replace it, or use edit for a small change.\n{}",
+                current.text
+            ));
         }
     }
     if let Some(parent) = path.parent()
@@ -75,7 +82,6 @@ pub(crate) fn run(args: &Map<String, Value>, ctx: &ToolCtx) -> ToolOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::read;
 
     fn call(
         f: fn(&Map<String, Value>, &ToolCtx) -> ToolOutput,
@@ -85,11 +91,29 @@ mod tests {
         f(v.as_object().unwrap(), c)
     }
 
+    /// Gemma 4's chat template lists schema keys alphabetically; with
+    /// `content` before `path` it wrote whole files and dropped the path,
+    /// 20 times in a row (psi eval, sh_logreport, 2026-10-31).
+    #[test]
+    fn path_comes_before_the_text_in_any_order() {
+        let v = schema().to_openai();
+        let props: Vec<&String> = v["function"]["parameters"]["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect();
+        assert_eq!(props, ["path", "text", "intent"], "declared order");
+        let mut sorted = props.clone();
+        sorted.sort();
+        let pos = |k: &str| sorted.iter().position(|p| *p == k).unwrap();
+        assert!(pos("path") < pos("text"), "alphabetical order: {sorted:?}");
+    }
+
     #[test]
     fn creates_with_parents() {
         let d = tempfile::tempdir().unwrap();
         let c = ToolCtx::new(d.path(), d.path(), 1000);
-        let out = call(run, &c, json!({"path": "a/b/c.txt", "content": "x\ny\n"}));
+        let out = call(run, &c, json!({"path": "a/b/c.txt", "text": "x\ny\n"}));
         assert_eq!(out, ToolOutput::ok("Created a/b/c.txt (2 lines)."));
         assert_eq!(
             std::fs::read_to_string(d.path().join("a/b/c.txt")).unwrap(),
@@ -102,26 +126,38 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let c = ToolCtx::new(d.path(), d.path(), 1000);
         std::fs::write(d.path().join("f"), "old").unwrap();
-        let out = call(run, &c, json!({"path": "f", "content": "new"}));
+        let out = call(run, &c, json!({"path": "f", "text": "new"}));
         assert!(
             out.is_error && out.text.contains("you have not read it"),
             "{out:?}"
         );
+        assert!(
+            out.text.ends_with("\n1\told"),
+            "the refusal shows the content: {out:?}"
+        );
+        assert_eq!(std::fs::read_to_string(d.path().join("f")).unwrap(), "old");
+        // The refusal counts as the read.
+        assert_eq!(
+            call(run, &c, json!({"path": "f", "text": "new"})),
+            ToolOutput::ok("Replaced f (1 line).")
+        );
 
-        call(read::run, &c, json!({"path": "f"}));
         std::fs::write(d.path().join("f"), "changed outside").unwrap();
-        let out = call(run, &c, json!({"path": "f", "content": "new"}));
+        let out = call(run, &c, json!({"path": "f", "text": "newer"}));
         assert!(
             out.is_error && out.text.contains("changed since you last read it"),
             "{out:?}"
         );
-
-        call(read::run, &c, json!({"path": "f"}));
+        assert!(out.text.ends_with("\n1\tchanged outside"), "{out:?}");
         assert_eq!(
-            call(run, &c, json!({"path": "f", "content": "new"})),
+            std::fs::read_to_string(d.path().join("f")).unwrap(),
+            "changed outside"
+        );
+        assert_eq!(
+            call(run, &c, json!({"path": "f", "text": "newer"})),
             ToolOutput::ok("Replaced f (1 line).")
         );
         // Its own write counts as seen: writing again is fine.
-        assert!(!call(run, &c, json!({"path": "f", "content": "newer"})).is_error);
+        assert!(!call(run, &c, json!({"path": "f", "text": "newest"})).is_error);
     }
 }

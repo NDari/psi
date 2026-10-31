@@ -244,6 +244,11 @@ fn serve(mut conn: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
                 let n = v["content"].as_str().map_or(0, |c| c.len().div_ceil(4));
                 http(200, "application/json", json!({"tokens": vec![0; n]}).to_string().as_bytes())
             }
+            ("POST", p) if p.ends_with("/chat/completions") && !history_parses(&body) => http(
+                500,
+                "application/json",
+                br#"{"error":{"code":500,"message":"Failed to parse tool call arguments as JSON: replay server","type":"server_error"}}"#,
+            ),
             ("POST", p) if p.ends_with("/chat/completions") => match st.replies.pop_front() {
                 Some(Reply::Raw { bytes }) => bytes,
                 Some(Reply::Chat(r)) => http(200, "text/event-stream", render_sse(&r).as_bytes()),
@@ -261,6 +266,20 @@ fn serve(mut conn: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
     };
     conn.write_all(&response)?;
     conn.flush()
+}
+
+/// llama-server parses the arguments of every past tool call in a request
+/// and answers 500 when one is not JSON (recorded in
+/// tests/fixtures/llama-server/gemma4-12b-qat/tool_call_parse_error.response.http).
+fn history_parses(body: &[u8]) -> bool {
+    let v: Value = serde_json::from_slice(body).unwrap_or_default();
+    v["messages"].as_array().into_iter().flatten().all(|m| {
+        m["tool_calls"].as_array().into_iter().flatten().all(|c| {
+            c["function"]["arguments"]
+                .as_str()
+                .is_none_or(|a| serde_json::from_str::<Value>(a).is_ok())
+        })
+    })
 }
 
 fn http(status: u16, content_type: &str, body: &[u8]) -> Vec<u8> {

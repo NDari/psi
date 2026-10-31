@@ -20,3 +20,4 @@ tested against real bytes.
 | `overflow` | HTTP 400 `exceed_context_size_error` |
 | `system_not_first` | Qwen: HTTP 500 from the chat template; Gemma accepts it |
 | `props`, `health`, `models`, `tokenize` | The other endpoints |
+| `gemma4-12b-qat/tool_call_parse_error` | HTTP 500 when a request's history holds a tool call whose arguments are not JSON (from a psi eval run, 2026-10-31: psi sent back a call cut off by the output limit) |

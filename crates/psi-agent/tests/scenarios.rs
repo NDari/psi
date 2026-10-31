@@ -162,6 +162,10 @@ async fn recorded_cut_off_tool_call_is_not_run() {
         std::fs::read_dir(&f.cwd).unwrap().next().is_none(),
         "nothing was written"
     );
+    // The cut-off arguments are not sent back: llama-server would reject the
+    // request (Gemma 4, psi eval sh_logreport, 2026-10-31).
+    let m = f.server.chat_requests()[1]["messages"].clone();
+    assert_eq!(m[2]["tool_calls"][0]["function"]["arguments"], "{}");
 }
 
 #[tokio::test]
@@ -202,8 +206,58 @@ async fn shape_refusal_goes_back_to_the_model() {
     let (_, a) = f.run("x").await;
     assert_eq!(
         tool_results(&a)[0].0,
-        r#"edit is missing 'path'. Example: edit {"new_text":"    return a + b","old_text":"    return a - b","path":"app.py"}"#
+        r#"edit is missing 'path'. Example: edit {"path":"app.py","old_text":"    return a - b","new_text":"    return a + b"}"#
     );
+}
+
+#[tokio::test]
+async fn gemma_write_without_path_gets_a_path_first_example() {
+    // The shape of Gemma 4's 20 failed writes (psi eval, sh_logreport):
+    // content (now an alias of text) and intent, no path.
+    let f = Fixture::new(vec![
+        call(
+            "write",
+            json!({"content": "#!/bin/bash\necho hi\n", "intent": "Create the script."}),
+        ),
+        call(
+            "write",
+            json!({"intent": "Create the script.", "path": "report.sh", "content": "#!/bin/bash\necho hi\n"}),
+        ),
+        text("done"),
+    ]);
+    let (_, a) = f.run("write report.sh").await;
+    let r = tool_results(&a);
+    assert_eq!(
+        r[0].0,
+        r#"write is missing 'path'. Example: write {"path":"notes/todo.md","text":"- first item\n"}"#
+    );
+    assert_eq!(r[1], ("Created report.sh (2 lines).".into(), false));
+}
+
+#[tokio::test]
+async fn write_after_a_bash_rewrite_reads_for_the_model() {
+    // Gemma 4 (psi eval, sh_logreport): write, then rewrite the file with a
+    // bash heredoc, then write again. The refusal shows the current content
+    // and counts as the read, so the retry goes through instead of looping.
+    let f = Fixture::new(vec![
+        call("write", json!({"path": "r.sh", "text": "v1\n"})),
+        call("bash", json!({"command": "printf 'v2\\n' > r.sh"})),
+        call("write", json!({"path": "r.sh", "text": "v3\n"})),
+        call("write", json!({"path": "r.sh", "text": "v3\n"})),
+        text("done"),
+    ]);
+    let (_, a) = f.run("x").await;
+    let r = tool_results(&a);
+    assert!(r[2].1);
+    assert!(
+        r[2].0
+            .starts_with("r.sh changed since you last read it, so it was not replaced."),
+        "{}",
+        r[2].0
+    );
+    assert!(r[2].0.ends_with("\n1\tv2"), "{}", r[2].0);
+    assert_eq!(r[3], ("Replaced r.sh (1 line).".into(), false));
+    assert_eq!(std::fs::read_to_string(f.cwd.join("r.sh")).unwrap(), "v3\n");
 }
 
 #[tokio::test]
