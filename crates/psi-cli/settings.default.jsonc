@@ -1,0 +1,9 @@
+// Built-in settings: the first layer (psi-plan.md §3.4).
+// User (~/.psi/settings.jsonc) and project (<project>/.psi/settings.jsonc)
+// layers override these; command-line flags override everything.
+{
+  // "auto" asks only for irreversible actions; "strict" asks before every change (D-11).
+  "mode": "auto",
+  // "on" or "off"; "off" cuts bash off from the network (D-08).
+  "network": "on",
+}

@@ -46,6 +46,7 @@ If a check can't run, say what is unverified.
 
 - Evals run locally against llama-server, each trial in a podman container. The container is the boundary; no inner sandbox.
 - They are for sanity checks, finding harness bugs ("the tool result misled the model") and directional comparisons with pi. Don't chase small score differences or statistical significance unless asked.
+- **Baselines are one run and prove correctness only.** A pi baseline or a phase's Psi score is a single run (one trial per task) showing the design works end to end. Never use one to judge speed, timing or how well an agent or model does, and don't re-run it for more trials. The owner considers this very important.
 - When a run looks wrong, read the transcript and the wire log before changing anything.
 
 ## Rust conventions

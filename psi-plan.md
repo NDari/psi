@@ -633,6 +633,7 @@ The eval is for sanity checks, finding harness bugs ("a tool result sent the mod
 - **Outcomes:** pass, model failure, or harness failure. Harness failures (out of memory, server crash, the agent dying) never count as model results.
 - **Summary:** per task, passes, mean score, steps, tokens and harness failures. `psi eval diff A B` shows two runs side by side and points to the trials that changed.
 - **Reading results:** look for direction and for transcripts that show harness bugs. A task or two either way is noise. There's no significance testing by default; if a question needs rigor, run more trials for that question.
+- **Baselines prove correctness only (owner rule, 2026-10-31):** a baseline (pi's, or a phase's Psi score) is **one run, one trial per task**. It exists to prove the design works end to end: trials run, records are captured, graders produce outcomes, harness failures surface. It is **never** used to judge speed, timing or how well an agent or model does. Don't repeat baseline runs.
 - **Hypotheses:** each `H-xx` (§14) gets an eval config and a recorded, directional result.
 
 ### 12.6 In the TUI
@@ -696,7 +697,7 @@ Each phase ends with its acceptance criteria passing in CI, where automatable.
 **Phase 1: eval and inspection foundation.**
 - Port the 40 tasks and the quick set; check the graders; the podman runner; the three outcome classes; the session entry types (§7.1) as the record format; the pi adapter; run summaries and `psi eval diff`; `psi inspect` over trial records.
 - ✅ Every reference solution passes and every untouched repo fails.
-- ✅ A pi baseline on the quick set with both reference models (D-29), run on this machine.
+- ✅ A pi baseline on the quick set with both reference models (D-29), run on this machine: a single run, proving the pipeline works (§12.5), not a score.
 
 **Phase 2: providers, agent loop, core tools, sessions** (print and JSON modes).
 - llama-server client with `/props` checks; wire log; shape-fix pipeline; agent loop with queues, abort and budgets; read/write/edit/bash (no isolation yet); optional grep/find/ls; JSONL tree sessions; the Psi eval adapter; `psi replay`.
