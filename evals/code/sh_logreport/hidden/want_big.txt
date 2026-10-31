@@ -1,0 +1,13 @@
+requests: 60
+unique ips: 9
+bytes: 198361
+status:
+  200: 35
+  301: 9
+  304: 8
+  404: 4
+  500: 4
+top paths:
+  14 /api/items
+  13 /docs
+  10 /search

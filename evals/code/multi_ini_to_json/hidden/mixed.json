@@ -1,0 +1,36 @@
+{
+  "title": "Monthly report",
+  "version": 3,
+  "output": {
+    "format": "html",
+    "pages": -12,
+    "scale": 0.75,
+    "color": true,
+    "recipients": [
+      "ana@example.com",
+      "bo@example.com",
+      "cy@example.com"
+    ],
+    "mixed": [
+      1,
+      "two",
+      3.5,
+      false
+    ],
+    "motto": "keep it short, keep it true",
+    "quoted_number": "42",
+    "empty": "",
+    "address": "10.0.0.1",
+    "url": "https://x.test/a=b"
+  },
+  "sources": {
+    "primary": {
+      "path": "/data/in",
+      "retries": 5
+    },
+    "backup": {
+      "path": "/data/backup",
+      "retries": 2
+    }
+  }
+}

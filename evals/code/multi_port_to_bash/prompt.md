@@ -1,0 +1,3 @@
+Port tally.py to a bash script, `tally.sh`, in the repo root. Some of our on-call boxes have no Python, so the script must not call python at all (bash plus the usual tools such as grep, sed, awk, sort and uniq are fine). We'll run it as `bash tally.sh [-l LEVEL] FILE...`.
+
+For the same arguments it must behave exactly like `python3 tally.py`: the same stdout byte for byte, the same messages on stderr and the same exit status. That includes the usage error (exit 2), an unreadable file (exit 1 and nothing on stdout), lines that don't match the log format, the `-l` filter, ties in the component ranking, and files whose last line has no newline. Keep tally.py as it is.

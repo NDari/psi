@@ -1,0 +1,9 @@
+{
+  "number": "2026-0412",
+  "customer": "Acme GmbH",
+  "lines": [
+    {"description": "Widget", "quantity": 3, "unit_price": "0.29", "vat": "19"},
+    {"description": "Gasket", "quantity": 10, "unit_price": "2.40", "vat": "19"},
+    {"description": "Manual", "quantity": 1, "unit_price": "1.50", "vat": "7"}
+  ]
+}

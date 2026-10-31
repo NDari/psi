@@ -1,0 +1,12 @@
+{
+  "number": "2026-0977",
+  "customer": "Bakery Lindqvist",
+  "lines": [
+    {"description": "Flour 25kg", "quantity": 4, "unit_price": "11.15", "vat": "7"},
+    {"description": "Paper bags", "quantity": 7, "unit_price": "0.57", "vat": "19"},
+    {"description": "Labels", "quantity": 5, "unit_price": "0.70", "vat": "19"},
+    {"description": "Yeast", "quantity": 1, "unit_price": "3.50", "vat": "7"},
+    {"description": "Booklet", "quantity": 2, "unit_price": "5.50", "vat": "5.5"},
+    {"description": "Delivery", "quantity": 1, "unit_price": "12", "vat": "0"}
+  ]
+}

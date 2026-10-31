@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "tasks": [
+    {"id": 1, "title": "Buy milk", "project": "home", "tags": ["shop"], "status": "open", "created": "2026-03-01", "due": "2026-03-12", "done_on": null, "notes": ""},
+    {"id": 2, "title": "Fix bike", "project": "home", "tags": [], "status": "open", "created": "2026-02-01", "due": null, "done_on": null, "notes": "back tyre"},
+    {"id": 3, "title": "Send invoice", "project": "work", "tags": ["money"], "status": "open", "created": "2026-03-02", "due": "2026-03-09", "done_on": null, "notes": ""},
+    {"id": 4, "title": "Archive mail", "project": null, "tags": [], "status": "done", "created": "2026-03-03", "due": null, "done_on": "2026-03-10", "notes": ""},
+    {"id": 5, "title": "Plan trip", "project": null, "tags": ["travel"], "status": "open", "created": "2026-03-05", "due": "2026-03-20", "done_on": null, "notes": ""}
+  ]
+}

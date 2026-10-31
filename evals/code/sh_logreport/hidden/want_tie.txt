@@ -1,0 +1,10 @@
+requests: 6
+unique ips: 3
+bytes: 150
+status:
+  200: 5
+  503: 1
+top paths:
+  2 /a
+  2 /b
+  1 /c

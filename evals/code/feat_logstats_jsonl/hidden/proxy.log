@@ -1,0 +1,24 @@
+
+{"host": "10.0.0.9", "time": "2026-10-10T15:58:00+02:00", "method": "GET", "path": "/api/items?page=1", "status": 200, "bytes": 900}
+
+{"host": "10.0.0.9", "time": "2026-10-10T13:59:30Z", "method": "GET", "path": "/index.html", "status": 200, "bytes": null}
+
+{"host": "10.0.0.2", "time": "2026-10-10T14:20:00+00:00", "method": "DELETE", "path": "/api/items/7", "status": 503}
+
+
+
+{"host": "10.0.0.2", "time": "2026-10-10T14:21:00", "method": "GET", "path": "/naive", "status": 200, "bytes": 1}
+
+{"host": "10.0.0.2", "time": "2026-10-10T14:22:00+00:00", "method": "GET", "path": "/s", "status": "200", "bytes": 1}
+
+{"host": "10.0.0.2", "time": "2026-10-10T14:23:00+00:00", "method": "GET", "status": 200, "bytes": 1}
+
+["not", "an", "object"]
+
+{"host": "10.0.0.2", "time": "2026-10-10T14:24:00+00:00", "method": "GET", "path": "/b", "status": 200, "bytes": "12"}
+
+{"host": "10.0.0.2", "time": "yesterday", "method": "GET", "path": "/t", "status": 200, "bytes": 1}
+
+{broken json
+
+{"host": "10.0.0.4", "time": "2026-10-10T09:30:00-05:00", "method": "PUT", "path": "/api/items/7#frag", "status": 204, "bytes": 0}

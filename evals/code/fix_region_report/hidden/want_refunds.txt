@@ -1,0 +1,5 @@
+Hill              250.00
+Mills              10.00
+Airport             0.00
+Harbor            -30.00
+TOTAL             230.00

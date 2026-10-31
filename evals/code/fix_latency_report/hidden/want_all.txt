@@ -1,0 +1,1 @@
+all: 83 requests, mean 181.3ms, p50 105ms, p95 590ms, max 831ms, errors 9.6%

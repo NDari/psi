@@ -1,0 +1,12 @@
+NOTES REPORT
+============
+
+3 notes, 135 words, about 1 minute of reading.
+
+note        first line                   words  ease
+----------  ---------------------------  -----  ----
+cafe-ideas  Menu Ideas for the Café...      39  62.4
+groceries   The Weekly Shopping List...     34  75.9
+printing    Reading Notes on the...         62  50.6
+
+Most used words: coffee (4), bread (2), menu (2), roaster (2), typography (2)

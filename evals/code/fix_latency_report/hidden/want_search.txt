@@ -1,0 +1,1 @@
+/api/search: 11 requests, mean 533.7ms, p50 495ms, p95 831ms, max 831ms, errors 0.0%

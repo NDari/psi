@@ -1,0 +1,13 @@
+requests: 5
+skipped: 1
+bytes: 5996
+status: 2xx=3 3xx=1 4xx=1
+top paths:
+      2 /api/items
+      2 /index.html
+      1 /missing
+top hosts:
+      3 10.0.0.1
+      1 10.0.0.2
+      1 10.0.0.3
+busiest hour: 2026-10-10 13:00 UTC (3 requests)

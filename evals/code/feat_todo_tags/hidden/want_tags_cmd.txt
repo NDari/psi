@@ -1,0 +1,23 @@
+$ todo add Pay rent
+added 1
+[exit 0]
+$ todo tags
+[exit 0]
+$ todo tag 1 money home
+tagged 1
+[exit 0]
+$ todo add Water plants --tag home --tag garden
+added 2
+[exit 0]
+$ todo add Buy milk --tag shop --tag home
+added 3
+[exit 0]
+$ todo done 3
+done 3
+[exit 0]
+$ todo tags
+garden 1
+home 3
+money 1
+shop 1
+[exit 0]

@@ -1,0 +1,34 @@
+$ todo add Pay rent -p 1 --due tomorrow
+added 1
+[exit 0]
+$ todo add Water plants
+added 2
+[exit 0]
+$ todo add Old thing --due 2026-10-20
+added 3
+[exit 0]
+$ todo edit 2 --title Water the plants -p 3
+edited 2
+[exit 0]
+$ todo done 1
+done 1
+[exit 0]
+$ todo list
+  2 [ ] (p3) Water the plants
+  3 [ ] (p2) Old thing  due 2026-10-20 !
+[exit 0]
+$ todo list --all --sort due
+  3 [ ] (p2) Old thing  due 2026-10-20 !
+  1 [x] (p1) Pay rent  due 2026-10-29
+  2 [ ] (p3) Water the plants
+[exit 0]
+$ todo rm 3
+removed 3
+[exit 0]
+$ todo rm 3
+todo: no task 3
+[exit 1]
+$ todo list --all
+  1 [x] (p1) Pay rent  due 2026-10-29
+  2 [ ] (p3) Water the plants
+[exit 0]

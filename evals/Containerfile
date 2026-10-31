@@ -1,0 +1,22 @@
+# The eval trial image (psi-plan.md §12.5). Built by `psi eval`; the psi
+# binary is not in it (trials bind-mount the one under test). pi is
+# installed at build time because trials have no network except the model
+# server.
+FROM docker.io/library/node:22-trixie-slim AS node
+
+FROM docker.io/library/debian:trixie-slim
+
+# What the tasks and their graders use: Python 3.13 (stdlib only), bash,
+# git, make, a C compiler (sh_makefile) and coreutils; ripgrep and file for
+# the agent's own searches.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      python3 git make gcc libc6-dev ripgrep file ca-certificates procps less xz-utils \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
+ARG PI_VERSION=1.4.0
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+ && npm install -g --no-fund --no-audit "@earendil-works/pi-coding-agent@${PI_VERSION}" \
+ && pi --version

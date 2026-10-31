@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# pre-commit hook: rejects commits that stage secrets, debugger calls or huge files.
+bad=0
+problem() {
+  echo "pre-commit: $1" >&2
+  bad=1
+}
+
+while IFS= read -r -d '' path; do
+  name=${path##*/}
+  if [ "$name" = .env ]; then
+    problem ".env file staged: $path"
+  fi
+  if [[ $path == *.py ]] &&
+    git diff --cached --no-color --no-ext-diff -U0 -- "$path" | grep '^+' | grep -v '^+++ ' | grep -qF 'breakpoint()'; then
+    problem "breakpoint() in $path"
+  fi
+  size=$(git cat-file -s ":$path")
+  if [ "$size" -gt 512000 ]; then
+    problem "$path is larger than 500 KB"
+  fi
+done < <(git diff --cached --name-only -z --diff-filter=d)
+
+exit $bad

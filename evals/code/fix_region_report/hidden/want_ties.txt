@@ -1,0 +1,6 @@
+Alpha             100.00
+Bravo             100.00
+Charlie           100.00
+Delta              50.00
+Echo                7.50
+TOTAL             357.50

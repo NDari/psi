@@ -1,0 +1,9 @@
+server.host = 127.0.0.1
+server.port = 9100
+server.debug = True
+server.max_connections = 50
+smtp.relay = mail.internal
+smtp.timeout = 2.5
+smtp.use_tls = False
+queue.dir = /data/spool
+queue.retry_minutes = 15

@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# pre-commit hook: rejects commits that stage secrets, debugger calls or huge files.
+# TODO: write it
+exit 0

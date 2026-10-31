@@ -1,0 +1,5 @@
+/api/login: 20 requests, mean 178.3ms, p50 176ms, p95 253ms, max 255ms, errors 0.0%
+/api/orders: 11 requests, mean 340.1ms, p50 380ms, p95 450ms, max 450ms, errors 9.1%
+/api/search: 11 requests, mean 533.7ms, p50 495ms, p95 831ms, max 831ms, errors 0.0%
+/api/users: 21 requests, mean 83.3ms, p50 88ms, p95 103ms, max 105ms, errors 23.8%
+/health: 20 requests, mean 6.0ms, p50 6ms, p95 9ms, max 9ms, errors 10.0%

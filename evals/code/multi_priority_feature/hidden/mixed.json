@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "tasks": [
+    {"id": 1, "title": "Buy milk", "project": "home", "tags": ["shop"], "status": "open", "created": "2026-03-01", "due": "2026-03-12", "done_on": null, "notes": ""},
+    {"id": 2, "title": "Fix bike", "project": "home", "tags": [], "status": "open", "created": "2026-02-01", "due": null, "done_on": null, "notes": "", "priority": "low"},
+    {"id": 3, "title": "Send invoice", "project": "work", "tags": ["money"], "status": "open", "created": "2026-03-02", "due": "2026-03-09", "done_on": null, "notes": "", "priority": "high"},
+    {"id": 4, "title": "Archive mail", "project": null, "tags": [], "status": "done", "created": "2026-03-03", "due": null, "done_on": "2026-03-10", "notes": "", "priority": "high"},
+    {"id": 5, "title": "Plan trip", "project": null, "tags": ["travel"], "status": "open", "created": "2026-03-05", "due": "2026-03-20", "done_on": null, "notes": "", "priority": "normal"},
+    {"id": 6, "title": "Call bank", "project": "work", "tags": [], "status": "open", "created": "2026-03-06", "due": "2026-03-11", "done_on": null, "notes": "", "priority": "high"},
+    {"id": 7, "title": "Water plants", "project": "home", "tags": [], "status": "done", "created": "2026-03-07", "due": null, "done_on": "2026-03-08", "notes": "", "priority": "low"}
+  ]
+}

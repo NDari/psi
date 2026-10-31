@@ -1,0 +1,24 @@
+$ todo add Pay rent --tag ok --tag two words
+todo: bad tag: two words
+[exit 1]
+$ todo list
+no tasks
+[exit 0]
+$ todo add Pay rent --tag=-dash
+todo: bad tag: -dash
+[exit 1]
+$ todo add Pay rent --tag home
+added 1
+[exit 0]
+$ todo tag 1 good Bad_Tag
+todo: bad tag: Bad_Tag
+[exit 1]
+$ todo tag 9 home
+todo: no task 9
+[exit 1]
+$ todo untag 9 home
+todo: no task 9
+[exit 1]
+$ todo list
+  1 [ ] (p2) Pay rent #home
+[exit 0]

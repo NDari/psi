@@ -1,0 +1,22 @@
+$ todo list --all
+  1 [x] (p1) Renew passport
+  2 [ ] (p2) Fix bike  due 2026-11-02
+  4 [ ] (p3) Plan trip
+[exit 0]
+$ todo tag 2 work
+tagged 2
+[exit 0]
+$ todo list
+  2 [ ] (p2) Fix bike  due 2026-11-02 #work
+  4 [ ] (p3) Plan trip
+[exit 0]
+$ todo tags
+work 1
+[exit 0]
+$ todo add New one --tag work
+added 5
+[exit 0]
+$ todo list --tag work
+  2 [ ] (p2) Fix bike  due 2026-11-02 #work
+  5 [ ] (p2) New one #work
+[exit 0]

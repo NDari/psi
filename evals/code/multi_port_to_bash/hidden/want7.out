@@ -1,0 +1,9 @@
+total 85
+DEBUG 8
+ERROR 19
+INFO 35
+WARN 23
+top components:
+  db 23
+  api 20
+  cache 17

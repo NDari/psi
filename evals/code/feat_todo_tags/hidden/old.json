@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "tasks": [
+    {"id": 1, "title": "Renew passport", "done": true, "priority": 1, "created": "2026-09-01"},
+    {"id": 2, "title": "Fix bike", "done": false, "priority": 2, "created": "2026-09-03", "due": "2026-11-02"},
+    {"id": 4, "title": "Plan trip", "done": false, "priority": 3, "created": "2026-09-05"}
+  ]
+}

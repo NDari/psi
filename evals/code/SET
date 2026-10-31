@@ -1,0 +1,16 @@
+# The quick set (psi-plan.md §12.5): what `psi eval run` runs by default.
+# One task name per line; `--tasks all` runs every task in this directory.
+# Started from Heimdall's 11-task subset; replace tasks that give the same
+# result every trial (G-19).
+
+fix_invoice_rounding
+multi_rename_callers
+multi_shipping_bug
+multi_sqlite_migration
+fix_env_parser
+feat_logstats_jsonl
+multi_ini_to_json
+sh_archive_fix
+sh_changelog
+sh_logreport
+sh_precommit

@@ -148,6 +148,7 @@ evals/              # Task sets, graders, adapters (not embedded)
 | `~/.psi/checkpoints/<hash>/` | Shadow repositories (§7.2) |
 | `~/.psi/extensions/`, `skills/`, `prompts/`, `themes/`, `keybindings.json` | Resources (pi parity) |
 | `~/.cache/psi/tmp/<session-id>/` | The session's `TMPDIR` inside bash; removed when the session ends |
+| `~/.psi/evals/<UTC time>-<label>/` | Eval run records (§12.5); `--results` overrides |
 
 - **Layers:** built-in → user → project → command-line flags. Later layers override scalar values and merge objects by key. Rule lists append (§8.3).
 - **Size caps:** wire logs are capped at 1 GiB in total by default, removing the oldest sessions' logs first. Session files are kept.

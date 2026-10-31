@@ -20,7 +20,7 @@ A pi-style coding agent harness in Rust + mlua, built for its owner as a daily r
 - **The plan is the spec.** If a change contradicts `psi-plan.md`, stop and propose a plan edit first. Decisions are `D-xx` in §17; change one by adding a "Superseded" note with the reason.
 - **Work phase by phase** (§15). Don't build ahead; leave `// TODO(phase-N): ...` stubs where later work plugs in.
 - **Stay in scope.** Mention unrelated improvements; don't make them unasked.
-- **Ask before adding a dependency.** Appendix A lists the candidates; check the current version and maintenance first.
+- **Bring in dependencies when they earn it.** No need to ask: if a well-known, maintained crate provides value and saves writing a lot of code, add it. The owner wants a good user experience and a batteries-included feel. Appendix A lists candidates; check the current version and maintenance first, and mention what you added in your summary.
 - **Don't run git write commands.** The owner commits.
 - **No em-dashes or en-dashes** in code, comments, docs or messages. Use a hyphen or rephrase.
 

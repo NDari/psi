@@ -1,0 +1,22 @@
+$ todo add Pay rent --tag money
+added 1
+[exit 0]
+$ todo add Call mum
+added 2
+[exit 0]
+$ todo tag 1 home Money urgent
+tagged 1
+[exit 0]
+$ todo tag 2 family
+tagged 2
+[exit 0]
+$ todo untag 1 MONEY absent
+untagged 1
+[exit 0]
+$ todo untag 2 family
+untagged 2
+[exit 0]
+$ todo list --all
+  1 [ ] (p2) Pay rent #home #urgent
+  2 [ ] (p2) Call mum
+[exit 0]

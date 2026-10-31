@@ -1,0 +1,6 @@
+total 23
+WARN 23
+top components:
+  api 6
+  cache 5
+  db 4

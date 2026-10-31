@@ -1,0 +1,9 @@
+from 2024-05-01 10:00:00 to 2024-05-01 10:29:23
+requests 30, errors 7, skipped lines 2
+slow requests (>= 500 ms): 13
+slowest paths:
+  /api/search avg 643 ms, max 1200 ms, 3 calls
+  /api/users avg 637 ms, max 1200 ms, 13 calls
+  /api/export avg 614 ms, max 1200 ms, 4 calls
+  /api/orders avg 215 ms, max 650 ms, 5 calls
+  /health avg 3 ms, max 3 ms, 5 calls

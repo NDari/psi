@@ -1,0 +1,10 @@
+requests: 2
+skipped: 7
+bytes: 0
+status: 2xx=1 5xx=1
+top paths:
+      2 /api/items/7
+top hosts:
+      1 10.0.0.2
+      1 10.0.0.4
+busiest hour: 2026-10-10 14:00 UTC (2 requests)

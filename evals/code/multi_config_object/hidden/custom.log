@@ -1,0 +1,14 @@
+01/05/2024 09:00 INFO POST /api/search 80ms
+01/05/2024 09:01 INFO POST /health 3ms
+01/05/2024 09:02 INFO POST /api/users 45ms
+01/05/2024 09:03 INFO POST /api/export 45ms
+01/05/2024 09:04 ERROR POST /api/search 1200ms
+01/05/2024 09:05 INFO POST /api/users 650ms
+01/05/2024 09:06 INFO POST /api/orders 12ms
+01/05/2024 09:07 INFO POST /api/users 480ms
+01/05/2024 09:08 INFO POST /health 3ms
+01/05/2024 09:09 INFO POST /api/users 120ms
+01/05/2024 09:10 INFO POST /api/users 650ms
+01/05/2024 09:11 INFO POST /health 3ms
+01/05/2024 09:59 INFO GET /api/search?q=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy 30ms
+2024-05-01 10:00:00 INFO GET /api/users 5ms

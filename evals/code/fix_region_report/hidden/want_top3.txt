@@ -1,0 +1,4 @@
+East              322.25
+South             279.99
+North             160.50
+TOTAL             873.59

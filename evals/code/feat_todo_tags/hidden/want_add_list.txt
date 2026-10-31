@@ -1,0 +1,18 @@
+$ todo add Pay rent -p 1 --due fri --tag Home --tag money --tag HOME
+added 1
+[exit 0]
+$ todo add Water plants --tag home
+added 2
+[exit 0]
+$ todo add Read book
+added 3
+[exit 0]
+$ todo add File taxes --due 2026-10-01 --tag money --tag 2026-q4
+added 4
+[exit 0]
+$ todo list
+  1 [ ] (p1) Pay rent  due 2026-10-30 #home #money
+  2 [ ] (p2) Water plants #home
+  3 [ ] (p2) Read book
+  4 [ ] (p2) File taxes  due 2026-10-01 ! #money #2026-q4
+[exit 0]

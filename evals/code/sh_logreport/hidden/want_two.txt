@@ -1,0 +1,8 @@
+requests: 2
+unique ips: 1
+bytes: 12
+status:
+  200: 1
+  404: 1
+top paths:
+  2 /only

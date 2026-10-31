@@ -1,0 +1,6 @@
+from 01/05/2024 09:00 to 01/05/2024 09:11
+requests 12, errors 1, skipped lines 2
+slow requests (>= 100 ms): 5
+slowest paths:
+  /api/search avg 640 ms, max 1200 ms, 2 calls
+  /api/users avg 389 ms, max 650 ms, 5 calls
