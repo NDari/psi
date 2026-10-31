@@ -56,6 +56,18 @@ struct Cli {
     #[arg(long, value_enum)]
     network: Option<OnOff>,
 
+    /// Load an extension (a .lua file, a directory with init.lua, or a script tool directory).
+    #[arg(long = "extension", value_name = "PATH")]
+    extensions: Vec<PathBuf>,
+
+    /// Set an extension's flag.
+    #[arg(long = "ext-flag", value_name = "NAME=VALUE")]
+    ext_flags: Vec<String>,
+
+    /// Trust this project's .psi settings and extensions without asking (headless runs skip them otherwise).
+    #[arg(long)]
+    trust_project: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -99,6 +111,23 @@ enum Command {
     /// Serve a recorded run's model responses like llama-server (for tests).
     #[command(hide = true)]
     ReplayServer(ReplayServerArgs),
+    /// Extension author tools: lint and test an extension.
+    #[command(subcommand)]
+    Ext(ExtCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum ExtCommand {
+    /// Lint an extension: manifest, syntax, API use, a dry load, and
+    /// lua-language-server when installed.
+    Check { path: PathBuf },
+    /// Run an extension's *_test.lua files (a directory of extensions runs them all).
+    Test {
+        path: PathBuf,
+        /// Show what passing tests printed too.
+        #[arg(long)]
+        verbose: bool,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -234,12 +263,18 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Some(Command::Inspect(args)) => inspect_command(args),
         Some(Command::Replay(args)) => runtime()?.block_on(replay_command(args)),
         Some(Command::ReplayServer(args)) => replay_server_command(args),
+        Some(Command::Ext(cmd)) => ext_command(cmd),
         None => {
             let cwd = std::env::current_dir().context("reading the working directory")?;
-            let paths = SettingsPaths::discover(std::env::home_dir().as_deref(), &cwd);
+            let home = std::env::home_dir();
+            let interactive = cli.print.is_none();
+            let trusted = project_trusted(home.as_deref(), &cwd, interactive, cli.trust_project)?;
+            let mut paths = SettingsPaths::discover(home.as_deref(), &cwd);
+            if !trusted {
+                paths.project = None;
+            }
             let settings = config::load(&paths, flags_layer(&cli))?;
             tracing::debug!(%settings, "settings loaded");
-            let interactive = cli.print.is_none();
             let args = run_mode::RunArgs {
                 prompt: cli.print.unwrap_or_default(),
                 json: cli.json,
@@ -250,6 +285,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 settings,
                 allow: cli.allow,
                 mode_flag: cli.mode.is_some(),
+                extensions: cli.extensions,
+                ext_flags: cli.ext_flags,
+                project_trusted: trusted,
             };
             if interactive {
                 if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
@@ -260,6 +298,77 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 return interactive::run(args);
             }
             runtime()?.block_on(run_mode::run(args))
+        }
+    }
+}
+
+/// Whether this project's own .psi may load (§9.3): trusted before with the
+/// same files, or the user says yes now. Headless runs don't ask.
+fn project_trusted(home: Option<&Path>, cwd: &Path, interactive: bool, flag: bool) -> Result<bool> {
+    let Some(print) = psi_cli::trust::fingerprint(cwd) else {
+        return Ok(true);
+    };
+    let Some(home) = home else { return Ok(false) };
+    if psi_cli::trust::is_trusted(home, cwd, &print) {
+        return Ok(true);
+    }
+    let what = psi_cli::trust::describe(cwd);
+    if flag {
+        psi_cli::trust::trust(home, cwd, &print)?;
+        return Ok(true);
+    }
+    if !interactive || !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        eprintln!(
+            "psi: {what}; not loading them until you trust them (run psi here once, or pass --trust-project)"
+        );
+        return Ok(false);
+    }
+    eprint!("psi: {what}, new or changed since you last trusted it. Load it? [y/N] ");
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .context("reading the answer")?;
+    if matches!(answer.trim(), "y" | "Y" | "yes") {
+        psi_cli::trust::trust(home, cwd, &print)?;
+        return Ok(true);
+    }
+    eprintln!("psi: not loading {}", cwd.join(".psi").display());
+    Ok(false)
+}
+
+fn ext_command(cmd: ExtCommand) -> Result<ExitCode> {
+    match cmd {
+        ExtCommand::Check { path } => {
+            let report = psi_ext::check::check(&path);
+            print!("{}", report.render());
+            Ok(if report.errors() == 0 {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            })
+        }
+        ExtCommand::Test { path, verbose } => {
+            let runs = if path.is_dir() && !path.join("init.lua").is_file() {
+                psi_ext::testing::run_all(&path)
+            } else {
+                vec![(path.clone(), psi_ext::testing::run(&path))]
+            };
+            if runs.is_empty() {
+                bail!("{}: no extensions with *_test.lua files", path.display());
+            }
+            let mut ok = true;
+            for (p, r) in &runs {
+                if runs.len() > 1 {
+                    println!("== {}", p.display());
+                }
+                print!("{}", r.render(verbose));
+                ok &= r.passed();
+            }
+            Ok(if ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            })
         }
     }
 }

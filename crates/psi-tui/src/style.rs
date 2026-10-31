@@ -174,6 +174,45 @@ impl Style {
 
 /// Makes text safe to put on one terminal row: a tab becomes spaces, a newline a
 /// space, escape sequences and other control or bidi-override characters are removed.
+fn apply_sgr(mut st: Style, params: &str) -> Style {
+    const COLORS: [Color; 8] = [
+        Color::Black,
+        Color::Red,
+        Color::Green,
+        Color::Yellow,
+        Color::Blue,
+        Color::Magenta,
+        Color::Cyan,
+        Color::White,
+    ];
+    const BRIGHT: [Color; 8] = [
+        Color::BrightBlack,
+        Color::BrightRed,
+        Color::BrightGreen,
+        Color::BrightYellow,
+        Color::BrightBlue,
+        Color::BrightMagenta,
+        Color::BrightCyan,
+        Color::BrightWhite,
+    ];
+    for p in params.split(';') {
+        match p.parse::<u8>().unwrap_or(0) {
+            0 => st = Style::default(),
+            1 => st.bold = true,
+            2 => st.dim = true,
+            22 => {
+                st.bold = false;
+                st.dim = false;
+            }
+            39 => st.fg = None,
+            n @ 30..=37 => st.fg = Some(COLORS[(n - 30) as usize]),
+            n @ 90..=97 => st.fg = Some(BRIGHT[(n - 90) as usize]),
+            _ => {}
+        }
+    }
+    st
+}
+
 pub fn sanitize(s: &str) -> String {
     if !s.chars().any(needs_sanitizing) {
         return s.to_string();
@@ -278,6 +317,45 @@ impl From<String> for Line {
 }
 
 impl Line {
+    /// A line from text with SGR escapes (as `psi.style` makes them): the
+    /// 16 colors, bold and dim become styles; any other escape is dropped.
+    pub fn from_ansi(s: &str) -> Self {
+        let mut line = Line::new();
+        let mut style = Style::default();
+        let mut rest = s;
+        while let Some(i) = rest.find('\x1b') {
+            if i > 0 {
+                line.push(&rest[..i], style);
+            }
+            rest = &rest[i + 1..];
+            if let Some(osc) = rest.strip_prefix(']') {
+                // OSC: up to BEL or ESC \.
+                let end = osc.find(['\x07', '\x1b']).unwrap_or(osc.len());
+                let skip = if osc[end..].starts_with('\x1b') { 2 } else { 1 };
+                rest = osc.get(end + skip..).unwrap_or("");
+                continue;
+            }
+            let Some(body) = rest.strip_prefix('[') else {
+                // Another escape: drop the escape and its one character.
+                rest = rest
+                    .get(rest.chars().next().map_or(0, char::len_utf8)..)
+                    .unwrap_or("");
+                continue;
+            };
+            let end = body
+                .find(|c: char| c.is_ascii_alphabetic())
+                .unwrap_or(body.len());
+            if body[end..].starts_with('m') {
+                style = apply_sgr(style, &body[..end]);
+            }
+            rest = body.get(end + 1..).unwrap_or("");
+        }
+        if !rest.is_empty() {
+            line.push(rest, style);
+        }
+        line
+    }
+
     pub fn new() -> Self {
         Line::default()
     }
@@ -477,6 +555,19 @@ impl Line {
             out.write_all(b"\x1b[0m")?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod ansi_tests {
+    use super::*;
+
+    #[test]
+    fn sgr_becomes_styles_and_other_escapes_drop() {
+        let l = Line::from_ansi("a\x1b[31mred\x1b[39m \x1b[1mbold\x1b[22m\x1b]0;title\x07!");
+        assert_eq!(l.plain(), "ared bold!");
+        assert_eq!(l.spans[1].style.fg, Some(Color::Red));
+        assert!(l.spans.iter().any(|sp| sp.text == "bold" && sp.style.bold));
     }
 }
 

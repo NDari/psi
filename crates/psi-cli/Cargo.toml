@@ -20,6 +20,7 @@ psi-agent = { path = "../psi-agent" }
 psi-ai = { path = "../psi-ai" }
 psi-safety = { path = "../psi-safety" }
 psi-lab = { path = "../psi-lab" }
+psi-ext = { path = "../psi-ext" }
 psi-session = { path = "../psi-session" }
 psi-tools = { path = "../psi-tools" }
 psi-tui = { path = "../psi-tui" }

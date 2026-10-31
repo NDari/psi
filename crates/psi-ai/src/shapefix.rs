@@ -415,9 +415,19 @@ fn coerce(
                 args.remove(p.name);
                 continue;
             }
-            (ParamKind::String, Value::String(_)) | (ParamKind::Boolean, Value::Bool(_)) => {
+            (ParamKind::String, Value::String(_))
+            | (ParamKind::Boolean, Value::Bool(_))
+            | (ParamKind::Number, Value::Number(_))
+            | (ParamKind::Array, Value::Array(_))
+            | (ParamKind::Object, Value::Object(_)) => {
                 continue;
             }
+            (ParamKind::Number, Value::String(s)) => s
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .and_then(serde_json::Number::from_f64)
+                .map(Value::Number),
             (ParamKind::Integer, Value::Number(n)) if n.is_i64() || n.is_u64() => continue,
             // 10.0 is 10; 10.5 is a mistake.
             (ParamKind::Integer, Value::Number(n)) => n
@@ -440,6 +450,9 @@ fn coerce(
                 ParamKind::String => "a string",
                 ParamKind::Integer => "an integer",
                 ParamKind::Boolean => "true or false",
+                ParamKind::Number => "a number",
+                ParamKind::Array => "a list",
+                ParamKind::Object => "an object",
             };
             return Err(format!(
                 "{}: '{}' must be {want}. {}",

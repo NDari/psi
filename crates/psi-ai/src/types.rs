@@ -20,7 +20,8 @@ pub enum ChatMessage {
 }
 
 impl ChatMessage {
-    fn to_json(&self) -> Value {
+    /// The message in OpenAI chat format, as sent.
+    pub fn to_json(&self) -> Value {
         match self {
             ChatMessage::System(t) => json!({"role": "system", "content": t}),
             ChatMessage::User(t) => json!({"role": "user", "content": t}),

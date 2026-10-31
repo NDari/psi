@@ -44,8 +44,20 @@ fn layers_load_and_flag_overrides() {
         "{ \"network\": \"off\" }",
     )
     .unwrap();
+    // An untrusted project's .psi is skipped, and the run says so (§9.3).
     let out = psi()
-        .args(["--mode", "auto"])
+        .args(["--mode", "auto", "-p", "x", "--model", "none"])
+        .env("HOME", home.path())
+        .current_dir(project.path())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("not loading them until you trust them"),
+        "{stderr}"
+    );
+    let out = psi()
+        .args(["--mode", "auto", "--trust-project"])
         .env("HOME", home.path())
         .env("PSI_LOG", "debug")
         .current_dir(project.path())

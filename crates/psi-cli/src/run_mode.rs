@@ -13,9 +13,11 @@ use psi_ai::profile::{ContextWindow, ModelProfile};
 use psi_ai::{AiError, Client, WireLog};
 use psi_cli::config;
 use psi_cli::safety::{SafetySetup, SetupPaths, setup_with};
+use psi_ext::{ExtManager, Limits, Request as ExtRequest, Shared};
 use psi_session::SessionFile;
 use psi_tools::{ToolCtx, core_tools};
 use serde_json::Value;
+use tokio::sync::mpsc::UnboundedReceiver;
 
 /// Used when neither models.jsonc nor the server says.
 const FALLBACK_CONTEXT: u64 = 32_768;
@@ -37,6 +39,12 @@ pub struct RunArgs {
     pub allow: Vec<String>,
     /// The mode was given on the command line.
     pub mode_flag: bool,
+    /// `--extension` paths.
+    pub extensions: Vec<PathBuf>,
+    /// `--ext-flag name=value`.
+    pub ext_flags: Vec<String>,
+    /// The project's own .psi may load (§9.3).
+    pub project_trusted: bool,
 }
 
 /// Exit codes: 0 done, 1 failed, 3 a budget stopped the run, 130 aborted.
@@ -79,6 +87,53 @@ pub struct Prepared {
     pub warnings: Vec<String>,
     /// The safety setup, as recorded in `session_info`.
     pub info: Value,
+    /// What extensions ask of the UI.
+    pub ext_requests: UnboundedReceiver<(String, ExtRequest)>,
+    /// What `/reload` loads again.
+    pub ext_sources: ExtSources,
+}
+
+/// Where extensions come from, for loading and `/reload`.
+#[derive(Debug, Clone)]
+pub struct ExtSources {
+    pub home: Option<PathBuf>,
+    pub project: Option<PathBuf>,
+    pub extra: Vec<PathBuf>,
+}
+
+impl ExtSources {
+    pub fn find(&self) -> (Vec<psi_ext::Source>, Vec<String>) {
+        psi_ext::sources(self.home.as_deref(), self.project.as_deref(), &self.extra)
+    }
+}
+
+/// Starts the extensions; their load errors become warnings.
+async fn start_extensions(
+    sources: &ExtSources,
+    shared: Shared,
+    warnings: &mut Vec<String>,
+) -> (Arc<ExtManager>, UnboundedReceiver<(String, ExtRequest)>) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (found, errors) = sources.find();
+    warnings.extend(errors.into_iter().map(|e| format!("extension: {e}")));
+    if found.is_empty() {
+        return (ExtManager::empty(), rx);
+    }
+    let shared = Arc::new(std::sync::RwLock::new(shared));
+    let started = tokio::task::spawn_blocking(move || {
+        ExtManager::start(&found, shared, Limits::default(), tx)
+    })
+    .await;
+    match started {
+        Ok((m, errors)) => {
+            warnings.extend(errors.into_iter().map(|e| format!("extension: {e}")));
+            (m, rx)
+        }
+        Err(e) => {
+            warnings.push(format!("extensions: {e}"));
+            (ExtManager::empty(), rx)
+        }
+    }
 }
 
 /// The model check, the session, safety and the agent, for print, JSON
@@ -177,7 +232,40 @@ pub async fn prepare(args: &RunArgs, approver: Arc<dyn Approver>) -> Result<Prep
         home: home.clone(),
     };
     let info = safety.info.clone();
-    let agent = Agent::new(client, session, cfg, ctx).with_safety(safety);
+    let ext_sources = ExtSources {
+        home: home.clone(),
+        project: args.project_trusted.then(|| cwd.clone()),
+        extra: args.extensions.clone(),
+    };
+    let mut flags = std::collections::BTreeMap::new();
+    for f in &args.ext_flags {
+        let Some((k, v)) = f.split_once('=') else {
+            bail!("--ext-flag {f}: use NAME=VALUE");
+        };
+        flags.insert(k.to_owned(), v.to_owned());
+    }
+    let mode = if args.prompt.is_empty() && !args.json {
+        "interactive"
+    } else if args.json {
+        "json"
+    } else {
+        "print"
+    };
+    let shared = Shared {
+        cwd: cwd.display().to_string(),
+        mode: mode.into(),
+        has_ui: mode == "interactive",
+        flags,
+        ..Shared::default()
+    };
+    let mut warnings = warnings;
+    let (ext, ext_requests) = start_extensions(&ext_sources, shared, &mut warnings).await;
+    let agent = Agent::new(client, session, cfg, ctx)
+        .with_safety(safety)
+        .with_extensions(ext.clone());
+    let file = agent.session().path().display().to_string();
+    ext.notify("session_start", serde_json::json!({"session_file": file}))
+        .await;
     Ok(Prepared {
         agent,
         profile,
@@ -188,7 +276,43 @@ pub async fn prepare(args: &RunArgs, approver: Arc<dyn Approver>) -> Result<Prep
         sessions,
         warnings,
         info,
+        ext_requests,
+        ext_sources,
     })
+}
+
+/// Headless runs answer extension UI requests themselves (D-18): nothing
+/// prompts, notifications go to stderr, and messages queue for the run.
+pub fn answer_headless(mut rx: UnboundedReceiver<(String, ExtRequest)>, queues: psi_agent::Queues) {
+    tokio::spawn(async move {
+        while let Some((ext, r)) = rx.recv().await {
+            match r {
+                ExtRequest::Notify { message, level } => {
+                    eprintln!("psi: [{ext}] {level}: {message}")
+                }
+                ExtRequest::Confirm { reply, .. } => {
+                    let _ = reply.send(false);
+                }
+                ExtRequest::Select { reply, .. } | ExtRequest::Input { reply, .. } => {
+                    let _ = reply.send(None);
+                }
+                ExtRequest::Custom { reply, .. } => {
+                    let _ = reply.send(None);
+                }
+                ExtRequest::SendUserMessage { text, follow_up } => {
+                    let q = if follow_up {
+                        &queues.follow_up
+                    } else {
+                        &queues.steering
+                    };
+                    if let Ok(mut q) = q.lock() {
+                        q.push_back(text);
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
 }
 
 pub async fn run(args: RunArgs) -> Result<ExitCode> {
@@ -196,11 +320,13 @@ pub async fn run(args: RunArgs) -> Result<ExitCode> {
         mut agent,
         tmpdir,
         warnings,
+        ext_requests,
         ..
     } = prepare(&args, Arc::new(Headless)).await?;
     for w in &warnings {
         eprintln!("psi: {w}");
     }
+    answer_headless(ext_requests, agent.queues());
 
     let printer = if args.json {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -235,6 +361,13 @@ pub async fn run(args: RunArgs) -> Result<ExitCode> {
     };
     let out = agent.run(&prompt).await;
     let session_path = agent.session().path().to_owned();
+    let ext = agent.extensions().clone();
+    ext.notify(
+        "session_shutdown",
+        serde_json::json!({"session_file": session_path}),
+    )
+    .await;
+    ext.shutdown();
     drop(agent);
     if let Some(p) = printer {
         let _ = p.await;

@@ -13,7 +13,7 @@ use psi_ai::{
 use psi_safety::always_ask::Rules;
 use psi_safety::blocked::{blocked_message, blocked_path, dir_to_add};
 use psi_safety::checkpoint::Checkpoints;
-use psi_safety::policy::{Decision, FileFacts, Mode, Policy};
+use psi_safety::policy::{Decision, Mode, Policy};
 use psi_session::{Block, Entry, EntryBody, Role, SessionFile, StopReason, Usage};
 use psi_tools::{Tool, ToolCtx, ToolOutput};
 use serde_json::{Value, json};
@@ -24,8 +24,10 @@ use crate::approval::{
     Approval, ApprovalRequest, Approver, BlockedChoice, BlockedRequest, Headless,
 };
 use crate::events::AgentEvent;
+use crate::ext::{Callable, decide, invoke, schema_of, tool_runner};
 use crate::guards::{GuardAction, Guards};
 use crate::messages::{build_messages, plan_drop};
+use psi_ext::{AgentRequest, ExtManager, Gate, ToolInfo};
 
 /// Limits on one run (§5). Reaching one stops a headless run.
 #[derive(Debug, Clone)]
@@ -160,20 +162,27 @@ pub struct Agent {
     turn_changed: bool,
     /// The token that aborts the current run; a new one per run after an abort.
     abort: Arc<Mutex<CancellationToken>>,
+    ext: Arc<ExtManager>,
+    /// Extension tools and their schemas.
+    ext_tools: Vec<(ToolInfo, ToolSchema)>,
+    /// set_active_tools: the tool names offered, when an extension chose.
+    active: Option<Vec<String>>,
+    /// before_agent_start: text added to the system prompt for this run.
+    run_system: String,
 }
 
 /// A call after the shape-fix pipeline: the tool and its arguments, or the
 /// refusal sent back instead.
-type Planned = Result<(Tool, serde_json::Map<String, Value>), String>;
+type Planned = Result<(Callable, serde_json::Map<String, Value>), String>;
 
 /// A call's identity for the guards: the tool and its arguments, without
 /// the free-text intent.
 fn signature(call: &RawToolCall, p: &Planned) -> String {
     match p {
-        Ok((t, args)) => {
+        Ok((c, args)) => {
             let mut a = args.clone();
             a.remove("intent");
-            format!("{} {}", t.name(), Value::Object(a))
+            format!("{} {}", c.name(), Value::Object(a))
         }
         Err(_) => format!("{} {}", call.name, call.arguments),
     }
@@ -198,6 +207,10 @@ impl Agent {
             capture_failing: false,
             turn_changed: false,
             abort: Arc::new(Mutex::new(CancellationToken::new())),
+            ext: ExtManager::empty(),
+            ext_tools: Vec::new(),
+            active: None,
+            run_system: String::new(),
         }
         .with_abort_token()
     }
@@ -213,6 +226,104 @@ impl Agent {
     /// stays valid across runs: each run after an abort gets a fresh token.
     pub fn abort_handle(&self) -> Arc<Mutex<CancellationToken>> {
         self.abort.clone()
+    }
+
+    /// Extensions: their tools join the core ones and their handlers see
+    /// the run's events (§9.4).
+    pub fn with_extensions(mut self, ext: Arc<ExtManager>) -> Self {
+        self.ext = ext;
+        self.refresh_extensions();
+        self
+    }
+
+    pub fn extensions(&self) -> &Arc<ExtManager> {
+        &self.ext
+    }
+
+    /// After /reload: the extension tools again, and the runner for
+    /// `psi.execute_tool`.
+    pub fn refresh_extensions(&mut self) {
+        let core: Vec<&str> = self.cfg.tools.iter().map(|t| t.name()).collect();
+        self.ext_tools = self
+            .ext
+            .tools()
+            .into_iter()
+            .filter(|t| !core.contains(&t.name.as_str()))
+            .map(|t| {
+                let s = schema_of(&t);
+                (t, s)
+            })
+            .collect();
+        self.ext.set_tool_runner(tool_runner(
+            self.ctx.clone(),
+            self.safety.policy.clone(),
+            self.safety.approver.clone(),
+            self.cfg.tools.clone(),
+            Arc::downgrade(&self.ext),
+        ));
+        let names = self.tool_names();
+        self.ext.update_shared(|s| s.active_tools = names);
+    }
+
+    /// The tools offered to the model, core first.
+    fn tool_names(&self) -> Vec<String> {
+        let all = self
+            .cfg
+            .tools
+            .iter()
+            .map(|t| t.name().to_owned())
+            .chain(self.ext_tools.iter().map(|(t, _)| t.name.clone()));
+        match &self.active {
+            Some(a) => all.filter(|n| a.contains(n)).collect(),
+            None => all.collect(),
+        }
+    }
+
+    /// Every schema the shape fixes may resolve to, offered or not.
+    fn all_schemas(&self) -> Vec<ToolSchema> {
+        let mut v = self.schemas.clone();
+        v.extend(self.ext_tools.iter().map(|(_, s)| s.clone()));
+        v
+    }
+
+    /// What extensions asked for since the last step.
+    fn apply_ext_requests(&mut self) -> Result<(), String> {
+        for r in self.ext.take_agent_requests() {
+            match r {
+                AgentRequest::SendMessage { custom_type, text } => {
+                    self.add_context(&custom_type, &text)?
+                }
+                AgentRequest::AppendEntry { custom_type, data } => {
+                    self.record(EntryBody::Custom { custom_type, data })?;
+                }
+                AgentRequest::SetActiveTools(names) => {
+                    self.active = Some(names);
+                    let names = self.tool_names();
+                    self.ext.update_shared(|s| s.active_tools = names);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The branch's custom entries and the session file, for extensions.
+    fn share_session(&self) {
+        let entries: Vec<(String, Value)> = self
+            .session
+            .branch()
+            .iter()
+            .filter_map(|e| match &e.body {
+                EntryBody::Custom { custom_type, data } => {
+                    Some((custom_type.clone(), data.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        let file = self.session.path().display().to_string();
+        self.ext.update_shared(|s| {
+            s.entries = entries;
+            s.session_file = Some(file);
+        });
     }
 
     pub fn safety_mut(&mut self) -> &mut Safety {
@@ -285,6 +396,27 @@ impl Agent {
             .map_err(|e| format!("cannot write the session file {path}: {e}"))?
             .clone();
         self.emit(AgentEvent::Entry { entry: e.clone() });
+        let ev = match &e.body {
+            EntryBody::PolicyDecision {
+                tool_call_id,
+                decision,
+                reason,
+                ..
+            } => Some((
+                "policy_decision",
+                json!({"tool_call_id": tool_call_id, "decision": decision, "reason": reason}),
+            )),
+            EntryBody::GuardEvent { guard, message, .. } => {
+                Some(("guard_event", json!({"guard": guard, "message": message})))
+            }
+            _ => None,
+        };
+        if let Some((name, payload)) = ev
+            && self.ext.listens(name)
+        {
+            let ext = self.ext.clone();
+            tokio::spawn(async move { ext.notify(name, payload).await });
+        }
         Ok(e)
     }
 
@@ -320,6 +452,13 @@ impl Agent {
             Ok(s) => s,
             Err(e) => Stop::Failed(e),
         };
+        self.run_system.clear();
+        self.ext
+            .notify(
+                "agent_end",
+                json!({"stop": out.stop.name(), "text": out.text}),
+            )
+            .await;
         self.emit(AgentEvent::RunEnd {
             stop: out.stop.name().into(),
             reason: out.stop.reason().map(str::to_owned),
@@ -342,6 +481,14 @@ impl Agent {
         // At submit: this also captures the user's own edits (§7.2).
         self.capture("submit", None).await?;
         self.record(Self::user_message(input))?;
+        self.share_session();
+        self.apply_ext_requests()?;
+        let start_ev = json!({"prompt": input, "system": ""});
+        let r = self.ext.chain("before_agent_start", start_ev).await;
+        self.run_system = r["system"].as_str().unwrap_or("").to_owned();
+        self.ext
+            .notify("agent_start", json!({"prompt": input}))
+            .await;
         let start = Instant::now();
         let b = self.cfg.budgets.clone();
         let mut guards = Guards::new(b.max_consecutive_errors);
@@ -372,7 +519,9 @@ impl Agent {
             }
             out.turns += 1;
             let turn = out.turns;
+            self.apply_ext_requests()?;
             self.emit(AgentEvent::TurnStart { turn });
+            self.ext.notify("turn_start", json!({"turn": turn})).await;
 
             let resp = match self.request().await {
                 Ok(r) => r,
@@ -385,7 +534,7 @@ impl Agent {
                     if overflow_retries > 3 {
                         return Ok(Stop::Failed("the conversation still does not fit the context window after dropping old turns".into()));
                     }
-                    self.drop_old_turns(n_prompt_tokens, n_ctx)?;
+                    self.drop_old_turns(n_prompt_tokens, n_ctx).await?;
                     continue;
                 }
                 Err(AiError::Aborted) => {
@@ -414,9 +563,23 @@ impl Agent {
             overflow_retries = 0;
             out.text = resp.text.clone();
             self.record_assistant(&resp)?;
+            if self.ext.listens("message_end") {
+                let calls: Vec<Value> = resp
+                    .tool_calls
+                    .iter()
+                    .map(|c| json!({"id": c.id, "name": c.name, "arguments": c.arguments}))
+                    .collect();
+                self.ext
+                    .notify(
+                        "message_end",
+                        json!({"text": resp.text, "tool_calls": calls}),
+                    )
+                    .await;
+            }
 
             if resp.tool_calls.is_empty() {
                 self.emit(AgentEvent::TurnEnd { turn });
+                self.ext.notify("turn_end", json!({"turn": turn})).await;
                 let follow = Queues::take(&self.queues.follow_up);
                 if follow.is_empty() {
                     let cut_off = (resp.finish == FinishReason::Length)
@@ -462,6 +625,7 @@ impl Agent {
             let (n, pause) = self.run_calls(&resp, &mut guards).await?;
             out.tool_calls += n;
             self.emit(AgentEvent::TurnEnd { turn });
+            self.ext.notify("turn_end", json!({"turn": turn})).await;
             if self.ctx.cancel.is_cancelled() {
                 return Ok(Stop::Aborted);
             }
@@ -482,18 +646,51 @@ impl Agent {
     }
 
     async fn request(&mut self) -> Result<Response, AiError> {
-        let messages = build_messages(&self.cfg.system_prompt, &self.session.branch());
+        let system = if self.run_system.is_empty() {
+            self.cfg.system_prompt.clone()
+        } else {
+            format!("{}\n\n{}", self.cfg.system_prompt, self.run_system)
+        };
+        let messages = build_messages(&system, &self.session.branch());
+        let offered = self.tool_names();
+        let tools = self
+            .all_schemas()
+            .iter()
+            .filter(|s| offered.iter().any(|n| n == s.name))
+            .map(ToolSchema::to_openai)
+            .collect();
         let req = ChatRequest {
             model: self.cfg.model.clone(),
             messages,
-            tools: self.schemas.iter().map(ToolSchema::to_openai).collect(),
+            tools,
             max_tokens: self.cfg.max_output,
             enable_thinking: self.cfg.enable_thinking,
         };
+        if self.ext.listens("context") {
+            let m: Vec<Value> = req.messages.iter().map(|m| m.to_json()).collect();
+            self.ext.notify("context", json!({"messages": m})).await;
+        }
+        self.ext.notify("message_start", json!({"turn": 0})).await;
+        // Streamed text reaches extensions in order, through one task.
+        let updates = self.ext.listens("message_update").then(|| {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            let ext = self.ext.clone();
+            tokio::spawn(async move {
+                while let Some(t) = rx.recv().await {
+                    ext.notify("message_update", json!({"text": t})).await;
+                }
+            });
+            tx
+        });
         let events = self.events.clone();
         let mut on_delta = move |d: Delta| {
-            if let (Delta::Text(t), Some(tx)) = (d, &events) {
-                let _ = tx.send(AgentEvent::TextDelta { text: t });
+            if let Delta::Text(t) = d {
+                if let Some(u) = &updates {
+                    let _ = u.send(t.clone());
+                }
+                if let Some(tx) = &events {
+                    let _ = tx.send(AgentEvent::TextDelta { text: t });
+                }
             }
         };
         let mut retried = false;
@@ -583,10 +780,12 @@ impl Agent {
         let n = resp.tool_calls.len();
         let mut planned: Vec<(RawToolCall, Planned)> = Vec::new();
         for (i, call) in resp.tool_calls.iter().enumerate() {
+            let schemas = self.all_schemas();
+            let offered = self.tool_names();
             let fixed = fix_call(
                 call,
                 truncated && i + 1 == n,
-                &self.schemas,
+                &schemas,
                 &self.ctx.cwd,
                 self.cfg.home.as_deref(),
             );
@@ -598,8 +797,20 @@ impl Agent {
                             data: json!({"tool_call_id": call.id, "notes": f.notes}),
                         })?;
                     }
-                    match Tool::from_name(&f.name).filter(|t| self.cfg.tools.contains(t)) {
-                        Some(t) => Ok((t, f.args)),
+                    let core = Tool::from_name(&f.name)
+                        .filter(|t| self.cfg.tools.contains(t))
+                        .map(Callable::Core);
+                    let ext = || {
+                        self.ext_tools
+                            .iter()
+                            .find(|(t, _)| t.name == f.name)
+                            .map(|(t, _)| Callable::Ext(t.clone()))
+                    };
+                    match core
+                        .or_else(ext)
+                        .filter(|c| offered.iter().any(|n| n == c.name()))
+                    {
+                        Some(c) => Ok((c, f.args)),
                         None => Err(format!("There is no tool named '{}'.", f.name)),
                     }
                 }
@@ -608,37 +819,68 @@ impl Agent {
             planned.push((call.clone(), fixed));
         }
 
+        // tool_call: extensions may block a call or rewrite its arguments,
+        // before the policy sees it (§9.4); both are recorded.
+        if self.ext.listens("tool_call") {
+            for (call, p) in planned.iter_mut() {
+                let Ok((c, args)) = p else { continue };
+                let ev =
+                    json!({"id": call.id, "name": c.name(), "args": Value::Object(args.clone())});
+                match self.ext.gate("tool_call", ev).await {
+                    Gate::Block(reason) => {
+                        self.policy(&call.id, "blocked_by_extension", &reason)?;
+                        *p = Err(format!("Blocked: {reason}"));
+                    }
+                    Gate::Allow(ev) => {
+                        if let Some(Value::Object(new)) = ev.get("args")
+                            && new != args
+                        {
+                            self.record(EntryBody::PolicyDecision {
+                                tool_call_id: call.id.clone(),
+                                decision: "rewritten".into(),
+                                reason: "an extension rewrote the arguments".into(),
+                                rewrite: Some(Value::Object(new.clone())),
+                            })?;
+                            *args = new.clone();
+                        }
+                    }
+                }
+            }
+        }
+
         self.turn_changed = false;
         let mut outputs: Vec<Option<ToolOutput>> = vec![None; planned.len()];
         let mut i = 0;
         while i < planned.len() {
             // A batch of read-only calls, or one other call.
             let mut j = i + 1;
-            if matches!(&planned[i].1, Ok((t, _)) if t.read_only()) {
-                while j < planned.len() && matches!(&planned[j].1, Ok((t, _)) if t.read_only()) {
+            if matches!(&planned[i].1, Ok((c, _)) if c.read_only()) {
+                while j < planned.len() && matches!(&planned[j].1, Ok((c, _)) if c.read_only()) {
                     j += 1;
                 }
             }
             for (call, p) in &planned[i..j] {
-                if let Ok((t, args)) = p {
+                if let Ok((c, args)) = p {
                     self.emit(AgentEvent::ToolStart {
                         id: call.id.clone(),
-                        name: t.name().into(),
+                        name: c.name().into(),
                         args: Value::Object(args.clone()),
                     });
+                    let ev = json!({"id": call.id, "name": c.name(), "args": Value::Object(args.clone())});
+                    self.ext.notify("tool_execution_update", ev).await;
                 }
             }
-            if let (call, Ok((t, args))) = &planned[i]
-                && !t.read_only()
+            if let (call, Ok((c, args))) = &planned[i]
+                && !c.read_only()
             {
-                outputs[i] = Some(self.run_one(&call.id, *t, args, &resp.text).await?);
+                outputs[i] = Some(self.run_one(&call.id, c, args, &resp.text).await?);
                 i = j;
                 continue;
             }
-            let ctx = &self.ctx;
+            let (ctx, ext) = (&self.ctx, &*self.ext);
             let futs = planned[i..j].iter().map(|(_, p)| async move {
                 match p {
-                    Ok((t, args)) => t.run(args, ctx).await,
+                    Ok((c, args)) => invoke(c, args, ctx, ext).await,
                     Err(msg) => ToolOutput::err(msg.clone()),
                 }
             });
@@ -653,6 +895,21 @@ impl Agent {
             .into_iter()
             .map(|o| o.unwrap_or_else(|| ToolOutput::err("not run")))
             .collect();
+        // tool_result: extensions may change what the model sees.
+        if self.ext.listens("tool_result") {
+            for ((call, p), o) in planned.iter().zip(outputs.iter_mut()) {
+                let Ok((c, args)) = p else { continue };
+                let ev = json!({"id": call.id, "name": c.name(), "args": Value::Object(args.clone()),
+                                "text": o.text, "is_error": o.is_error});
+                let r = self.ext.chain("tool_result", ev).await;
+                if let Some(t) = r["text"].as_str() {
+                    o.text = t.to_owned();
+                }
+                if let Some(e) = r["is_error"].as_bool() {
+                    o.is_error = e;
+                }
+            }
+        }
         let mut pause = None;
         let mut fired = Vec::new();
         for ((call, p), o) in planned.iter().zip(outputs.iter_mut()) {
@@ -693,7 +950,7 @@ impl Agent {
 
         for ((call, p), o) in planned.iter().zip(outputs) {
             let name = match p {
-                Ok((t, _)) => t.name().to_owned(),
+                Ok((c, _)) => c.name().to_owned(),
                 Err(_) => call.name.clone(),
             };
             self.record(EntryBody::ToolResult {
@@ -717,37 +974,20 @@ impl Agent {
     async fn run_one(
         &mut self,
         id: &str,
-        tool: Tool,
+        callable: &Callable,
         args: &serde_json::Map<String, Value>,
         preceding: &str,
     ) -> Result<ToolOutput, String> {
-        let decision = match tool {
-            Tool::Bash => self
-                .safety
-                .policy
-                .bash(args.get("command").and_then(Value::as_str).unwrap_or("")),
-            Tool::Write | Tool::Edit => {
-                let path = tool.target(args, &self.ctx).unwrap_or_default();
-                let ignored = match self.safety.checkpoints.clone() {
-                    Some(cp) => {
-                        let p = path.clone();
-                        tokio::task::spawn_blocking(move || cp.is_ignored(&p))
-                            .await
-                            .unwrap_or(false)
-                    }
-                    None => false,
-                };
-                let facts = FileFacts {
-                    ignored,
-                    capture_failing: self.capture_failing,
-                };
-                let shown = args.get("path").and_then(Value::as_str).unwrap_or("");
-                self.safety
-                    .policy
-                    .file_write(tool.name(), &path, shown, facts)
-            }
-            _ => Decision::Allow,
-        };
+        let decision = decide(
+            &self.safety.policy,
+            callable,
+            args,
+            &self.ctx,
+            self.safety.checkpoints.clone(),
+            self.capture_failing,
+            &self.ext,
+        )
+        .await;
         match decision {
             Decision::Allow => {}
             Decision::Refuse(msg) => {
@@ -760,7 +1000,7 @@ impl Agent {
                 } else {
                     let req = ApprovalRequest {
                         tool_call_id: id.into(),
-                        tool: tool.name().into(),
+                        tool: callable.name().into(),
                         args: Value::Object(args.clone()),
                         intent: args
                             .get("intent")
@@ -789,8 +1029,8 @@ impl Agent {
             }
         }
 
-        let mut out = tool.run(args, &self.ctx).await;
-        if tool == Tool::Bash
+        let mut out = invoke(callable, args, &self.ctx, &self.ext).await;
+        if matches!(callable, Callable::Core(Tool::Bash))
             && out.is_error
             && let Some(sb) = self.ctx.sandbox.clone()
             && let Some(path) = blocked_path(&out.text, &sb.writable())
@@ -826,7 +1066,7 @@ impl Agent {
                 BlockedChoice::AddDir => match sb.add_dir(&dir, self.cfg.home.as_deref()) {
                     Ok(()) => {
                         self.policy(id, "dir_added", &dir.display().to_string())?;
-                        let again = tool.run(args, &self.ctx).await;
+                        let again = invoke(callable, args, &self.ctx, &self.ext).await;
                         out = ToolOutput {
                             text: format!(
                                 "[the user made {} writable for this session; it ran again]\n{}",
@@ -927,7 +1167,16 @@ impl Agent {
 
     /// Context overflow (§4.2): drop the oldest turns so the request fits,
     /// and record it.
-    fn drop_old_turns(&mut self, n_prompt: u64, n_ctx: u64) -> Result<(), String> {
+    async fn drop_old_turns(&mut self, n_prompt: u64, n_ctx: u64) -> Result<(), String> {
+        if let Gate::Block(why) = self
+            .ext
+            .gate("session_before_compact", json!({"tokens": n_prompt}))
+            .await
+        {
+            return Err(format!(
+                "the request ({n_prompt} tokens) does not fit the context window ({n_ctx} tokens), and an extension stopped dropping old turns: {why}"
+            ));
+        }
         let keep = plan_drop(&self.session.branch(), n_prompt, n_ctx, self.cfg.max_output)
             .ok_or_else(|| format!("the request ({n_prompt} tokens) does not fit the context window ({n_ctx} tokens), even with only the last turn"))?;
         self.record(EntryBody::Compaction {

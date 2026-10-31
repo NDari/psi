@@ -8,6 +8,24 @@ pub enum ParamKind {
     String,
     Integer,
     Boolean,
+    /// Extension tools only (core tools keep to the three above).
+    Number,
+    Array,
+    Object,
+}
+
+impl ParamKind {
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "string" => Self::String,
+            "integer" => Self::Integer,
+            "boolean" => Self::Boolean,
+            "number" => Self::Number,
+            "array" => Self::Array,
+            "object" => Self::Object,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +78,9 @@ impl ToolSchema {
                 ParamKind::String => "string",
                 ParamKind::Integer => "integer",
                 ParamKind::Boolean => "boolean",
+                ParamKind::Number => "number",
+                ParamKind::Array => "array",
+                ParamKind::Object => "object",
             };
             props.insert(
                 p.name.into(),

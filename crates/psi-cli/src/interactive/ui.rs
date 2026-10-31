@@ -10,10 +10,13 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use psi_agent::approval::{Approval, ApprovalRequest, BlockedChoice, BlockedRequest};
 use psi_agent::recovery::Change;
 use psi_agent::{AgentEvent, Queues, RunOutcome, Stop};
+use psi_ext::{ExtManager, Request as ExtRequest};
 use psi_safety::policy::Mode;
 use psi_session::{Entry, EntryBody, Role, text_of};
 use psi_tui::{Color, Editor, EditorEvent, Line, MdStream, Renderer, Style, render_block};
 use serde_json::Value;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -56,7 +59,36 @@ pub enum UiMsg {
         output: String,
         to_context: bool,
     },
+    /// An extension's request (§9.7).
+    Ext(String, ExtRequest),
 }
+
+/// An extension's dialog under the input box.
+enum ExtModal {
+    Confirm {
+        ext: String,
+        title: String,
+        message: String,
+        reply: oneshot::Sender<bool>,
+    },
+    Input {
+        ext: String,
+        title: String,
+        text: String,
+        reply: oneshot::Sender<Option<String>>,
+    },
+    /// A custom component, drawn by the extension each frame under a
+    /// deadline; the last frame stays when it is late.
+    Custom {
+        ext: String,
+        id: u64,
+        reply: oneshot::Sender<Option<Value>>,
+        last: Vec<Line>,
+    },
+}
+
+/// How long a frame waits for an extension's component or renderer.
+const EXT_FRAME: Duration = Duration::from_millis(8);
 
 /// The slash commands, for completion and /help.
 pub const COMMANDS: &[(&str, &str)] = &[
@@ -81,6 +113,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/new", "start a new session"),
     ("/resume", "continue an earlier session in this directory"),
     ("/inspect", "the session as an inspection timeline"),
+    ("/reload", "load the extensions again"),
     ("/quit", "leave psi"),
 ];
 
@@ -96,6 +129,13 @@ struct Card {
 }
 
 enum Picker {
+    /// An extension's ui.select.
+    Select {
+        title: String,
+        items: Vec<String>,
+        sel: usize,
+        reply: oneshot::Sender<Option<String>>,
+    },
     /// Pick an entry; `files` restores files too (/rewind).
     Goto {
         items: Vec<(String, String)>,
@@ -141,6 +181,12 @@ pub struct App<W: Write> {
     sessions_dir: PathBuf,
     label_text: Option<String>,
     debug: bool,
+    ext: Arc<ExtManager>,
+    rt: tokio::runtime::Handle,
+    ui_tx: UnboundedSender<UiMsg>,
+    ext_modal: Option<ExtModal>,
+    ext_status: BTreeMap<String, String>,
+    widgets: BTreeMap<String, Vec<Line>>,
 }
 
 pub struct AppParts<W: Write> {
@@ -154,12 +200,22 @@ pub struct AppParts<W: Write> {
     pub completer: Completer,
     pub sessions_dir: PathBuf,
     pub history: Vec<String>,
+    pub ext: Arc<ExtManager>,
+    pub rt: tokio::runtime::Handle,
+    pub ui_tx: UnboundedSender<UiMsg>,
 }
 
 impl<W: Write> App<W> {
     pub fn new(p: AppParts<W>) -> Self {
         let mut editor = Editor::new();
         editor.set_history(p.history);
+        let mut completer = p.completer;
+        completer.extra = p
+            .ext
+            .commands()
+            .into_iter()
+            .map(|(n, d, _)| (format!("/{n}"), d))
+            .collect();
         Self {
             r: Renderer::new(p.out, p.width, p.height),
             editor,
@@ -174,7 +230,7 @@ impl<W: Write> App<W> {
             pause: None,
             picker: None,
             pending_entries: None,
-            completer: p.completer,
+            completer,
             drop_sel: 0,
             shown: Vec::new(),
             calls_by_id: Vec::new(),
@@ -184,6 +240,12 @@ impl<W: Write> App<W> {
             quit: false,
             sessions_dir: p.sessions_dir,
             label_text: None,
+            ext: p.ext,
+            rt: p.rt,
+            ui_tx: p.ui_tx,
+            ext_modal: None,
+            ext_status: BTreeMap::new(),
+            widgets: BTreeMap::new(),
             debug: std::env::var_os("PSI_DEBUG_RENDER").is_some(),
         }
     }
@@ -284,6 +346,20 @@ impl<W: Write> App<W> {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         if self.card.is_some() {
             return self.card_key(k);
+        }
+        if self.ext_modal.is_some() {
+            return self.modal_key(k);
+        }
+        if let Some(name) = key_name(&k)
+            && self.ext.shortcuts().iter().any(|(s, _)| *s == name)
+        {
+            let (ext, tx) = (self.ext.clone(), self.ui_tx.clone());
+            self.rt.spawn(async move {
+                if let Err(e) = ext.run_shortcut(&name).await {
+                    let _ = tx.send(UiMsg::Error(e));
+                }
+            });
+            return;
         }
         if let Some((req, _)) = &self.blocked {
             let choice = match k.code {
@@ -456,12 +532,15 @@ impl<W: Write> App<W> {
         let (n, sel) = match p {
             Picker::Goto { items, sel, .. } => (items.len(), sel),
             Picker::Resume { items, sel } => (items.len(), sel),
+            Picker::Select { items, sel, .. } => (items.len(), sel),
         };
         match k.code {
             KeyCode::Up if n > 0 => *sel = (*sel + n - 1) % n,
             KeyCode::Down if n > 0 => *sel = (*sel + 1) % n,
-            KeyCode::Esc => self.picker = None,
-            KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => self.picker = None,
+            KeyCode::Esc => self.close_picker(),
+            KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.close_picker()
+            }
             KeyCode::Enter => match self.picker.take() {
                 Some(Picker::Goto { items, sel, files }) => {
                     if let Some((id, label)) = items.get(sel) {
@@ -477,9 +556,70 @@ impl<W: Write> App<W> {
                         self.send(Cmd::Resume(p.clone()));
                     }
                 }
+                Some(Picker::Select {
+                    items, sel, reply, ..
+                }) => {
+                    let _ = reply.send(items.get(sel).cloned());
+                }
                 None => {}
             },
             _ => {}
+        }
+    }
+
+    /// Esc on a picker: an extension's select answers nil.
+    fn close_picker(&mut self) {
+        if let Some(Picker::Select { reply, .. }) = self.picker.take() {
+            let _ = reply.send(None);
+        }
+    }
+
+    fn modal_key(&mut self, k: KeyEvent) {
+        let Some(m) = &mut self.ext_modal else { return };
+        match m {
+            ExtModal::Confirm { .. } => {
+                let yes = match k.code {
+                    KeyCode::Char('y') | KeyCode::Enter => true,
+                    KeyCode::Char('n') | KeyCode::Esc => false,
+                    _ => return,
+                };
+                if let Some(ExtModal::Confirm { reply, .. }) = self.ext_modal.take() {
+                    let _ = reply.send(yes);
+                }
+            }
+            ExtModal::Input { text, .. } => match k.code {
+                KeyCode::Enter | KeyCode::Esc => {
+                    if let Some(ExtModal::Input { text, reply, .. }) = self.ext_modal.take() {
+                        let _ = reply.send((k.code == KeyCode::Enter).then_some(text));
+                    }
+                }
+                KeyCode::Backspace => {
+                    text.pop();
+                }
+                KeyCode::Char(c) => text.push(c),
+                _ => {}
+            },
+            ExtModal::Custom { ext, id, .. } => {
+                let name = key_name(&k).or_else(|| match k.code {
+                    KeyCode::Char(c) => Some(c.to_string()),
+                    _ => None,
+                });
+                let Some(name) = name else { return };
+                let out = self
+                    .ext
+                    .component_input(ext, *id, &name, Duration::from_secs(1));
+                // A nil answer keeps it open; Esc with no answer closes it.
+                let close = match out {
+                    Some(v) => Some(Some(v)),
+                    None if k.code == KeyCode::Esc => Some(None),
+                    None => None,
+                };
+                if let Some(v) = close
+                    && let Some(ExtModal::Custom { reply, .. }) = self.ext_modal.take()
+                {
+                    let _ = reply.send(v);
+                }
+            }
         }
     }
 
@@ -597,6 +737,18 @@ impl<W: Write> App<W> {
                     l.push(d, dim());
                     lines.push(l);
                 }
+                for (c, d, ext) in self.ext.commands() {
+                    let mut l = Line::default();
+                    l.push(format!("  /{c:<9}"), Style::fg(Color::Cyan));
+                    l.push(format!("{d} ({ext})"), dim());
+                    lines.push(l);
+                }
+                for (k, d) in self.ext.shortcuts() {
+                    let mut l = Line::default();
+                    l.push(format!("  {k:<12}"), Style::fg(Color::Cyan));
+                    l.push(d, dim());
+                    lines.push(l);
+                }
                 for (k, d) in [
                     ("Enter", "send; while running, steer the current run"),
                     ("Alt+Enter", "queue a follow-up for when the run ends"),
@@ -680,6 +832,7 @@ impl<W: Write> App<W> {
                 self.send(Cmd::Entries);
             }
             "new" => self.send(Cmd::New),
+            "reload" => self.send(Cmd::Reload),
             "resume" => {
                 let mut files = psi_session::SessionFile::list(&self.sessions_dir);
                 files.reverse();
@@ -689,6 +842,15 @@ impl<W: Write> App<W> {
                 self.picker = Some(Picker::Resume {
                     items: files,
                     sel: 0,
+                });
+            }
+            other if self.ext.commands().iter().any(|(n, _, _)| n == other) => {
+                let (ext, tx) = (self.ext.clone(), self.ui_tx.clone());
+                let (name, args) = (other.to_owned(), arg.to_owned());
+                self.rt.spawn(async move {
+                    if let Err(e) = ext.run_command(&name, &args).await {
+                        let _ = tx.send(UiMsg::Error(format!("/{name}: {e}")));
+                    }
                 });
             }
             other => self.error(&format!("no command /{other}; /help lists them")),
@@ -773,6 +935,7 @@ impl<W: Write> App<W> {
                 self.info(&format!("  {what}: {}", path.display()));
                 let _ = self.replay(&entries);
             }
+            UiMsg::Ext(ext, req) => self.on_ext(ext, req),
             UiMsg::UserBash {
                 command,
                 output,
@@ -796,6 +959,99 @@ impl<W: Write> App<W> {
                     self.send(Cmd::Context(text));
                 }
             }
+        }
+    }
+
+    fn on_ext(&mut self, ext: String, req: ExtRequest) {
+        match req {
+            ExtRequest::Notify { message, level } => {
+                let style = match level.as_str() {
+                    "error" => Style::fg(Color::Red),
+                    "warning" => Style::fg(Color::Yellow),
+                    _ => dim(),
+                };
+                self.commit(vec![Line::styled(format!("  [{ext}] {message}"), style)]);
+            }
+            ExtRequest::Confirm {
+                title,
+                message,
+                reply,
+            } => {
+                self.flush_text();
+                self.ext_modal = Some(ExtModal::Confirm {
+                    ext,
+                    title,
+                    message,
+                    reply,
+                });
+                self.bell();
+            }
+            ExtRequest::Input { title, reply, .. } => {
+                self.flush_text();
+                self.ext_modal = Some(ExtModal::Input {
+                    ext,
+                    title,
+                    text: String::new(),
+                    reply,
+                });
+                self.bell();
+            }
+            ExtRequest::Select {
+                title,
+                options,
+                reply,
+            } => {
+                self.flush_text();
+                self.picker = Some(Picker::Select {
+                    title,
+                    items: options,
+                    sel: 0,
+                    reply,
+                });
+                self.bell();
+            }
+            ExtRequest::Custom { id, reply } => {
+                self.flush_text();
+                self.ext_modal = Some(ExtModal::Custom {
+                    ext,
+                    id,
+                    reply,
+                    last: Vec::new(),
+                });
+            }
+            ExtRequest::Status { key, text } => match text {
+                Some(t) => {
+                    self.ext_status.insert(key, t);
+                }
+                None => {
+                    self.ext_status.remove(&key);
+                }
+            },
+            ExtRequest::Widget { slot, lines } => match lines {
+                Some(l) => {
+                    self.widgets
+                        .insert(slot, l.iter().map(|x| Line::from_ansi(x)).collect());
+                }
+                None => {
+                    self.widgets.remove(&slot);
+                }
+            },
+            ExtRequest::SendUserMessage { text, follow_up } => {
+                if self.running.is_some() {
+                    let q = if follow_up {
+                        &self.queues.follow_up
+                    } else {
+                        &self.queues.steering
+                    };
+                    if let Ok(mut q) = q.lock() {
+                        q.push_back(text.clone());
+                    }
+                    self.queued.push_back((text, follow_up));
+                } else {
+                    self.submit(text, false);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -962,7 +1218,12 @@ impl<W: Write> App<W> {
                     is_error: *is_error,
                 });
                 let n = self.shown.len();
-                self.commit(call_block(n, tool_name, &args, &result, *is_error, w));
+                let call = serde_json::json!({"name": tool_name, "args": args,
+                                              "result": result, "is_error": is_error});
+                match self.ext.render_tool(tool_name, call, w, EXT_FRAME) {
+                    Some(lines) => self.commit(lines.iter().map(|l| Line::from_ansi(l)).collect()),
+                    None => self.commit(call_block(n, tool_name, &args, &result, *is_error, w)),
+                }
             }
             EntryBody::Message {
                 role: Role::User,
@@ -1045,7 +1306,14 @@ impl<W: Write> App<W> {
                 dim(),
             ));
         }
-        live.push(status_line(&self.status, w));
+        for lines in self.widgets.values() {
+            live.extend(lines.iter().map(|l| l.truncate(w)));
+        }
+        let mut status = status_line(&self.status, w);
+        for (k, v) in &self.ext_status {
+            status.push(format!("  {k}: {v}"), dim());
+        }
+        live.push(status.truncate(w));
         live.push(Line::styled("─".repeat(w), dim()));
         let top = live.len();
         let (rows, (cr, cc)) = self.editor.render(w, "› ", Style::default());
@@ -1082,6 +1350,36 @@ impl<W: Write> App<W> {
             live.push(Line::styled(format!("┌ paused: {reason}"), y));
             live.push(Line::styled("└ c continue · s stop the run", y));
             cursor = None;
+        } else if let Some(m) = &mut self.ext_modal {
+            let y = Style::fg(Color::Yellow);
+            match m {
+                ExtModal::Confirm {
+                    ext,
+                    title,
+                    message,
+                    ..
+                } => {
+                    live.push(Line::styled(format!("┌ {ext}: {title}"), y.bold()));
+                    for l in message.lines().take(6) {
+                        live.push(Line::styled(format!("│ {l}"), Style::default()));
+                    }
+                    live.push(Line::styled("└ y yes · n no", y));
+                }
+                ExtModal::Input {
+                    ext, title, text, ..
+                } => {
+                    live.push(Line::styled(format!("┌ {ext}: {title}"), y.bold()));
+                    live.push(Line::styled(format!("│ {text}▏"), Style::default()));
+                    live.push(Line::styled("└ Enter send · Esc cancel", y));
+                }
+                ExtModal::Custom { ext, id, last, .. } => {
+                    if let Some(lines) = self.ext.component_render(ext, *id, w, EXT_FRAME) {
+                        *last = lines.iter().map(|l| Line::from_ansi(l)).collect();
+                    }
+                    live.extend(last.iter().map(|l| l.truncate(w)));
+                }
+            }
+            cursor = None;
         } else if let Some(p) = &self.picker {
             let (items, sel): (Vec<String>, usize) = match p {
                 Picker::Goto { items, sel, .. } => {
@@ -1098,6 +1396,12 @@ impl<W: Write> App<W> {
                         .collect(),
                     *sel,
                 ),
+                Picker::Select {
+                    title, items, sel, ..
+                } => {
+                    live.push(Line::styled(format!("  {title}"), Style::default().bold()));
+                    (items.clone(), *sel)
+                }
             };
             live.extend(list(&items, sel, 10, w));
             live.push(Line::styled("  ↑↓ choose · Enter go · Esc cancel", dim()));
@@ -1121,6 +1425,36 @@ impl<W: Write> App<W> {
         }
         self.r.draw(&live, cursor)
     }
+}
+
+/// A key as extensions name it: "ctrl+t", "alt+x", "f5", "enter", "up".
+/// A plain character is typing, not a shortcut, so it has no name here.
+pub fn key_name(k: &KeyEvent) -> Option<String> {
+    let base = match k.code {
+        KeyCode::Char(c) => c.to_ascii_lowercase().to_string(),
+        KeyCode::F(n) => format!("f{n}"),
+        KeyCode::Enter => "enter".into(),
+        KeyCode::Esc => "escape".into(),
+        KeyCode::Up => "up".into(),
+        KeyCode::Down => "down".into(),
+        KeyCode::Left => "left".into(),
+        KeyCode::Right => "right".into(),
+        KeyCode::Tab => "tab".into(),
+        KeyCode::Backspace => "backspace".into(),
+        _ => return None,
+    };
+    let mut name = String::new();
+    if k.modifiers.contains(KeyModifiers::CONTROL) {
+        name.push_str("ctrl+");
+    }
+    if k.modifiers.contains(KeyModifiers::ALT) {
+        name.push_str("alt+");
+    }
+    if name.is_empty() && matches!(k.code, KeyCode::Char(_)) {
+        return None;
+    }
+    name.push_str(&base);
+    Some(name)
 }
 
 /// /stats: tokens, timing, guards and asks on the branch.

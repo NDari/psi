@@ -87,7 +87,7 @@ pub enum Tool {
     Grep,
     Find,
     Ls,
-    // TODO(phase-5): script tools (D-22) and extension tools.
+    // Extension and script tools are psi_agent::ext::Callable::Ext.
 }
 
 /// The tools a session offers: pi's four, plus grep/find/ls when enabled (D-17).

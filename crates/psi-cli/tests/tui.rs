@@ -56,6 +56,14 @@ fn pty() -> (OwnedFd, OwnedFd) {
 
 impl Tui {
     fn start(replies: Vec<Reply>, setup: impl FnOnce(&std::path::Path)) -> (Self, ReplayServer) {
+        Self::start_with(replies, setup, &[])
+    }
+
+    fn start_with(
+        replies: Vec<Reply>,
+        setup: impl FnOnce(&std::path::Path),
+        args: &[&str],
+    ) -> (Self, ReplayServer) {
         let server = ReplayServer::start(replies).unwrap();
         // Not inside the psi repository, whose target/ is gitignored.
         let tmp = tempfile::tempdir().unwrap();
@@ -70,6 +78,7 @@ impl Tui {
         let (master, slave) = pty();
         let started = Instant::now();
         let child = Command::new(env!("CARGO_BIN_EXE_psi"))
+            .args(args)
             .env("HOME", &home)
             .env("TERM", "xterm-256color")
             .env_remove("PSI_LOG")
@@ -420,5 +429,73 @@ fn rewind_picks_a_prompt_and_restores_its_files() {
     t.typ("\r");
     t.wait_for("rewind: ", SLOW);
     assert!(!t.project.join("a.txt").exists() && !t.project.join("b.txt").exists());
+    t.quit();
+}
+
+fn example(name: &str) -> String {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/extensions")
+        .join(name)
+        .display()
+        .to_string()
+}
+
+#[test]
+fn extension_dialogs_confirm_select_input_and_custom() {
+    let ext = example("ask-first");
+    let (mut t, _s) = Tui::start_with(vec![text("ok")], |_| {}, &["--extension", &ext]);
+    t.wait_for("› ", SLOW);
+    t.typ("/dep");
+    t.wait_for("/deploy", SLOW);
+    t.esc();
+    t.typ("loy\r");
+    t.wait_for("ask-first: Deploy?", SLOW);
+    t.typ("y");
+    t.wait_for("Where to?", SLOW);
+    t.typ("\r"); // staging
+    t.wait_for("A note for the log", SLOW);
+    t.typ("first\r");
+    t.wait_for("How fast?", SLOW);
+    t.send(b"\x1b[B"); // down to "all at once"
+    std::thread::sleep(Duration::from_millis(100));
+    t.typ("\r");
+    t.wait_for("[ask-first] deploying to staging (all at once)", SLOW);
+    t.quit();
+}
+
+/// Phase 5: a runaway Lua loop is killed without freezing the UI.
+#[test]
+fn a_runaway_extension_doesnt_freeze_the_ui() {
+    let (mut t, _s) = Tui::start_with(
+        vec![text("ok")],
+        |p| {
+            std::fs::write(
+                p.join("spin.lua"),
+                r#"return { name = "spin", version = "1", description = "spins",
+                  setup = function(psi)
+                    psi.register_command("spin", { description = "loop forever", handler = function()
+                      while true do pcall(function() while true do end end) end
+                    end })
+                  end }"#,
+            )
+            .unwrap();
+        },
+        &["--extension", "spin.lua"],
+    );
+    t.wait_for("› ", SLOW);
+    t.typ("/spin\r");
+    std::thread::sleep(Duration::from_millis(300));
+    // Typing still shows at once while the extension spins.
+    let start = Instant::now();
+    t.typ("still here");
+    t.wait_for("› still here", SLOW);
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        start.elapsed()
+    );
+    // The loop is stopped after the busy limit and the error is shown.
+    t.wait_for("ran too long without yielding", Duration::from_secs(15));
+    t.send(b"\x15");
     t.quit();
 }

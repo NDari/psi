@@ -1,0 +1,537 @@
+# The Lua extension API (psi-plan.md §9.4, §9.5, D-14). Every Lua-visible
+# function, event and type is defined here once; build.rs generates the
+# ExtHost trait, the mlua glue, the LuaLS stubs (docs/api/psi.lua), the
+# reference (docs/api.md) and the signature table for `psi ext check`.
+#
+# Type grammar: string | integer | number | boolean | table | any | nil
+#   | T? (optional) | T[] (list) | {K: V} (map) | "a"|"b" (literal union)
+#   | function(name: T, ...): R | a named [[type]].
+# A function name with a dot lives in a subtable: "ui.confirm" is psi.ui.confirm.
+# Handlers get (ev, ctx); ctx.ui is psi.ui, ctx.execute_tool is psi.execute_tool.
+
+# ---- Registration -----------------------------------------------------------
+
+[[function]]
+name = "on"
+doc = "Subscribe to an event. Gate and chain events use the handler's return value (see the event); errors are reported and never crash psi, and a failing `tool_call` handler blocks the call."
+params = [
+  { name = "event", type = "EventName" },
+  { name = "handler", type = "function(ev: table, ctx: Context): any" },
+]
+
+[[function]]
+name = "register_tool"
+doc = "Add a tool the model can call. It goes through the same policy as built-in tools: `always_ask` makes every call ask."
+params = [{ name = "spec", type = "ToolSpec" }]
+
+[[function]]
+name = "register_command"
+doc = "Add a slash command (`/name args`) to the interactive mode."
+params = [
+  { name = "name", type = "string" },
+  { name = "spec", type = "CommandSpec" },
+]
+
+[[function]]
+name = "register_shortcut"
+doc = "Bind a key (like \"ctrl+t\") in the interactive mode."
+params = [
+  { name = "key", type = "string" },
+  { name = "spec", type = "ShortcutSpec" },
+]
+
+[[function]]
+name = "register_flag"
+doc = "Declare a flag set on the command line with `--ext-flag name=value`."
+params = [
+  { name = "name", type = "string" },
+  { name = "spec", type = "FlagSpec" },
+]
+
+[[function]]
+name = "get_flag"
+doc = "A flag's value: the command line's, else its default."
+params = [{ name = "name", type = "string" }]
+returns = "any"
+
+[[function]]
+name = "register_tool_renderer"
+doc = "Draw a tool's committed call yourself: return the lines (style them with psi.style)."
+params = [
+  { name = "tool", type = "string" },
+  { name = "render", type = "function(call: ToolRenderCall, width: integer): string[]" },
+]
+
+# ---- Conversation -----------------------------------------------------------
+
+[[function]]
+name = "send_user_message"
+doc = "Send a message as the user. While the agent runs it steers the run, or waits for the run to end with `deliver = \"follow_up\"`; otherwise it starts a run."
+params = [
+  { name = "text", type = "string" },
+  { name = "opts", type = "SendOptions?" },
+]
+
+[[function]]
+name = "send_message"
+doc = "Add a message from the extension that the model sees with the next request (a `custom_message` entry)."
+params = [
+  { name = "custom_type", type = "string" },
+  { name = "text", type = "string" },
+]
+
+[[function]]
+name = "append_entry"
+doc = "Store data in the session (a `custom` entry, never sent to the model)."
+params = [
+  { name = "custom_type", type = "string" },
+  { name = "data", type = "any" },
+]
+
+[[function]]
+name = "entries"
+doc = "The current branch's entries of one custom type, oldest first, for state kept with append_entry."
+params = [{ name = "custom_type", type = "string" }]
+returns = "table[]"
+
+[[function]]
+name = "set_active_tools"
+doc = "Choose which tools the model is offered from the next request on."
+params = [{ name = "names", type = "string[]" }]
+
+[[function]]
+name = "get_active_tools"
+doc = "The names of the tools the model is offered."
+returns = "string[]"
+
+[[function]]
+name = "execute_tool"
+doc = "Run a tool as the model would, through the policy (it may ask the user). Also `ctx.execute_tool`."
+async = true
+params = [
+  { name = "name", type = "string" },
+  { name = "args", type = "table" },
+]
+returns = "ToolResult"
+
+# ---- Events between extensions ----------------------------------------------
+
+[[function]]
+name = "events.emit"
+doc = "Send an event to every extension's events.on handlers for that name."
+params = [
+  { name = "name", type = "string" },
+  { name = "data", type = "any" },
+]
+
+[[function]]
+name = "events.on"
+doc = "Listen to events.emit calls from any extension."
+params = [
+  { name = "name", type = "string" },
+  { name = "handler", type = "function(data: any)" },
+]
+
+# ---- UI (also ctx.ui) -------------------------------------------------------
+
+[[function]]
+name = "ui.notify"
+doc = "Show a one-line message. In headless runs it goes to the log."
+params = [
+  { name = "message", type = "string" },
+  { name = "level", type = "\"info\"|\"warning\"|\"error\"?" },
+]
+
+[[function]]
+name = "ui.confirm"
+doc = "Ask the user a yes/no question. Returns false in headless modes."
+async = true
+params = [
+  { name = "title", type = "string" },
+  { name = "message", type = "string" },
+]
+returns = "boolean"
+
+[[function]]
+name = "ui.select"
+doc = "Let the user pick one option. Returns nil if they cancel, and in headless modes."
+async = true
+params = [
+  { name = "title", type = "string" },
+  { name = "options", type = "string[]" },
+]
+returns = "string?"
+
+[[function]]
+name = "ui.input"
+doc = "Ask the user for a line of text. Returns nil if they cancel, and in headless modes."
+async = true
+params = [
+  { name = "title", type = "string" },
+  { name = "placeholder", type = "string?" },
+]
+returns = "string?"
+
+[[function]]
+name = "ui.status"
+doc = "Set (or clear, with nil) a short item on the status line."
+params = [
+  { name = "key", type = "string" },
+  { name = "text", type = "string?" },
+]
+
+[[function]]
+name = "ui.widget"
+doc = "Show lines above the input box under a slot name (nil removes them)."
+params = [
+  { name = "slot", type = "string" },
+  { name = "lines", type = "string[]?" },
+]
+
+[[function]]
+name = "ui.custom"
+doc = "Show a component under the input box until its handle_input returns a value, which ui.custom returns. Returns nil in headless modes."
+async = true
+params = [{ name = "component", type = "Component" }]
+returns = "any"
+
+# ---- Styling and logs -------------------------------------------------------
+
+[[function]]
+name = "style.color"
+doc = "Text in one of the terminal's 16 colors: black, red, green, yellow, blue, magenta, cyan, white, and bright_<color>."
+params = [
+  { name = "color", type = "string" },
+  { name = "text", type = "string" },
+]
+returns = "string"
+
+[[function]]
+name = "style.bold"
+doc = "Bold text."
+params = [{ name = "text", type = "string" }]
+returns = "string"
+
+[[function]]
+name = "style.dim"
+doc = "Dimmed text."
+params = [{ name = "text", type = "string" }]
+returns = "string"
+
+[[function]]
+name = "log"
+doc = "Write to psi's log (PSI_LOG=info shows it); `psi ext test` prints it."
+params = [{ name = "message", type = "string" }]
+
+# ---- Events -----------------------------------------------------------------
+# kind: notify (results ignored), chain (each handler may return a new
+# value for the next), gate (any handler can block; a failing one blocks).
+
+[[event]]
+name = "session_start"
+kind = "notify"
+doc = "The session is open (also after /new, /resume and /reload)."
+payload = "SessionEvent"
+
+[[event]]
+name = "session_shutdown"
+kind = "notify"
+doc = "psi is closing the session."
+payload = "SessionEvent"
+
+[[event]]
+name = "session_before_compact"
+kind = "gate"
+doc = "Old turns are about to be dropped to fit the context window. Return { cancel = true } to stop it."
+payload = "CompactEvent"
+result = "GateResult?"
+
+[[event]]
+name = "input"
+kind = "chain"
+doc = "The user submitted text. Return { text = ... } to change it, or { handled = true } to consume it."
+payload = "InputEvent"
+result = "InputResult?"
+
+[[event]]
+name = "before_agent_start"
+kind = "chain"
+doc = "A run is about to start. Return { system = ... } to add text to the end of the system prompt for this run."
+payload = "AgentStartEvent"
+result = "AgentStartResult?"
+
+[[event]]
+name = "agent_start"
+kind = "notify"
+doc = "A run started."
+payload = "AgentStartEvent"
+
+[[event]]
+name = "agent_end"
+kind = "notify"
+doc = "A run ended."
+payload = "AgentEndEvent"
+
+[[event]]
+name = "turn_start"
+kind = "notify"
+doc = "A model request is about to be sent."
+payload = "TurnEvent"
+
+[[event]]
+name = "turn_end"
+kind = "notify"
+doc = "A turn (the request and its tool calls) finished."
+payload = "TurnEvent"
+
+[[event]]
+name = "context"
+kind = "notify"
+doc = "The messages about to be sent to the model (read-only)."
+payload = "ContextEvent"
+
+[[event]]
+name = "message_start"
+kind = "notify"
+doc = "The model started answering."
+payload = "TurnEvent"
+
+[[event]]
+name = "message_update"
+kind = "notify"
+doc = "Streamed answer text."
+payload = "MessageUpdateEvent"
+
+[[event]]
+name = "message_end"
+kind = "notify"
+doc = "The model's answer is complete."
+payload = "MessageEndEvent"
+
+[[event]]
+name = "tool_call"
+kind = "gate"
+doc = "A tool call is about to be checked and run. Return { block = true, reason = ... } to refuse it, or { args = {...} } to rewrite its arguments (the rewrite is checked by the policy and recorded)."
+payload = "ToolCallEvent"
+result = "ToolCallResult?"
+
+[[event]]
+name = "tool_execution_update"
+kind = "notify"
+doc = "A tool call is running."
+payload = "ToolCallEvent"
+
+[[event]]
+name = "tool_result"
+kind = "chain"
+doc = "A tool call finished. Return { text = ..., is_error = ... } to change what the model sees."
+payload = "ToolResultEvent"
+result = "ToolResult?"
+
+[[event]]
+name = "policy_decision"
+kind = "notify"
+doc = "The policy asked, refused, or the user answered."
+payload = "PolicyEvent"
+
+[[event]]
+name = "guard_event"
+kind = "notify"
+doc = "A guard fired (a loop, an error streak, a failing checkpoint)."
+payload = "GuardEvent"
+
+# ---- Types ------------------------------------------------------------------
+
+[[type]]
+name = "Context"
+doc = "The second argument of every handler."
+fields = [
+  { name = "cwd", type = "string", doc = "The working directory" },
+  { name = "mode", type = "\"interactive\"|\"print\"|\"json\"|\"test\"", doc = "How psi runs" },
+  { name = "has_ui", type = "boolean", doc = "Whether a person can answer ui calls" },
+  { name = "session_file", type = "string?", doc = "The session file" },
+  { name = "ui", type = "table", doc = "psi.ui" },
+  { name = "execute_tool", type = "function(name: string, args: table): ToolResult", doc = "psi.execute_tool" },
+]
+
+[[type]]
+name = "ToolSpec"
+fields = [
+  { name = "name", type = "string", doc = "Lowercase, with _ between words" },
+  { name = "description", type = "string", doc = "What it does and when to use it, for the model" },
+  { name = "params", type = "{string: ParamSpec}", doc = "The arguments" },
+  { name = "required", type = "string[]?", doc = "Required argument names (default: all)" },
+  { name = "annotations", type = "ToolAnnotations?", doc = "" },
+  { name = "always_ask", type = "boolean?", doc = "Every call asks the user" },
+  { name = "execute", type = "function(args: table, ctx: Context): string|ToolResult", doc = "Runs a call; an error becomes a failed result" },
+]
+
+[[type]]
+name = "ParamSpec"
+fields = [
+  { name = "type", type = "\"string\"|\"integer\"|\"number\"|\"boolean\"|\"array\"|\"object\"", doc = "" },
+  { name = "description", type = "string", doc = "" },
+]
+
+[[type]]
+name = "ToolAnnotations"
+fields = [
+  { name = "read_only", type = "boolean?", doc = "Only reads: may run in parallel, and no checkpoint follows" },
+  { name = "destructive", type = "boolean?", doc = "" },
+  { name = "open_world", type = "boolean?", doc = "Reaches outside the workspace (network, other systems)" },
+]
+
+[[type]]
+name = "ToolResult"
+fields = [
+  { name = "text", type = "string", doc = "" },
+  { name = "is_error", type = "boolean?", doc = "" },
+]
+
+[[type]]
+name = "CommandSpec"
+fields = [
+  { name = "description", type = "string", doc = "Shown in /help and completion" },
+  { name = "handler", type = "function(args: string, ctx: Context)", doc = "" },
+]
+
+[[type]]
+name = "ShortcutSpec"
+fields = [
+  { name = "description", type = "string", doc = "" },
+  { name = "handler", type = "function(ctx: Context)", doc = "" },
+]
+
+[[type]]
+name = "FlagSpec"
+fields = [
+  { name = "description", type = "string", doc = "" },
+  { name = "default", type = "any", doc = "" },
+]
+
+[[type]]
+name = "SendOptions"
+fields = [
+  { name = "deliver", type = "\"steer\"|\"follow_up\"?", doc = "While a run is going (default steer)" },
+]
+
+[[type]]
+name = "ToolRenderCall"
+fields = [
+  { name = "name", type = "string", doc = "" },
+  { name = "args", type = "table", doc = "" },
+  { name = "result", type = "string", doc = "" },
+  { name = "is_error", type = "boolean", doc = "" },
+]
+
+[[type]]
+name = "Component"
+doc = "A custom UI component (pi-tui parity), drawn under the input box under a deadline."
+fields = [
+  { name = "render", type = "function(width: integer): string[]", doc = "The lines to show" },
+  { name = "handle_input", type = "function(key: string): any", doc = "A key like \"enter\", \"up\", \"a\"; a non-nil return closes it" },
+  { name = "dispose", type = "function()?", doc = "" },
+]
+
+[[type]]
+name = "SessionEvent"
+fields = [{ name = "session_file", type = "string?", doc = "" }]
+
+[[type]]
+name = "CompactEvent"
+fields = [{ name = "tokens", type = "integer", doc = "The request size that overflowed" }]
+
+[[type]]
+name = "GateResult"
+fields = [{ name = "cancel", type = "boolean?", doc = "" }]
+
+[[type]]
+name = "InputEvent"
+fields = [{ name = "text", type = "string", doc = "" }]
+
+[[type]]
+name = "InputResult"
+fields = [
+  { name = "text", type = "string?", doc = "" },
+  { name = "handled", type = "boolean?", doc = "" },
+]
+
+[[type]]
+name = "AgentStartEvent"
+fields = [{ name = "prompt", type = "string", doc = "" }]
+
+[[type]]
+name = "AgentStartResult"
+fields = [{ name = "system", type = "string?", doc = "Appended to the system prompt for this run" }]
+
+[[type]]
+name = "AgentEndEvent"
+fields = [
+  { name = "stop", type = "string", doc = "done, budget, guard, aborted or failed" },
+  { name = "text", type = "string", doc = "The last answer" },
+]
+
+[[type]]
+name = "TurnEvent"
+fields = [{ name = "turn", type = "integer", doc = "" }]
+
+[[type]]
+name = "ContextEvent"
+fields = [{ name = "messages", type = "table[]", doc = "In OpenAI chat format" }]
+
+[[type]]
+name = "MessageUpdateEvent"
+fields = [{ name = "text", type = "string", doc = "The new text" }]
+
+[[type]]
+name = "MessageEndEvent"
+fields = [
+  { name = "text", type = "string", doc = "" },
+  { name = "tool_calls", type = "table[]", doc = "" },
+]
+
+[[type]]
+name = "ToolCallEvent"
+fields = [
+  { name = "id", type = "string", doc = "" },
+  { name = "name", type = "string", doc = "" },
+  { name = "args", type = "table", doc = "" },
+]
+
+[[type]]
+name = "ToolCallResult"
+fields = [
+  { name = "block", type = "boolean?", doc = "" },
+  { name = "reason", type = "string?", doc = "Told to the model when blocked" },
+  { name = "args", type = "table?", doc = "Replacement arguments" },
+]
+
+[[type]]
+name = "ToolResultEvent"
+fields = [
+  { name = "id", type = "string", doc = "" },
+  { name = "name", type = "string", doc = "" },
+  { name = "args", type = "table", doc = "" },
+  { name = "text", type = "string", doc = "" },
+  { name = "is_error", type = "boolean", doc = "" },
+]
+
+[[type]]
+name = "PolicyEvent"
+fields = [
+  { name = "tool_call_id", type = "string", doc = "" },
+  { name = "decision", type = "string", doc = "" },
+  { name = "reason", type = "string", doc = "" },
+]
+
+[[type]]
+name = "GuardEvent"
+fields = [
+  { name = "guard", type = "string", doc = "" },
+  { name = "message", type = "string", doc = "" },
+]
+
+[[type]]
+name = "EventName"
+doc = "The name of an event."
+alias = "events"

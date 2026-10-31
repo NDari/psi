@@ -25,7 +25,7 @@ impl SettingsPaths {
     pub fn discover(home: Option<&Path>, project: &Path) -> Self {
         Self {
             user: home.map(|h| h.join(".psi").join("settings.jsonc")),
-            // TODO(phase-5): load the project layer only once the project is trusted (§9.3).
+            // The caller drops this layer until the project is trusted (§9.3).
             project: Some(project.join(".psi").join("settings.jsonc")),
         }
     }

@@ -1,0 +1,7 @@
+{
+  "name": "word_count",
+  "description": "Count the words in a file",
+  "params": { "path": { "type": "string", "description": "The file, relative to the working directory" } },
+  "read_only": true,
+  "command": "run.py"
+}

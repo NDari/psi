@@ -35,6 +35,8 @@ pub enum Cmd {
     Resume(PathBuf),
     /// The whole session, for /tree, /rewind, /stats and /inspect.
     Entries,
+    /// Load the extensions again.
+    Reload,
 }
 
 /// Opens the checkpoints for a session file.
@@ -46,6 +48,7 @@ pub struct Worker {
     pub cwd: PathBuf,
     /// Opens the checkpoints for a session file (a new one for /new and /resume).
     pub open_checkpoints: OpenCheckpoints,
+    pub ext_sources: crate::run_mode::ExtSources,
 }
 
 impl Worker {
@@ -84,6 +87,7 @@ impl Worker {
                     Ok(s) => self.switch(s, "resumed"),
                     Err(e) => UiMsg::Error(format!("cannot open {}: {e}", p.display())),
                 },
+                Cmd::Reload => self.reload().await,
                 Cmd::Entries => UiMsg::Entries {
                     entries: self.agent.session().entries().to_vec(),
                     leaf: self.agent.session().leaf().map(str::to_owned),
@@ -92,6 +96,26 @@ impl Worker {
             if ui.send(reply).is_err() {
                 break;
             }
+        }
+    }
+
+    async fn reload(&mut self) -> UiMsg {
+        let ext = self.agent.extensions().clone();
+        let (found, mut errors) = self.ext_sources.find();
+        let ext2 = ext.clone();
+        match tokio::task::spawn_blocking(move || ext2.reload(&found)).await {
+            Ok(e) => errors.extend(e),
+            Err(e) => errors.push(e.to_string()),
+        }
+        self.agent.refresh_extensions();
+        let file = self.agent.session().path().display().to_string();
+        ext.notify("session_start", serde_json::json!({"session_file": file}))
+            .await;
+        let n = ext.actors().len() + ext.scripts().len();
+        if errors.is_empty() {
+            UiMsg::Info(format!("reloaded {n} extension(s)"))
+        } else {
+            UiMsg::Error(format!("reloaded {n} extension(s); {}", errors.join("; ")))
         }
     }
 

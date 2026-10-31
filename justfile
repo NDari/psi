@@ -27,6 +27,17 @@ check:
 eval-smoke:
     cargo test -q -p psi-cli --test eval_smoke -- --ignored --test-threads 1
 
+# Regenerate docs/api.md and docs/api/psi.lua from the extension API definition
+api-docs:
+    env PSI_BLESS=1 cargo test -q -p psi-ext-api --test drift
+
+# Lint an extension, or run its *_test.lua files
+ext-check path:
+    cargo run -q -- ext check {{path}}
+
+ext-test path="examples/extensions":
+    cargo run -q -- ext test {{path}}
+
 # Format the code
 fmt:
     cargo fmt --all

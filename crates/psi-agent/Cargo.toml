@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 futures-util.workspace = true
 psi-ai = { path = "../psi-ai" }
+psi-ext = { path = "../psi-ext" }
 psi-safety = { path = "../psi-safety" }
 psi-session = { path = "../psi-session" }
 psi-tools = { path = "../psi-tools" }

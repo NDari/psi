@@ -82,7 +82,18 @@ pub fn run(args: RunArgs) -> Result<ExitCode> {
         sessions,
         warnings,
         info,
+        mut ext_requests,
+        ext_sources,
     } = rt.block_on(prepare(&args, approver))?;
+    let ext = agent.extensions().clone();
+    let fwd = ui_tx.clone();
+    rt.spawn(async move {
+        while let Some((name, r)) = ext_requests.recv().await {
+            if fwd.send(ui::UiMsg::Ext(name, r)).is_err() {
+                break;
+            }
+        }
+    });
 
     let (ev_tx, ev_rx) = tokio::sync::mpsc::unbounded_channel();
     let agent = agent.with_events(ev_tx);
@@ -106,8 +117,9 @@ pub fn run(args: RunArgs) -> Result<ExitCode> {
         sessions_root: sessions.clone(),
         cwd: cwd.clone(),
         open_checkpoints,
+        ext_sources,
     };
-    rt.spawn(worker.run(cmd_rx, ui_tx));
+    rt.spawn(worker.run(cmd_rx, ui_tx.clone()));
 
     let history_path = home.as_deref().map(|h| h.join(".psi/history"));
     let history = history_path
@@ -151,6 +163,9 @@ pub fn run(args: RunArgs) -> Result<ExitCode> {
         completer: Completer::new(&cwd),
         sessions_dir: sessions.join(psi_session::cwd_slug(&cwd)),
         history,
+        ext: ext.clone(),
+        rt: rt.handle().clone(),
+        ui_tx,
     });
     let mut banner = vec![Line::styled(
         format!(
@@ -173,6 +188,12 @@ pub fn run(args: RunArgs) -> Result<ExitCode> {
         save_history(p, &app.history());
     }
     drop(app);
+    let file = session_path.display().to_string();
+    rt.block_on(ext.notify(
+        "session_shutdown",
+        serde_json::json!({"session_file": file}),
+    ));
+    ext.shutdown();
     rt.shutdown_timeout(std::time::Duration::from_millis(500));
     let _ = std::fs::remove_dir_all(&tmpdir);
     result.context("the terminal failed")?;

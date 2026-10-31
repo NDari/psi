@@ -4,6 +4,7 @@
 
 pub mod approval;
 mod events;
+pub mod ext;
 pub mod guards;
 mod messages;
 pub mod prompt;
@@ -13,5 +14,3 @@ mod run;
 pub use events::AgentEvent;
 pub use messages::build_messages;
 pub use run::{Agent, AgentConfig, Budgets, Queues, RunOutcome, Safety, Stop};
-
-// TODO(phase-5): extension events (§9.4) from the same points as AgentEvent.

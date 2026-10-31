@@ -150,6 +150,35 @@ impl Policy {
     }
 }
 
+impl Policy {
+    /// An extension's tool: `always_ask` asks every time; a script tool runs
+    /// inside the bash boundary, so it asks when there is none; strict mode
+    /// asks for any tool that isn't read-only.
+    pub fn ext_tool(
+        &self,
+        name: &str,
+        read_only: bool,
+        always_ask: bool,
+        script: bool,
+    ) -> Decision {
+        let mut reasons = Vec::new();
+        let mut keys = Vec::new();
+        if always_ask {
+            reasons.push(format!("the {name} tool always asks"));
+            keys.push(format!("tool:{name}"));
+        }
+        if script && let Some(why) = &self.unisolated {
+            reasons.push(format!("script tools are not isolated ({why})"));
+            keys.push("unisolated".into());
+        }
+        if self.mode == Mode::Strict && !read_only {
+            reasons.push("strict mode asks before every change".into());
+            keys.push(format!("strict:{name}"));
+        }
+        ask_if(reasons, keys)
+    }
+}
+
 fn ask_if(reasons: Vec<String>, keys: Vec<String>) -> Decision {
     if reasons.is_empty() {
         Decision::Allow
@@ -243,6 +272,23 @@ mod tests {
             keys(policy(Mode::Strict).file_write("edit", Path::new("/w/p/a"), "/w/p/a", f)),
             ["strict:edit"]
         );
+    }
+
+    #[test]
+    fn extension_tools() {
+        let p = policy(Mode::Auto);
+        assert_eq!(p.ext_tool("lint", true, false, false), Decision::Allow);
+        assert_eq!(
+            keys(p.ext_tool("deploy", false, true, false)),
+            ["tool:deploy"]
+        );
+        let s = policy(Mode::Strict);
+        assert_eq!(s.ext_tool("lint", true, false, true), Decision::Allow);
+        assert_eq!(keys(s.ext_tool("fmt", false, false, false)), ["strict:fmt"]);
+        let mut u = policy(Mode::Auto);
+        u.unisolated = Some("no bwrap".into());
+        assert_eq!(keys(u.ext_tool("wc", true, false, true)), ["unisolated"]);
+        assert_eq!(u.ext_tool("lua_tool", true, false, false), Decision::Allow);
     }
 
     #[test]

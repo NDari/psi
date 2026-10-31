@@ -66,6 +66,27 @@ pub async fn run(args: Map<String, Value>, ctx: &ToolCtx, outside: bool) -> Tool
     let timeout = int_arg(&args, "timeout")
         .unwrap_or(DEFAULT_TIMEOUT_S)
         .clamp(1, MAX_TIMEOUT_S) as u64;
+    let argv = vec!["bash".to_owned(), "-c".to_owned(), command];
+    exec(&argv, None, timeout, ctx, outside).await
+}
+
+/// A script tool (D-22): `argv` inside the same boundary as bash, with the
+/// arguments as JSON on stdin; its output is the result.
+pub async fn run_script(argv: &[String], args: &Value, ctx: &ToolCtx) -> ToolOutput {
+    if argv.is_empty() {
+        return ToolOutput::err("The script tool has no command.");
+    }
+    let input = serde_json::to_vec(args).unwrap_or_default();
+    exec(argv, Some(input), DEFAULT_TIMEOUT_S as u64, ctx, false).await
+}
+
+async fn exec(
+    argv: &[String],
+    input: Option<Vec<u8>>,
+    timeout: u64,
+    ctx: &ToolCtx,
+    outside: bool,
+) -> ToolOutput {
     if let Err(e) = std::fs::create_dir_all(&ctx.tmpdir) {
         return ToolOutput::err(format!(
             "Cannot create TMPDIR {}: {e}",
@@ -84,15 +105,22 @@ pub async fn run(args: Map<String, Value>, ctx: &ToolCtx, outside: bool) -> Tool
     let mut cmd = match sandbox {
         Some(sb) => {
             let mut c = tokio::process::Command::new("bwrap");
-            c.args(sb.args(&ctx.cwd)).arg("bash");
+            c.args(sb.args(&ctx.cwd)).args(argv);
             c
         }
-        None => tokio::process::Command::new("bash"),
+        None => {
+            let mut c = tokio::process::Command::new(&argv[0]);
+            c.args(&argv[1..]);
+            c
+        }
     };
-    cmd.arg("-c")
-        .arg(&command)
-        .current_dir(&ctx.cwd)
-        .stdin(Stdio::null())
+    let stdin = if input.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    };
+    cmd.current_dir(&ctx.cwd)
+        .stdin(stdin)
         .stdout(writer)
         .stderr(stderr)
         .process_group(0)
@@ -116,8 +144,14 @@ pub async fn run(args: Map<String, Value>, ctx: &ToolCtx, outside: bool) -> Tool
     drop(cmd);
     let mut child = match spawned {
         Ok(c) => c,
-        Err(e) => return ToolOutput::err(format!("Cannot start bash: {e}")),
+        Err(e) => return ToolOutput::err(format!("Cannot start {}: {e}", argv[0])),
     };
+    if let (Some(bytes), Some(mut w)) = (input, child.stdin.take()) {
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let _ = w.write_all(&bytes).await;
+        });
+    }
     let pgid = child.id();
     let buf = Arc::new(Mutex::new(Buf::default()));
     let collector = {

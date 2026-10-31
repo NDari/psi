@@ -134,7 +134,7 @@ evals/              # Task sets, graders, adapters (not embedded)
   - Messages in: events and tool invocations. Messages out: results and UI requests.
   - Async host functions (such as `ui.confirm` or `model.complete`) use mlua's async support on a per-actor single-threaded runtime. From Lua they look blocking.
   - Render calls to extension UI components are synchronous requests with a deadline (for example 8ms). On timeout, the last frame is reused and the extension is flagged.
-- Instruction limits (mlua hooks) and memory limits apply to every Lua state, to catch buggy loops. Verify both work on Lua 5.4 with mlua at the start of Phase 5.
+- Instruction limits (mlua hooks) and memory limits apply to every Lua state, to catch buggy loops. Verify both work on Lua 5.4 with mlua at the start of Phase 5. *Verified 2026-10-31 (mlua 0.12, Lua 5.4):* both work, with two catches the host handles: `pcall`/`xpcall` would swallow the stop error (they re-raise it), and each coroutine needs its own hook (`coroutine.create`/`wrap` set it). The limit is time spent running without awaiting psi (default 5 s), so a handler waiting on `ui.confirm` is never stopped; memory is capped at 256 MiB.
 
 ### 3.4 Files and directories
 
@@ -735,6 +735,7 @@ Each phase ends with its acceptance criteria passing in the local check, where a
 - ✅ Generated stubs, glue and docs are drift-free in the local check.
 - ✅ A runaway Lua loop is killed without freezing the UI.
 - ✅ Example extensions covering each API area pass their tests.
+- Built 2026-10-31: the API is `crates/psi-ext-api/api/psi.toml` (27 functions, 18 events, 29 types); `just api-docs` re-blesses `docs/api.md` and `docs/api/psi.lua`. Project-local `.psi/` (settings and extensions) loads once trusted; trust is a fingerprint of those files in `~/.psi/trust.json`, so any change asks again; headless runs skip an untrusted project (or `--trust-project`). `--extension <path>` and `--ext-flag name=value` on the command line. A failing or stopped `tool_call` handler blocks the call; extension tools follow the same policy (`always_ask`; strict mode asks unless `read_only`; script tools ask when bash is unisolated). Renderers and custom components get an 8 ms deadline per frame. `examples/extensions/` has one tested example per API area (a test checks every API function is used), and `docs/extensions.md` is the author guide. The vendored Lua's `math.cosh`/`math.sinh` are defined in `crates/psi-ext/native/compat.c`, so the binary built on Arch (glibc 2.44) still runs in the Debian eval image.
 
 **Phase 6: batteries.**
 - Plan mode, todo, post-edit check, skills, prompt templates, themes, keybindings, self-knowledge, `register_provider`, local and git packages.
