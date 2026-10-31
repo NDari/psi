@@ -636,6 +636,7 @@ The eval is for sanity checks, finding harness bugs ("a tool result sent the mod
 - **Reading results:** look for direction and for transcripts that show harness bugs. A task or two either way is noise. There's no significance testing by default; if a question needs rigor, run more trials for that question.
 - **Baselines prove correctness only (owner rule, 2026-10-31):** a baseline (pi's, or a phase's Psi score) is **one run, one trial per task**. It exists to prove the design works end to end: trials run, records are captured, graders produce outcomes, harness failures surface. It is **never** used to judge speed, timing or how well an agent or model does. Don't repeat baseline runs.
 - **Hypotheses:** each `H-xx` (§14) gets an eval config and a recorded, directional result.
+- **When to run it (D-32):** the eval is slow, so tests carry everyday checking and the eval runs only when tests can't answer: when model-facing text changes (system prompt, tool schemas, tool result wording), when a model is added or switched, at the end of a phase, and to collect fresh transcripts when replay fixtures go stale. Everything else is `cargo test`.
 
 ### 12.6 In the TUI
 
@@ -701,8 +702,10 @@ Each phase ends with its acceptance criteria passing in CI, where automatable.
 - ✅ A pi baseline on the quick set with both reference models (D-29), run on this machine: a single run, proving the pipeline works (§12.5), not a score.
 
 **Phase 2: providers, agent loop, core tools, sessions** (print and JSON modes).
+- **First, a replay server (D-32):** a fake OpenAI-compatible server that plays back the model responses of a recorded transcript (wire log, or a converted pi session), so scenario tests drive Psi's real loop and tools against a temp project in seconds. Every Phase 2 feature gets replay tests from the start.
 - llama-server client with `/props` checks; wire log; shape-fix pipeline; agent loop with queues, abort and budgets; read/write/edit/bash (no isolation yet); optional grep/find/ls; JSONL tree sessions; the Psi eval adapter; `psi replay`.
 - ✅ Shape-fix fixtures built from **real transcripts**, including recorded pi failures.
+- ✅ Replay tests drive the agent loop from recorded transcripts, and `psi eval run` passes a smoke test against the replay server (podman, no GPU).
 - ✅ Edit matching passes its fixtures, including indentation cases that must *not* apply.
 - ✅ **First Psi score** on the quick set, compared with the pi baseline.
 
@@ -743,8 +746,11 @@ Each phase ends with its acceptance criteria passing in CI, where automatable.
 
 - **Fixtures:** shape fixes, always-ask detection (commands that hide list entries), edit matching (including indentation cases), session tree operations, checkpoint capture and restore, host-git flags.
 - **Real-transcript fixtures:** fixtures for tool-call shapes, loops and blocked-retry behavior come from recorded trials (Psi's own and pi's), replayable via the wire log.
+- **Replay tests (D-32):** a fake model server plays back a recorded transcript's responses while Psi's real loop and tools run on a temp project. Deterministic and fast; they cover the loop, tools, shape fixes, edit matching, guards, records and outcome classification. A replay goes stale when model-facing text changes, since the model would have seen something else; refresh it from a new eval run.
+- **Golden tests for model-facing text:** exact tool result text, truncation notices and error messages, so changes to what the model sees are deliberate.
+- **Eval pipeline smoke test:** `psi eval run` on one task against the replay server, through podman, without a GPU.
 - **Isolation tests** on Linux CI (**[G-14]**: confirm the runner allows unprivileged user namespaces); macOS when that backend exists (**[G-20]**).
-- **Eval:** the quick set after significant changes, the full set when useful. Look for direction and for transcripts that show harness bugs, not small score differences.
+- **Eval:** run only when tests can't answer (§12.5, D-32). Look for transcripts that show harness bugs, not score differences.
 - **Extension tests:** every example has `*_test.lua`, run with `psi ext test`.
 
 ---
@@ -784,6 +790,7 @@ Each phase ends with its acceptance criteria passing in CI, where automatable.
 | D-29 | Reference models: **Qwen3.5 4B Q4_K_M** and **Gemma 4 12B QAT Q4_0** on llama-server | Heimdall's measured pair gives comparable baselines; add a larger model when available |
 | D-30 | **Good enough first, stricter later:** a container or minimal bubblewrap as the boundary, checkpoints for undo, a short always-ask list; stricter mechanisms (§13) only when real use shows a need | Heimdall started strict and grew out of control; simple mechanisms with known gaps cover the mistakes model at a fraction of the cost |
 | D-31 | **The session JSONL plus its wire log is the only record**; no separate dump format; other agents' output (pi) is converted into session entries | Heimdall needed a dump only because it stored sessions in a database; one format means one inspection and scoring path |
+| D-32 | **Tests carry everyday checking; the eval runs sparingly.** A replay server plays back recorded transcripts so scenario tests exercise the real loop and tools; the eval runs when model-facing text changes, a model changes, at phase ends, and to refresh fixtures | The eval takes minutes per model; most harness behavior is deterministic given the model's responses. Only a real model shows how a change to what it sees affects it (2026-10-31) |
 
 ---
 
