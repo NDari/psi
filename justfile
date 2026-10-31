@@ -15,11 +15,16 @@ gemma := "-hf google/gemma-4-12B-it-qat-q4_0-gguf:Q4_0 --temp 1.0 --top-p 0.95 -
 default:
     @just --list --unsorted
 
-# The local check (D-33): format, lint, test. Run before every commit.
+# The local check (D-33): format, lint, test, eval smoke. Run before every commit.
 check:
     cargo fmt --all --check
     cargo clippy --workspace --all-targets -- -D warnings
     cargo test --workspace
+    just eval-smoke
+
+# The eval pipeline through podman with the replay server as the model (no GPU)
+eval-smoke:
+    cargo test -q -p psi-cli --test eval_smoke -- --ignored --test-threads 1
 
 # Format the code
 fmt:

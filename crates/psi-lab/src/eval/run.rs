@@ -9,20 +9,21 @@ use super::result::{RunMeta, TrialResult};
 use super::server::probe;
 use super::summary::summary_markdown;
 use super::tasks::{Selection, load_tasks};
-use super::trial::{TrialCtx, run_pi};
+use super::trial::{TrialCtx, run_trial};
 use crate::error::other;
 use crate::{Result, fsutil};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Agent {
     Pi,
-    // TODO(phase-2): Psi, once the agent loop exists.
+    Psi,
 }
 
 impl Agent {
     pub fn as_str(self) -> &'static str {
         match self {
             Agent::Pi => "pi",
+            Agent::Psi => "psi",
         }
     }
 }
@@ -40,6 +41,8 @@ pub struct RunConfig {
     pub steps: u32,
     pub timeout_s: u64,
     pub max_output: u64,
+    /// The psi binary for psi trials (the one running `psi eval`).
+    pub psi_binary: Option<PathBuf>,
 }
 
 /// Runs one trial of each selected task and writes `run.json`, the trial
@@ -65,7 +68,7 @@ pub fn run(cfg: &RunConfig, progress: &mut dyn FnMut(&str)) -> Result<Vec<TrialR
     let meta = RunMeta {
         agent: cfg.agent.as_str().into(),
         psi_version: env!("CARGO_PKG_VERSION").into(),
-        started_ms: fsutil::now_ms(),
+        started_ms: psi_session::time::now_ms(),
         tasks: tasks.iter().map(|t| t.name.clone()).collect(),
         steps: cfg.steps,
         timeout_s: cfg.timeout_s,
@@ -95,13 +98,12 @@ pub fn run(cfg: &RunConfig, progress: &mut dyn FnMut(&str)) -> Result<Vec<TrialR
         steps: cfg.steps,
         timeout_s: cfg.timeout_s,
         network,
+        psi_binary: cfg.psi_binary.as_deref(),
     };
     let mut results = Vec::new();
     for task in &tasks {
         progress(&format!("{}: running", task.name));
-        let r = match cfg.agent {
-            Agent::Pi => run_pi(&ctx, task),
-        };
+        let r = run_trial(&ctx, task, cfg.agent);
         let mut line = format!(
             "{}: {} (checks {}/{}, {} steps)",
             r.task,

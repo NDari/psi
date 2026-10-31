@@ -1,0 +1,8 @@
+HTTP/1.1 200 OK
+Server: llama.cpp
+Access-Control-Allow-Origin: 
+Content-Type: application/json; charset=utf-8
+Content-Length: 621
+Connection: close
+
+{"choices":[{"finish_reason":"stop","index":0,"message":{"role":"assistant","content":"hello there"}}],"created":1793462403,"model":"local","system_fingerprint":"b11429-d812350493","object":"chat.completion","usage":{"completion_tokens":3,"prompt_tokens":36,"total_tokens":39,"prompt_tokens_details":{"cached_tokens":17}},"id":"chatcmpl-8GO6ru1Usi74UWoMKNuEsHEDnaMte3bG","timings":{"cache_n":17,"prompt_n":19,"prompt_ms":48.993,"prompt_per_token_ms":2.5785789473684213,"prompt_per_second":387.81050354132225,"predicted_n":3,"predicted_ms":28.693,"predicted_per_token_ms":14.3465,"predicted_per_second":69.70341198201652}}

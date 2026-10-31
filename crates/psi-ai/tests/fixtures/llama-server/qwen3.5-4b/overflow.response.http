@@ -1,0 +1,8 @@
+HTTP/1.1 400 Bad Request
+Server: llama.cpp
+Access-Control-Allow-Origin: 
+Content-Type: application/json; charset=utf-8
+Content-Length: 197
+Connection: close
+
+{"error":{"code":400,"message":"request (12029 tokens) exceeds the available context size (8192 tokens), try increasing it","type":"exceed_context_size_error","n_prompt_tokens":12029,"n_ctx":8192}}

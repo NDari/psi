@@ -137,6 +137,7 @@ pub fn timeline(rec: &Record) -> Timeline {
                             id,
                             name,
                             arguments,
+                            ..
                         } => Some(Call {
                             id: id.clone(),
                             name: name.clone(),

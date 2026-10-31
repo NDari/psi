@@ -1,0 +1,8 @@
+HTTP/1.1 200 OK
+Server: llama.cpp
+Access-Control-Allow-Origin: 
+Content-Type: application/json; charset=utf-8
+Content-Length: 649
+Connection: close
+
+{"models":[{"name":"local","model":"local","modified_at":"","size":"","digest":"","type":"model","description":"","tags":[""],"capabilities":["completion"],"parameters":"","details":{"parent_model":"","format":"gguf","family":"","families":[""],"parameter_size":"","quantization_level":""}}],"object":"list","data":[{"id":"local","aliases":["local"],"tags":[],"object":"model","architecture":{"input_modalities":["text"],"output_modalities":["text"]},"created":1793462387,"owned_by":"llamacpp","meta":{"vocab_type":2,"n_vocab":248320,"n_ctx":8192,"n_ctx_train":262144,"n_embd":2560,"n_params":4326350848,"size":3002058752,"ftype":"Q4_K - Medium"}}]}

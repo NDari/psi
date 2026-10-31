@@ -34,7 +34,8 @@ Run these from the repository root (or pass `--evals`). Results go to
 
 ```
 psi eval check                     # every grader: reference passes, untouched repo fails
-psi eval run --agent pi            # the quick set, one trial each
+psi eval run                       # psi on the quick set, one trial each
+psi eval run --agent pi            # the same with pi
 psi eval run --tasks all           # every task
 psi eval run --tasks fix_env_parser,sh_logreport
 psi eval diff RUN_A RUN_B          # two runs side by side
@@ -55,18 +56,23 @@ no sampling fields, so the server's flags apply (H-08).
 
 1. **Setup.** The task's `repo/` is copied to `work/project/` inside a
    fresh git repository `work/`. The agent's home holds only its model
-   config (pi: `~/.pi/agent/models.json`, provider `llamacpp`, model
-   `local`, context window from `/props`, thinking off).
+   config, with the context window from `/props`: psi gets
+   `~/.psi/models.jsonc` (model `local`), pi gets
+   `~/.pi/agent/models.json` (provider `llamacpp`, model `local`, thinking
+   off).
 2. **The run.** A rootless podman container (`--userns=keep-id`) runs the
    agent in `/work/project` with a timeout (default 1200 s). Its only
    network route is the model server (`pasta:--splice-only,-T,<port>`); a
    check before the trials confirms the server is reachable and the
-   internet and another host port are not (`network.txt`). pi runs as
-   `pi --mode json -p <prompt> --model llamacpp/local --tools
-   read,bash,edit,write -e /eval-pi/step-cap.ts`, offline.
-3. **The record.** pi's event stream (`run.jsonl`) is converted into Psi
-   session entries (`session.jsonl`), so inspection and scoring read every
-   agent alike (D-31).
+   internet and another host port are not (`network.txt`). psi runs as
+   `psi -p <prompt> --json --max-turns <steps>` (the binary running
+   `psi eval`, mounted read-only); pi runs as `pi --mode json -p <prompt>
+   --model llamacpp/local --tools read,bash,edit,write -e
+   /eval-pi/step-cap.ts`, offline.
+3. **The record.** psi's own session file and wire log are copied out
+   (`session.jsonl`, `wire.jsonl`); pi's event stream (`run.jsonl`) is
+   converted into the same session entries, so inspection and scoring read
+   every agent alike (D-31).
 4. **Grading.** The project as the agent left it (without `.git`) is
    copied into a fresh container with no network and graded by
    `hidden/check.sh` (`grade/checks.txt`).
@@ -84,6 +90,14 @@ no sampling fields, so the server's flags apply (H-08).
 Per trial, `<run>/<task>/trial-0/` holds `result.json`, `run.jsonl`,
 `run.stderr`, `session.jsonl`, `grade/` and the agent's `home/` and
 `work/`. The run holds `run.json`, `network.txt` and `summary.md`.
+
+## The smoke test
+
+`just eval-smoke` (part of `just check`) runs `psi eval run` for both
+agents on fix_invoice_rounding with the replay server as the model,
+scripted to write the reference solution. It checks the whole pipeline
+(podman, network check, agent, record, grading) in a few seconds, without
+a GPU.
 
 ## Adding a task
 

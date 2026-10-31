@@ -6,10 +6,12 @@
 
 pub mod entry;
 pub mod jsonl;
+pub mod store;
+pub mod time;
 
 pub use entry::{Block, Entry, EntryBody, IdGen, Role, StopReason, Usage, text_of};
 pub use jsonl::{SessionError, read_entries, write_entries};
+pub use store::{SessionFile, branch, cwd_slug};
 
-// TODO(phase-2): session files under ~/.psi/sessions, the tree (branches,
-// /fork, /tree), and appending as a run goes.
+// TODO(phase-4): /tree, /fork and /label in the TUI.
 // TODO(phase-3): checkpoints (§7.2). TODO(phase-7): compaction tuning (§7.4).

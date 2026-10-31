@@ -106,6 +106,10 @@ pub enum Block {
         id: String,
         name: String,
         arguments: Value,
+        /// The arguments exactly as the model sent them, when they differ
+        /// from `arguments` (sent back as is, so the prompt cache holds).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        raw: Option<String>,
     },
 }
 
@@ -156,6 +160,7 @@ impl Entry {
                 id,
                 name,
                 arguments,
+                ..
             } => Some((id.as_str(), name.as_str(), arguments)),
             _ => None,
         })
@@ -187,6 +192,8 @@ pub fn text_of(content: &[Block]) -> String {
 pub struct IdGen {
     next: u64,
     last: Option<String>,
+    /// Random ids, for live sessions whose branches must never collide.
+    random: bool,
 }
 
 impl IdGen {
@@ -199,14 +206,28 @@ impl IdGen {
         Self {
             next: entries.len() as u64,
             last: entries.last().map(|e| e.id.clone()),
+            random: false,
+        }
+    }
+
+    /// Random 8-hex-digit ids, continuing after `last`.
+    pub fn random_after(last: Option<String>) -> Self {
+        Self {
+            next: 0,
+            last,
+            random: true,
         }
     }
 
     /// Wraps `body` in an entry whose parent is the previous entry.
-    // TODO(phase-2): random ids for live sessions, so forks never collide.
     pub fn push(&mut self, ts: u64, body: EntryBody) -> Entry {
         self.next += 1;
-        let id = format!("{:08x}", self.next);
+        let id = if self.random {
+            let u = uuid::Uuid::now_v7().simple().to_string();
+            u[u.len() - 8..].to_owned()
+        } else {
+            format!("{:08x}", self.next)
+        };
         let parent_id = self.last.replace(id.clone());
         Entry {
             id,
@@ -276,6 +297,7 @@ mod tests {
                         id: "c1".into(),
                         name: "bash".into(),
                         arguments: json!({"command": "ls"}),
+                        raw: Some("{\"command\":\"ls\"}".into()),
                     },
                 ],
                 usage: Some(Usage {

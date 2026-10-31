@@ -1,3 +1,5 @@
+mod run_mode;
+
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -13,6 +15,30 @@ use tracing_subscriber::EnvFilter;
 #[derive(Debug, Parser)]
 #[command(name = "psi", version)]
 struct Cli {
+    /// Run one prompt and print the answer ("-" reads the prompt from stdin).
+    #[arg(short = 'p', long = "print", value_name = "PROMPT")]
+    print: Option<String>,
+
+    /// With -p: print the run's events as JSON lines instead of the answer.
+    #[arg(long, requires = "print")]
+    json: bool,
+
+    /// The model profile from ~/.psi/models.jsonc (default: the first, or llama-server on 9931).
+    #[arg(long)]
+    model: Option<String>,
+
+    /// Continue the latest session in this directory.
+    #[arg(short = 'c', long = "continue", conflicts_with = "session")]
+    continue_last: bool,
+
+    /// Continue this session file.
+    #[arg(long, value_name = "FILE")]
+    session: Option<PathBuf>,
+
+    /// Model requests per run before it stops (default 40).
+    #[arg(long, value_name = "N")]
+    max_turns: Option<u32>,
+
     /// Safety mode; overrides the settings files (D-11).
     #[arg(long, value_enum)]
     mode: Option<Mode>,
@@ -43,6 +69,39 @@ enum Command {
     Eval(EvalCommand),
     /// Show a session or eval trial as a timeline, with patterns flagged.
     Inspect(InspectArgs),
+    /// Resend the exact request of one step from a session's wire log.
+    Replay(ReplayArgs),
+    /// Serve a recorded run's model responses like llama-server (for tests).
+    #[command(hide = true)]
+    ReplayServer(ReplayServerArgs),
+}
+
+#[derive(Debug, Args)]
+struct ReplayArgs {
+    /// A session file, its .wire.jsonl, or an eval trial directory.
+    path: PathBuf,
+    /// The step (model request) to resend, from 1.
+    #[arg(long)]
+    at: usize,
+    /// How many continuations to draw (each with its own seed).
+    #[arg(long, default_value_t = 1)]
+    samples: u32,
+    /// The model profile to send to (default: the first in models.jsonc).
+    #[arg(long)]
+    model: Option<String>,
+    // TODO(phase-7): --variant (§12.4).
+}
+
+#[derive(Debug, Args)]
+struct ReplayServerArgs {
+    /// A session file whose assistant messages are played back in order.
+    #[arg(long, conflicts_with = "script")]
+    session: Option<PathBuf>,
+    /// A JSON list of replies (psi_ai::replay::Reply).
+    #[arg(long)]
+    script: Option<PathBuf>,
+    #[arg(long, default_value_t = 9931)]
+    port: u16,
 }
 
 #[derive(Debug, Subcommand)]
@@ -64,7 +123,7 @@ enum EvalCommand {
         /// quick, all, or task names separated by commas.
         #[arg(long, default_value = "quick")]
         tasks: String,
-        #[arg(long, value_enum, default_value = "pi")]
+        #[arg(long, value_enum, default_value = "psi")]
         agent: AgentArg,
         /// llama-server's port on 127.0.0.1.
         #[arg(long, default_value_t = 9931)]
@@ -98,6 +157,7 @@ struct EvalCommon {
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum AgentArg {
+    Psi,
     Pi,
 }
 
@@ -147,15 +207,90 @@ fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
         Some(Command::Eval(cmd)) => eval_command(cmd),
         Some(Command::Inspect(args)) => inspect_command(args),
+        Some(Command::Replay(args)) => runtime()?.block_on(replay_command(args)),
+        Some(Command::ReplayServer(args)) => replay_server_command(args),
         None => {
             let cwd = std::env::current_dir().context("reading the working directory")?;
             let paths = SettingsPaths::discover(std::env::home_dir().as_deref(), &cwd);
             let settings = config::load(&paths, flags_layer(&cli))?;
             tracing::debug!(%settings, "settings loaded");
-            // TODO(phase-2): print and JSON modes. TODO(phase-4): interactive mode.
-            eprintln!("psi: no modes are built yet; see `psi --help`");
-            Ok(ExitCode::SUCCESS)
+            // TODO(phase-3): the mode setting chooses what asks (D-11).
+            let Some(prompt) = cli.print else {
+                // TODO(phase-4): interactive mode.
+                eprintln!(
+                    "psi: the interactive mode is not built yet; run a prompt with psi -p \"...\""
+                );
+                return Ok(ExitCode::from(2));
+            };
+            let args = run_mode::RunArgs {
+                prompt,
+                json: cli.json,
+                model: cli.model,
+                continue_last: cli.continue_last,
+                session: cli.session,
+                max_turns: cli.max_turns,
+            };
+            runtime()?.block_on(run_mode::run(args))
         }
+    }
+}
+
+fn runtime() -> Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("starting the async runtime")
+}
+
+/// The wire log for a session file, a wire log, or a trial directory.
+fn wire_path(p: &Path) -> PathBuf {
+    if p.is_dir() {
+        return p.join("wire.jsonl");
+    }
+    let s = p.to_string_lossy();
+    if s.ends_with(".wire.jsonl") {
+        return p.to_owned();
+    }
+    PathBuf::from(format!("{}.wire.jsonl", s.trim_end_matches(".jsonl")))
+}
+
+async fn replay_command(args: ReplayArgs) -> Result<ExitCode> {
+    let wire = wire_path(&args.path);
+    let body = psi_lab::replay::request_at(&wire, args.at)?;
+    let profile = run_mode::pick_profile(std::env::home_dir().as_deref(), args.model.as_deref())?;
+    let client = psi_ai::Client::new(&profile.base_url);
+    let (actions, dist) = psi_lab::replay::replay(&client, body, args.samples).await?;
+    if args.samples <= 1 {
+        println!("{}", actions.join("\n"));
+    } else {
+        for (action, n) in dist.iter().rev() {
+            println!("{n:>3}  {action}");
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn replay_server_command(args: ReplayServerArgs) -> Result<ExitCode> {
+    use psi_ai::replay::{ReplayServer, Reply};
+    let replies: Vec<Reply> = match (&args.session, &args.script) {
+        (Some(s), _) => {
+            let f = std::fs::File::open(s).with_context(|| format!("opening {}", s.display()))?;
+            let entries = psi_session::read_entries(std::io::BufReader::new(f))?;
+            psi_lab::replay::script_from_entries(&entries)
+        }
+        (None, Some(p)) => {
+            let text =
+                std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
+            serde_json::from_str(&text)
+                .with_context(|| format!("{}: not a list of replies", p.display()))?
+        }
+        (None, None) => bail!("give --session or --script"),
+    };
+    let n = replies.len();
+    let server = ReplayServer::start_on(args.port, replies)?;
+    eprintln!("replay server: {n} replies on {}", server.base_url());
+    loop {
+        std::thread::park();
     }
 }
 
@@ -228,6 +363,7 @@ fn eval_command(cmd: EvalCommand) -> Result<ExitCode> {
         } => {
             check_evals_dir(&common.evals)?;
             let agent = match agent {
+                AgentArg::Psi => Agent::Psi,
                 AgentArg::Pi => Agent::Pi,
             };
             let suffix = label.unwrap_or_else(|| agent.as_str().to_owned());
@@ -240,6 +376,7 @@ fn eval_command(cmd: EvalCommand) -> Result<ExitCode> {
                 steps,
                 timeout_s: timeout,
                 max_output,
+                psi_binary: std::env::current_exe().ok(),
             };
             let results = eval::run(&cfg, &mut progress)?;
             let summary = std::fs::read_to_string(cfg.results_dir.join("summary.md"))

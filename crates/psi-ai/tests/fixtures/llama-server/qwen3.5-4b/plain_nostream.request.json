@@ -1,0 +1,1 @@
+{"model": "local", "max_tokens": 32, "messages": [{"role": "system", "content": "You are a coding agent. Use the tools to act."}, {"role": "user", "content": "Reply with exactly: hello there"}]}

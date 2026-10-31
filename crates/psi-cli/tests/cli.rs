@@ -51,7 +51,8 @@ fn layers_load_and_flag_overrides() {
         .current_dir(project.path())
         .output()
         .unwrap();
-    assert!(out.status.success());
+    // No interactive mode yet: it says so, after loading the settings.
+    assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains(r#""mode":"auto""#), "{stderr}");
     assert!(stderr.contains(r#""network":"off""#), "{stderr}");

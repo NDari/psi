@@ -6,10 +6,13 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+psi-ai = { path = "../psi-ai" }
 psi-session = { path = "../psi-session" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

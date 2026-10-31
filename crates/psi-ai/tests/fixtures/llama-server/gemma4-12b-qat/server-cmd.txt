@@ -1,0 +1,1 @@
+llama-server -hf google/gemma-4-12B-it-qat-q4_0-gguf:Q4_0 --temp 1.0 --top-p 0.95 --top-k 64 --min-p 0 --no-mmproj --jinja --alias local -c 8192 -ngl 99 --port 9931 --reasoning off --seed 0

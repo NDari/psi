@@ -30,6 +30,20 @@ impl SettingsPaths {
     }
 }
 
+/// Reads `~/.psi/models.jsonc`; a missing file means no profiles.
+pub fn load_models(home: Option<&Path>) -> Result<psi_ai::profile::ModelsFile> {
+    let Some(path) = home.map(|h| h.join(".psi/models.jsonc")) else {
+        return Ok(Default::default());
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    let origin = path.display().to_string();
+    serde_json::from_value(parse_jsonc(&text, &origin)?).with_context(|| origin.clone())
+}
+
 /// Parses JSONC: JSON plus comments and trailing commas, nothing looser.
 pub fn parse_jsonc(text: &str, origin: &str) -> Result<Value> {
     let options = ParseOptions {

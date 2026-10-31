@@ -1,0 +1,293 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)] // Test code.
+//! `psi -p` end to end against the replay server: the real binary, client,
+//! loop, tools, session file and wire log.
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+use psi_ai::replay::{ReplayServer, Reply, ScriptedReply};
+use psi_session::{EntryBody, read_entries};
+use serde_json::{Value, json};
+
+struct Env {
+    _tmp: tempfile::TempDir,
+    home: PathBuf,
+    project: PathBuf,
+}
+
+fn env_for(server: &ReplayServer) -> Env {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let project = tmp.path().join("work/project");
+    std::fs::create_dir_all(home.join(".psi")).unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    let models =
+        json!({"models": [{"id": "local", "base_url": server.base_url(), "max_output": 256}]});
+    std::fs::write(home.join(".psi/models.jsonc"), models.to_string()).unwrap();
+    Env {
+        _tmp: tmp,
+        home,
+        project,
+    }
+}
+
+fn psi(e: &Env, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_psi"))
+        .args(args)
+        .env("HOME", &e.home)
+        .current_dir(&e.project)
+        .output()
+        .unwrap()
+}
+
+fn sessions(e: &Env) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = std::fs::read_dir(e.home.join(".psi/sessions"))
+        .unwrap()
+        .flatten()
+        .flat_map(|d| {
+            std::fs::read_dir(d.path())
+                .unwrap()
+                .flatten()
+                .map(|f| f.path())
+        })
+        .filter(|p| !p.to_string_lossy().ends_with(".wire.jsonl"))
+        .collect();
+    out.sort();
+    out
+}
+
+fn text(t: &str) -> Reply {
+    Reply::Chat(ScriptedReply::text(t))
+}
+
+#[test]
+fn print_mode_writes_session_and_wire_log() {
+    let server = ReplayServer::start(vec![
+        Reply::Chat(ScriptedReply::call(
+            "write",
+            json!({"path": "a.txt", "content": "x\n"}),
+        )),
+        text("Created a.txt."),
+    ])
+    .unwrap();
+    let e = env_for(&server);
+    let out = psi(&e, &["-p", "make a.txt"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "Created a.txt.\n");
+    assert_eq!(
+        std::fs::read_to_string(e.project.join("a.txt")).unwrap(),
+        "x\n"
+    );
+
+    let s = sessions(&e);
+    assert_eq!(s.len(), 1);
+    let entries =
+        read_entries(std::io::BufReader::new(std::fs::File::open(&s[0]).unwrap())).unwrap();
+    assert!(
+        matches!(&entries[0].body, EntryBody::Custom { custom_type, .. } if custom_type == "session_info")
+    );
+    let wire = psi_ai::wire::read_wire(&PathBuf::from(
+        s[0].to_string_lossy().replace(".jsonl", ".wire.jsonl"),
+    ))
+    .unwrap();
+    assert_eq!(wire.len(), 4, "two requests and two responses");
+    // The system prompt names the tools and the working directory.
+    let sys = &server.chat_requests()[0]["messages"][0]["content"];
+    assert!(
+        sys.as_str()
+            .unwrap()
+            .contains("Tools: read, write, edit, bash")
+    );
+    assert!(sys.as_str().unwrap().ends_with(&format!(
+        "Current working directory: {}",
+        e.project.display()
+    )));
+}
+
+#[test]
+fn json_mode_streams_events() {
+    let server = ReplayServer::start(vec![text("hello")]).unwrap();
+    let e = env_for(&server);
+    let out = psi(&e, &["-p", "hi", "--json"]);
+    assert!(out.status.success());
+    let lines: Vec<Value> = String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines[0]["type"], "run_start");
+    let end = lines.last().unwrap();
+    assert_eq!(end["type"], "run_end");
+    assert_eq!(end["stop"], "done");
+    assert_eq!(end["text"], "hello");
+}
+
+#[test]
+fn continue_picks_up_the_last_session() {
+    let server = ReplayServer::start(vec![text("one"), text("two")]).unwrap();
+    let e = env_for(&server);
+    assert!(psi(&e, &["-p", "first"]).status.success());
+    assert!(psi(&e, &["-c", "-p", "second"]).status.success());
+    assert_eq!(sessions(&e).len(), 1);
+    let m = server.chat_requests()[1]["messages"].clone();
+    let roles: Vec<&str> = m
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["role"].as_str().unwrap())
+        .collect();
+    assert_eq!(roles, ["system", "user", "assistant", "user"]);
+    assert_eq!(m[3]["content"], "second");
+}
+
+#[test]
+fn budget_and_failures_have_exit_codes() {
+    let server = ReplayServer::start(vec![Reply::Chat(ScriptedReply::call(
+        "bash",
+        json!({"command": "true"}),
+    ))])
+    .unwrap();
+    let e = env_for(&server);
+    let out = psi(&e, &["-p", "loop", "--max-turns", "1"]);
+    assert_eq!(out.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("reached the limit of 1 model requests"));
+
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let down = Env {
+        home: e.home.clone(),
+        project: e.project.clone(),
+        _tmp: tempfile::tempdir().unwrap(),
+    };
+    std::fs::write(
+        down.home.join(".psi/models.jsonc"),
+        json!({"models": [{"id": "x", "base_url": format!("http://127.0.0.1:{port}/v1")}]})
+            .to_string(),
+    )
+    .unwrap();
+    let out = psi(&down, &["-p", "hi"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("Is llama-server running?"));
+}
+
+#[test]
+fn no_tool_support_refuses_to_start() {
+    let server = ReplayServer::start(vec![]).unwrap();
+    server.set_props(json!({"default_generation_settings": {"n_ctx": 4096}, "chat_template_caps": {"supports_tool_calls": false}}));
+    let e = env_for(&server);
+    let out = psi(&e, &["-p", "hi"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--jinja"));
+}
+
+#[test]
+fn replay_resends_a_recorded_step() {
+    let server = ReplayServer::start(vec![
+        Reply::Chat(ScriptedReply::call("read", json!({"path": "a"}))),
+        text("done"),
+    ])
+    .unwrap();
+    let e = env_for(&server);
+    std::fs::write(e.project.join("a"), "1\n").unwrap();
+    assert!(psi(&e, &["-p", "read a"]).status.success());
+    let session = sessions(&e).pop().unwrap();
+    // Point models.jsonc at a fresh server that answers differently.
+    let again = ReplayServer::start(vec![text("a different answer")]).unwrap();
+    std::fs::write(
+        e.home.join(".psi/models.jsonc"),
+        json!({"models": [{"id": "local", "base_url": again.base_url()}]}).to_string(),
+    )
+    .unwrap();
+    let out = psi(&e, &["replay", session.to_str().unwrap(), "--at", "2"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "answer: a different answer\n"
+    );
+    assert_eq!(
+        again.requests().last().unwrap().body,
+        server
+            .requests()
+            .iter()
+            .filter(|r| r.path.ends_with("completions"))
+            .nth(1)
+            .unwrap()
+            .body
+    );
+}
+
+#[test]
+fn a_real_pi_transcript_replayed_through_psi_leaves_the_same_files() {
+    // pi + Qwen3.5 4B passed fix_invoice_rounding with these responses; psi's
+    // tools must turn the same calls into the same files.
+    let fx = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pi-qwen-fix-invoice");
+    let entries = read_entries(std::io::BufReader::new(
+        std::fs::File::open(fx.join("session.jsonl")).unwrap(),
+    ))
+    .unwrap();
+    let script = psi_lab::replay::script_from_entries(&entries);
+    assert_eq!(script.len(), 18);
+    let server = ReplayServer::start(vec![]).unwrap();
+    let e = env_for(&server);
+    // The trial ran in /work/project; this one runs in a temp directory.
+    let here = e.project.display().to_string();
+    let script: Vec<Reply> = script
+        .into_iter()
+        .map(|r| match r {
+            Reply::Chat(mut c) => {
+                for (_, args) in &mut c.tool_calls {
+                    *args = args.replace("/work/project", &here);
+                }
+                Reply::Chat(c)
+            }
+            other => other,
+        })
+        .collect();
+    let server = ReplayServer::start(script).unwrap();
+    std::fs::write(
+        e.home.join(".psi/models.jsonc"),
+        json!({"models": [{"id": "local", "base_url": server.base_url()}]}).to_string(),
+    )
+    .unwrap();
+    let repo =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../evals/code/fix_invoice_rounding/repo");
+    copy_dir(&repo, &e.project);
+    let out = psi(&e, &["-p", "fix the invoices"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    for f in ["money.py", "tax.py"] {
+        assert_eq!(
+            std::fs::read_to_string(e.project.join("billing").join(f)).unwrap(),
+            std::fs::read_to_string(fx.join("final").join(f)).unwrap(),
+            "{f}"
+        );
+    }
+    assert_eq!(server.remaining(), 0);
+}
+
+fn copy_dir(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for e in std::fs::read_dir(src).unwrap() {
+        let e = e.unwrap();
+        let to = dst.join(e.file_name());
+        if e.path().is_dir() {
+            copy_dir(&e.path(), &to);
+        } else {
+            std::fs::copy(e.path(), to).unwrap();
+        }
+    }
+}

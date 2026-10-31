@@ -149,6 +149,7 @@ fn blocks(content: &Value) -> Vec<Block> {
                 id: b["id"].as_str().unwrap_or_default().to_owned(),
                 name: b["name"].as_str().unwrap_or_default().to_owned(),
                 arguments: b["arguments"].clone(),
+                raw: None,
             }),
             "image" => Some(Block::Text {
                 text: format!("[image {}]", b["mimeType"].as_str().unwrap_or("?")),

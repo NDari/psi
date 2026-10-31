@@ -1,0 +1,46 @@
+//! What a run reports as it goes (JSON mode prints these; extensions and
+//! the TUI will listen to the same stream).
+
+use psi_session::Entry;
+use serde::Serialize;
+use serde_json::Value;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AgentEvent {
+    RunStart {
+        session: String,
+    },
+    TurnStart {
+        turn: u32,
+    },
+    /// Streamed answer text.
+    TextDelta {
+        text: String,
+    },
+    /// Every entry appended to the session, as written.
+    Entry {
+        entry: Entry,
+    },
+    ToolStart {
+        id: String,
+        name: String,
+        args: Value,
+    },
+    ToolEnd {
+        id: String,
+        name: String,
+        is_error: bool,
+    },
+    TurnEnd {
+        turn: u32,
+    },
+    RunEnd {
+        stop: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        text: String,
+        turns: u32,
+        tool_calls: u32,
+    },
+}

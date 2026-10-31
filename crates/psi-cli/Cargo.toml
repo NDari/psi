@@ -13,8 +13,14 @@ path = "src/main.rs"
 anyhow.workspace = true
 clap.workspace = true
 jsonc-parser.workspace = true
+psi-agent = { path = "../psi-agent" }
+psi-ai = { path = "../psi-ai" }
 psi-lab = { path = "../psi-lab" }
+psi-session = { path = "../psi-session" }
+psi-tools = { path = "../psi-tools" }
 serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

@@ -40,7 +40,7 @@ If a check can't run, say what is unverified.
 
 ## Tests
 
-- **Every behavior change gets a test.** Prefer scenario tests that drive the agent loop with the replay server, playing back a recorded transcript (D-32).
+- **Every behavior change gets a test.** Prefer scenario tests that drive the agent loop with the replay server (`psi_ai::replay`), playing back recorded llama-server responses (`crates/psi-ai/tests/fixtures/llama-server`) or a recorded transcript (D-32).
 - **No test touches the network or a real model.** Live runs against llama-server and evals are manual.
 - **Fixtures for model behavior come from real transcripts** where possible (tool-call shapes, loops, bad results), not invented ones.
 

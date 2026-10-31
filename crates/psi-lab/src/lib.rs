@@ -7,8 +7,9 @@ mod error;
 pub mod eval;
 mod fsutil;
 pub mod inspect;
+pub mod replay;
 
 pub use error::{LabError, Result};
-pub use fsutil::{now_ms, utc_stamp};
+pub use psi_session::time::{now_ms, utc_stamp};
 
-// TODO(phase-2): `psi replay` (§12.4). TODO(phase-7): `psi why` (§12.3).
+// TODO(phase-7): `psi why` (§12.3) and replay variants (§12.4).

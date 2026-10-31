@@ -1,0 +1,32 @@
+[
+ {
+  "source": "pi 1.4.0 + Gemma 4 12B QAT, fix_invoice_rounding (2026-10-31): an edit with no path, repeated 30 times in that trial",
+  "task": "fix_invoice_rounding",
+  "arguments": {
+   "description": "Fix parse_amount to avoid float precision issues by manually parsing the decimal string.",
+   "edits": [
+    {
+     "newText": "def parse_amount(text):\n    \"\"\"Parse a decimal string such as \"12.5\" into cents (1250).\"\"\"\n    text = str(text).strip()\n    if not _AMOUNT.fullmatch(text):\n        raise ValueError(f\"bad amount: {text!r}\")\n    \n    if \".\" not in text:\n        return int(text)\n    \n    whole, frac = text.split(\".\")\n    return int(whole) * 100 + int(frac.ljust(2, \"0\")[:2])",
+     "oldText": "def parse_amount(text):\n    \"\"\"Parse a decimal string such as \"12.5\" into cents (1250).\"\"\"\n    text = str(text).strip()\n    if not _AMOUNT.fullmatch(text):\n        raise ValueError(f\"bad amount: {text!r}\")\n    return int(float(text) * 100)",
+     "path": "billing/money.py"
+    }
+   ]
+  }
+ },
+ {
+  "source": "pi 1.4.0 + Gemma 4 12B QAT, multi_sqlite_migration (2026-10-31): a real edit in edits[] plus a top-level pair that changes nothing, repeated 34 times",
+  "task": "multi_sqlite_migration",
+  "arguments": {
+   "edits": [
+    {
+     "newText": "def add_book(conn, title, author, year=None):\n    \"\"\"Add a book and return its id.\"\"\"\n    with conn:\n        if author:\n            trimmed_author = author.strip()\n            if trimmed_author != '':\n                cur = conn.execute(\"INSERT OR IGNORE INTO authors (name) VALUES (?)\", (trimmed_author,))\n                author_id = conn.execute(\"SELECT id FROM authors WHERE name = ?\", (trimmed_author,)).fetchone()[0]\n            else:\n                author_id = None\n        else:\n            author_id = None\n\n        if author_id:\n            cur = conn.execute(\"INSERT INTO books (title, author_id, year) VALUES (?, ?, ?)\", (title, author_id, year))\n        else:\n            cur = conn.execute(\"INSERT INTO books (title, author_id, year) VALUES (?, ?, ?)\", (title, None, year))\n    return cur.lastrowid\\n\\n\\ndef find_by_author(conn, name):\n    \"\"\"Titles of the books by the author called exactly name, sorted.\"\"\"\n    rows = conn.execute(\"\"\"\n        SELECT b.title \n        FROM books b \n        JOIN authors a ON b.author_id = a.id \n        WHERE a.name = ? \n        ORDER BY b.title\n    \"\"\", (name,))\n    return [r[0] for r in rows]\\n\\n\\ndef list_books(conn):\n    \"\"\"(id, title, author, year) for every book, sorted by title then id.\"\"\"\n    return conn.execute(\"\"\"\n        SELECT b.id, b.title, a.name, b.year \n        FROM books b \n        LEFT JOIN authors a ON b.author_id = a.id \n        ORDER BY b.title, b.id\n    \"\"\").fetchall()\\n\\n\\ndef books_per_author(conn):\n    \"\"\"A list of (author_name, book_count) for authors with at least one book, most books first, ties by name.\"\"\"\n    rows = conn.execute(\"\"\"\n        SELECT a.name, COUNT(b.id) \n        FROM authors a \n        JOIN books b ON a.id = b.author_id \n        GROUP BY a.id \n        ORDER BY COUNT(b.id) DESC, a.name ASC\n    \"\"\")\n    return [r for r in rows]\n",
+     "oldText": "def add_book(conn, title, author, year=None):\n    \"\"\"Add a book and return its id.\"\"\"\n    with conn:\n        cur = conn.execute(\"INSERT INTO books (title, author, year) VALUES (?, ?, ?)\", (title, author, year))\n    return cur.lastrowid\n\n\ndef find_by_author(conn, name):\n    \"\"\"Titles of the books by the author called exactly name, sorted.\"\"\"\n    rows = conn.execute(\"SELECT title FROM books WHERE author = ? ORDER BY title\", (name,))\n    return [r[0] for r in rows]\n\n\ndef list_books(conn):\n    \"\"\"(id, title, author, year) for every book, sorted by title then id.\"\"\"\n    return conn.execute(\"SELECT id, title, author, year FROM books ORDER BY title, id\").fetchall()\n\n\ndef remove_book(conn, book_id):\n    with conn:\n        n = conn.execute(\"DELETE FROM books WHERE id = ?\", (book_id,)).rowcount\n    if n == 0:\n        raise KeyError(book_id)\n",
+     "path": "library/books.py"
+    }
+   ],
+   "newText": "def remove_book(conn, book_id):\n    with conn:\n        n = conn.execute(\"DELETE FROM books WHERE id = ?\", (book_id,)).rowcount\n    if n == 0:\n        raise KeyError(book_id)\n",
+   "oldText": "def remove_book(conn, book_id):\n    with conn:\n        n = conn.execute(\"DELETE FROM books WHERE id = ?\", (book_id,)).rowcount\n    if n == 0:\n        raise KeyError(book_id)\n",
+   "path": "library/books.py"
+  }
+ }
+]

@@ -1,0 +1,343 @@
+//! bash: one fresh process per call, in the working directory (§6).
+//!
+//! stdout and stderr share one pipe, so their order is kept. The command
+//! runs in its own process group; on timeout or abort the whole group is
+//! killed, and so is anything it left running in the background.
+
+use std::collections::VecDeque;
+use std::io::Read;
+use std::process::Stdio;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use psi_ai::{Param, ParamKind, ToolSchema};
+use serde_json::{Map, Value, json};
+
+use crate::text::{clean, head_tail};
+use crate::{ToolCtx, ToolOutput, int_arg, str_arg};
+
+const DEFAULT_TIMEOUT_S: i64 = 300;
+const MAX_TIMEOUT_S: i64 = 3600;
+/// Output kept in memory: the start and the end.
+const KEEP_HEAD: usize = 1 << 20;
+const KEEP_TAIL: usize = 4 << 20;
+
+pub(crate) fn schema() -> ToolSchema {
+    ToolSchema {
+        name: "bash",
+        description: format!(
+            "Run a bash command in the working directory and return its output (stdout and stderr together). Each call is a fresh process: cd does not carry over. Long output keeps its start and end. Default timeout {DEFAULT_TIMEOUT_S} seconds."
+        ),
+        params: vec![
+            Param::new("command", ParamKind::String, "The bash command"),
+            Param::new(
+                "timeout",
+                ParamKind::Integer,
+                "Seconds before the command is stopped",
+            )
+            .optional(),
+            Param::new("intent", ParamKind::String, "Optional: one line on why").optional(),
+        ],
+        example: json!({"command": "python3 -m unittest"}),
+    }
+}
+
+#[derive(Default)]
+struct Buf {
+    head: Vec<u8>,
+    tail: VecDeque<u8>,
+    dropped: usize,
+    done: bool,
+}
+
+enum End {
+    Exited(std::process::ExitStatus),
+    TimedOut,
+    Aborted,
+}
+
+pub(crate) async fn run(args: Map<String, Value>, ctx: &ToolCtx) -> ToolOutput {
+    let command = str_arg(&args, "command").to_owned();
+    if command.trim().is_empty() {
+        return ToolOutput::err("command is empty.");
+    }
+    let timeout = int_arg(&args, "timeout")
+        .unwrap_or(DEFAULT_TIMEOUT_S)
+        .clamp(1, MAX_TIMEOUT_S) as u64;
+    if let Err(e) = std::fs::create_dir_all(&ctx.tmpdir) {
+        return ToolOutput::err(format!(
+            "Cannot create TMPDIR {}: {e}",
+            ctx.tmpdir.display()
+        ));
+    }
+    let (reader, writer) = match std::io::pipe() {
+        Ok(p) => p,
+        Err(e) => return ToolOutput::err(format!("Cannot start bash: {e}")),
+    };
+    let stderr = match writer.try_clone() {
+        Ok(w) => w,
+        Err(e) => return ToolOutput::err(format!("Cannot start bash: {e}")),
+    };
+    let mut cmd = tokio::process::Command::new("bash");
+    cmd.arg("-c")
+        .arg(&command)
+        .current_dir(&ctx.cwd)
+        .stdin(Stdio::null())
+        .stdout(writer)
+        .stderr(stderr)
+        .process_group(0)
+        .kill_on_drop(true);
+    for (k, _) in std::env::vars_os() {
+        let k = k.to_string_lossy();
+        if hidden_var(&k) {
+            cmd.env_remove(k.as_ref());
+        }
+    }
+    // So nothing waits for input, and error messages can be parsed (§8.4).
+    cmd.env("TMPDIR", &ctx.tmpdir)
+        .env("LC_MESSAGES", "C")
+        .env("PAGER", "cat")
+        .env("GIT_PAGER", "cat")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("TERM", "dumb");
+    // TODO(phase-3): run inside the isolation boundary (§8.4).
+    let spawned = cmd.spawn();
+    // The parent's copies of the pipe's write end must close, or the
+    // reader never sees the end of output.
+    drop(cmd);
+    let mut child = match spawned {
+        Ok(c) => c,
+        Err(e) => return ToolOutput::err(format!("Cannot start bash: {e}")),
+    };
+    let pgid = child.id();
+    let buf = Arc::new(Mutex::new(Buf::default()));
+    let collector = {
+        let buf = buf.clone();
+        std::thread::spawn(move || collect(reader, &buf))
+    };
+
+    let end = tokio::select! {
+        s = child.wait() => match s {
+            Ok(s) => End::Exited(s),
+            Err(e) => return ToolOutput::err(format!("bash failed: {e}")),
+        },
+        () = tokio::time::sleep(Duration::from_secs(timeout)) => End::TimedOut,
+        () = ctx.cancel.cancelled() => End::Aborted,
+    };
+    if !matches!(end, End::Exited(_)) {
+        kill_group(pgid);
+        let _ = child.wait().await;
+    }
+    // Give the reader a moment; a background process holding the pipe is
+    // stopped, since every call is a fresh process.
+    let mut lingered = false;
+    if !wait_done(&buf, Duration::from_millis(200)).await {
+        lingered = true;
+        kill_group(pgid);
+        wait_done(&buf, Duration::from_secs(2)).await;
+    }
+    drop(collector);
+
+    let (raw, dropped) = {
+        let g = buf.lock().unwrap_or_else(|p| p.into_inner());
+        let mut v = g.head.clone();
+        v.extend(g.tail.iter());
+        (v, g.dropped)
+    };
+    let mut text = clean(&String::from_utf8_lossy(&raw));
+    if dropped > 0 {
+        let cut = head_cut(&text);
+        text.insert_str(
+            cut,
+            &format!("\n[... {dropped} bytes of output dropped ...]\n"),
+        );
+    }
+    let mut text = head_tail(text.trim_end(), ctx.max_result_chars);
+    if text.is_empty() {
+        text = "(no output)".into();
+    }
+    let mut is_error = false;
+    match end {
+        End::Exited(s) => match (s.code(), signal_of(&s)) {
+            (Some(0), _) => {}
+            (Some(c), _) => {
+                text.push_str(&format!("\n[exit code {c}]"));
+                is_error = true;
+            }
+            (None, sig) => {
+                text.push_str(&format!("\n[killed by signal {}]", sig.unwrap_or(0)));
+                is_error = true;
+            }
+        },
+        End::TimedOut => {
+            text.push_str(&format!(
+                "\n[timed out after {timeout} seconds; the command was stopped. Give a longer timeout if it needs more time.]"
+            ));
+            is_error = true;
+        }
+        End::Aborted => {
+            text.push_str("\n[aborted]");
+            is_error = true;
+        }
+    }
+    if lingered {
+        text.push_str("\n[processes it left running in the background were stopped]");
+    }
+    ToolOutput { text, is_error }
+}
+
+/// Where the kept start of the output ends, for the dropped-bytes notice.
+fn head_cut(text: &str) -> usize {
+    let mut i = KEEP_HEAD.min(text.len());
+    while !text.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Variables bash never sees: provider keys, and startup files that would
+/// run before every command.
+fn hidden_var(name: &str) -> bool {
+    name.ends_with("_API_KEY") || name == "BASH_ENV" || name == "ENV"
+}
+
+fn collect(mut r: std::io::PipeReader, buf: &Mutex<Buf>) {
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = match r.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        let mut g = buf.lock().unwrap_or_else(|p| p.into_inner());
+        for &byte in &chunk[..n] {
+            if g.head.len() < KEEP_HEAD {
+                g.head.push(byte);
+            } else {
+                g.tail.push_back(byte);
+                if g.tail.len() > KEEP_TAIL {
+                    g.tail.pop_front();
+                    g.dropped += 1;
+                }
+            }
+        }
+    }
+    buf.lock().unwrap_or_else(|p| p.into_inner()).done = true;
+}
+
+async fn wait_done(buf: &Mutex<Buf>, max: Duration) -> bool {
+    let step = Duration::from_millis(10);
+    let mut waited = Duration::ZERO;
+    loop {
+        if buf.lock().unwrap_or_else(|p| p.into_inner()).done {
+            return true;
+        }
+        if waited >= max {
+            return false;
+        }
+        tokio::time::sleep(step).await;
+        waited += step;
+    }
+}
+
+fn kill_group(pgid: Option<u32>) {
+    let Some(pid) = pgid.and_then(|p| rustix::process::Pid::from_raw(p as i32)) else {
+        return;
+    };
+    let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+}
+
+fn signal_of(s: &std::process::ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt;
+    s.signal()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    async fn bash(cmd: &str, timeout: Option<i64>) -> ToolOutput {
+        let d = tempfile::tempdir().unwrap();
+        let c = ToolCtx::new(d.path(), &d.path().join("tmp"), 10_000);
+        let mut a = json!({"command": cmd});
+        if let Some(t) = timeout {
+            a["timeout"] = json!(t);
+        }
+        run(a.as_object().unwrap().clone(), &c).await
+    }
+
+    #[tokio::test]
+    async fn output_keeps_order_and_exit_code() {
+        let out = bash("echo out; echo err >&2; echo out2; exit 3", None).await;
+        assert_eq!(out, ToolOutput::err("out\nerr\nout2\n[exit code 3]"));
+        assert_eq!(bash("true", None).await, ToolOutput::ok("(no output)"));
+    }
+
+    #[tokio::test]
+    async fn runs_in_cwd_with_session_tmpdir() {
+        let d = tempfile::tempdir().unwrap();
+        let c = ToolCtx::new(d.path(), &d.path().join("t"), 10_000);
+        let a = json!({"command": "pwd; echo $TMPDIR; echo ${TERM}"});
+        let out = run(a.as_object().unwrap().clone(), &c).await;
+        let want = format!(
+            "{}\n{}\ndumb",
+            d.path().display(),
+            d.path().join("t").display()
+        );
+        assert_eq!(out.text, want);
+    }
+
+    #[tokio::test]
+    async fn timeout_kills_the_group() {
+        let start = Instant::now();
+        let out = bash("echo started; sleep 30; echo never", Some(1)).await;
+        assert!(start.elapsed() < Duration::from_secs(5));
+        assert!(out.is_error);
+        assert!(
+            out.text.starts_with("started\n[timed out after 1 seconds"),
+            "{}",
+            out.text
+        );
+    }
+
+    #[tokio::test]
+    async fn background_leftovers_are_stopped() {
+        let start = Instant::now();
+        let out = bash("sleep 30 & echo bg", None).await;
+        assert!(start.elapsed() < Duration::from_secs(5));
+        assert!(!out.is_error);
+        assert!(out.text.starts_with("bg"), "{}", out.text);
+    }
+
+    #[tokio::test]
+    async fn abort_stops_the_command() {
+        let d = tempfile::tempdir().unwrap();
+        let c = ToolCtx::new(d.path(), d.path(), 10_000);
+        let cancel = c.cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            cancel.cancel();
+        });
+        let out = run(
+            json!({"command": "sleep 30"}).as_object().unwrap().clone(),
+            &c,
+        )
+        .await;
+        assert!(out.text.ends_with("[aborted]"), "{}", out.text);
+    }
+
+    #[tokio::test]
+    async fn long_output_keeps_both_ends() {
+        let out = bash("seq 1 100000", None).await;
+        assert!(out.text.starts_with("1\n2\n"));
+        assert!(out.text.ends_with("100000"));
+        assert!(out.text.contains("lines omitted"));
+    }
+
+    #[test]
+    fn keys_and_startup_files_are_hidden() {
+        assert!(hidden_var("OPENAI_API_KEY"));
+        assert!(hidden_var("BASH_ENV"));
+        assert!(!hidden_var("PATH"));
+    }
+}
