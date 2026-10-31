@@ -8,8 +8,10 @@ publish.workspace = true
 [dependencies]
 futures-util.workspace = true
 psi-ai = { path = "../psi-ai" }
+psi-safety = { path = "../psi-safety" }
 psi-session = { path = "../psi-session" }
 psi-tools = { path = "../psi-tools" }
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

@@ -65,7 +65,7 @@ no sampling fields, so the server's flags apply (H-08).
    network route is the model server (`pasta:--splice-only,-T,<port>`); a
    check before the trials confirms the server is reachable and the
    internet and another host port are not (`network.txt`). psi runs as
-   `psi -p <prompt> --json --max-turns <steps>` (the binary running
+   `psi -p <prompt> --json --max-turns <steps> --isolation off` (the container is the boundary; the binary running
    `psi eval`, mounted read-only); pi runs as `pi --mode json -p <prompt>
    --model llamacpp/local --tools read,bash,edit,write -e
    /eval-pi/step-cap.ts`, offline.

@@ -6,13 +6,15 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use psi_agent::prompt::{project_context, system_prompt};
+use psi_agent::prompt::{PromptFacts, project_context, system_prompt};
 use psi_agent::{Agent, AgentConfig, Budgets, Stop};
 use psi_ai::profile::{ContextWindow, ModelProfile};
 use psi_ai::{AiError, Client, WireLog};
 use psi_cli::config;
+use psi_cli::safety::{SafetySetup, SetupPaths, setup};
 use psi_session::SessionFile;
 use psi_tools::{ToolCtx, core_tools};
+use serde_json::Value;
 
 /// Used when neither models.jsonc nor the server says.
 const FALLBACK_CONTEXT: u64 = 32_768;
@@ -28,6 +30,12 @@ pub struct RunArgs {
     pub continue_last: bool,
     pub session: Option<PathBuf>,
     pub max_turns: Option<u32>,
+    /// The merged settings layers.
+    pub settings: Value,
+    /// `--allow` entries.
+    pub allow: Vec<String>,
+    /// The mode was given on the command line.
+    pub mode_flag: bool,
 }
 
 /// Exit codes: 0 done, 1 failed, 3 a budget stopped the run, 130 aborted.
@@ -35,7 +43,7 @@ pub fn exit_code(stop: &Stop) -> ExitCode {
     ExitCode::from(match stop {
         Stop::Done => 0,
         Stop::Failed(_) => 1,
-        Stop::Budget(_) => 3,
+        Stop::Budget(_) | Stop::Guard(_) => 3,
         Stop::Aborted => 130,
     })
 }
@@ -109,11 +117,34 @@ pub async fn run(args: RunArgs) -> Result<ExitCode> {
         .map(|h| h.join(".cache/psi/tmp").join(&stem))
         .context("no home directory")?;
 
+    let SafetySetup {
+        safety,
+        sandbox,
+        warnings,
+    } = setup(
+        &args.settings,
+        &args.allow,
+        args.mode_flag,
+        &SetupPaths {
+            cwd: &cwd,
+            home: home.as_deref(),
+            tmpdir: &tmpdir,
+            session: &stem,
+        },
+    )?;
+    for w in &warnings {
+        eprintln!("psi: {w}");
+    }
     let tools = core_tools(profile.tools.grep_find_ls);
     let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
-    let system = system_prompt(&names, &cwd, &project_context(&cwd, home.as_deref()));
+    let facts = PromptFacts {
+        checkpoints: safety.checkpoints.is_some(),
+        sandboxed: sandbox.is_some(),
+    };
+    let system = system_prompt(&names, &cwd, &project_context(&cwd, home.as_deref()), facts);
     let max_chars = (n_ctx as f64 * RESULT_SHARE * CHARS_PER_TOKEN) as usize;
-    let ctx = ToolCtx::new(&cwd, &tmpdir, max_chars);
+    let mut ctx = ToolCtx::new(&cwd, &tmpdir, max_chars);
+    ctx.sandbox = sandbox;
     let mut budgets = Budgets::default();
     if let Some(n) = args.max_turns {
         budgets.max_turns = n;
@@ -128,7 +159,7 @@ pub async fn run(args: RunArgs) -> Result<ExitCode> {
         tools,
         home: home.clone(),
     };
-    let mut agent = Agent::new(client, session, cfg, ctx);
+    let mut agent = Agent::new(client, session, cfg, ctx).with_safety(safety);
 
     let printer = if args.json {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -174,7 +205,7 @@ pub async fn run(args: RunArgs) -> Result<ExitCode> {
     }
     match &out.stop {
         Stop::Done => {}
-        Stop::Budget(r) => eprintln!("psi: stopped: {r}"),
+        Stop::Budget(r) | Stop::Guard(r) => eprintln!("psi: stopped: {r}"),
         Stop::Failed(r) => eprintln!("psi: failed: {r}"),
         Stop::Aborted => eprintln!("psi: aborted"),
     }

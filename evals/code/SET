@@ -3,7 +3,11 @@
 # Started from Heimdall's 11-task subset and trimmed to tasks that each
 # expose something the others don't (2026-10-31: sh_precommit and
 # fix_env_parser dropped after the first pi baselines). Replace tasks that
-# give the same result every trial (G-19).
+# give the same result every trial (G-19). 2026-10-31, Phase 3:
+# multi_split_package added (the one task that deletes a file and creates
+# a package, which checkpoints must capture), and multi_ini_to_json's repo
+# got an ordinary Python .gitignore (gitignored writes ask; a normal one
+# must not cause asks).
 
 fix_invoice_rounding
 multi_rename_callers
@@ -14,3 +18,4 @@ multi_ini_to_json
 sh_archive_fix
 sh_changelog
 sh_logreport
+multi_split_package

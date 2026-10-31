@@ -56,7 +56,9 @@ enum End {
     Aborted,
 }
 
-pub(crate) async fn run(args: Map<String, Value>, ctx: &ToolCtx) -> ToolOutput {
+/// Runs a bash call; `outside` skips the sandbox (a rerun the user
+/// approved, §8.5).
+pub async fn run(args: Map<String, Value>, ctx: &ToolCtx, outside: bool) -> ToolOutput {
     let command = str_arg(&args, "command").to_owned();
     if command.trim().is_empty() {
         return ToolOutput::err("command is empty.");
@@ -78,7 +80,15 @@ pub(crate) async fn run(args: Map<String, Value>, ctx: &ToolCtx) -> ToolOutput {
         Ok(w) => w,
         Err(e) => return ToolOutput::err(format!("Cannot start bash: {e}")),
     };
-    let mut cmd = tokio::process::Command::new("bash");
+    let sandbox = ctx.sandbox.as_ref().filter(|_| !outside);
+    let mut cmd = match sandbox {
+        Some(sb) => {
+            let mut c = tokio::process::Command::new("bwrap");
+            c.args(sb.args(&ctx.cwd)).arg("bash");
+            c
+        }
+        None => tokio::process::Command::new("bash"),
+    };
     cmd.arg("-c")
         .arg(&command)
         .current_dir(&ctx.cwd)
@@ -100,7 +110,6 @@ pub(crate) async fn run(args: Map<String, Value>, ctx: &ToolCtx) -> ToolOutput {
         .env("GIT_PAGER", "cat")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("TERM", "dumb");
-    // TODO(phase-3): run inside the isolation boundary (§8.4).
     let spawned = cmd.spawn();
     // The parent's copies of the pipe's write end must close, or the
     // reader never sees the end of output.
@@ -254,6 +263,7 @@ fn signal_of(s: &std::process::ExitStatus) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use std::time::Instant;
 
     async fn bash(cmd: &str, timeout: Option<i64>) -> ToolOutput {
@@ -263,7 +273,7 @@ mod tests {
         if let Some(t) = timeout {
             a["timeout"] = json!(t);
         }
-        run(a.as_object().unwrap().clone(), &c).await
+        run(a.as_object().unwrap().clone(), &c, false).await
     }
 
     #[tokio::test]
@@ -278,7 +288,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let c = ToolCtx::new(d.path(), &d.path().join("t"), 10_000);
         let a = json!({"command": "pwd; echo $TMPDIR; echo ${TERM}"});
-        let out = run(a.as_object().unwrap().clone(), &c).await;
+        let out = run(a.as_object().unwrap().clone(), &c, false).await;
         let want = format!(
             "{}\n{}\ndumb",
             d.path().display(),
@@ -321,6 +331,7 @@ mod tests {
         let out = run(
             json!({"command": "sleep 30"}).as_object().unwrap().clone(),
             &c,
+            false,
         )
         .await;
         assert!(out.text.ends_with("[aborted]"), "{}", out.text);
@@ -332,6 +343,51 @@ mod tests {
         assert!(out.text.starts_with("1\n2\n"));
         assert!(out.text.ends_with("100000"));
         assert!(out.text.contains("lines omitted"));
+    }
+
+    /// The same process handling under bubblewrap: output, timeouts and
+    /// background leftovers.
+    #[tokio::test]
+    async fn sandboxed_calls_end_cleanly() {
+        let d = tempfile::tempdir().unwrap();
+        let mut c = ToolCtx::new(d.path(), &d.path().join("t"), 10_000);
+        let cfg = psi_safety::SandboxConfig {
+            root: d.path().to_owned(),
+            git_dirs: vec![],
+            cache_dirs: vec![],
+            tmpdir: d.path().join("t"),
+            network: true,
+        };
+        let psi_safety::Isolation::Bwrap(sb) = psi_safety::isolation::choose(true, cfg, None)
+        else {
+            panic!("bubblewrap must work for the local check");
+        };
+        c.sandbox = Some(sb);
+        let run1 = |cmd: &str, t: i64| {
+            let a = json!({"command": cmd, "timeout": t});
+            run(a.as_object().unwrap().clone(), &c, false)
+        };
+        let out = run1("echo hi > f; cat f; echo $TMPDIR", 10).await;
+        assert_eq!(out.text, format!("hi\n{}", d.path().join("t").display()));
+        let start = Instant::now();
+        let out = run1("sleep 30 & echo bg", 10).await;
+        assert!(start.elapsed() < Duration::from_secs(5), "{out:?}");
+        let out = run1("echo started; sleep 30", 1).await;
+        assert!(start.elapsed() < Duration::from_secs(8), "{out:?}");
+        assert!(out.text.contains("[timed out after 1 seconds"), "{out:?}");
+        let out = run1("touch /etc/psi-test", 10).await;
+        assert!(
+            out.is_error && out.text.contains("Read-only file system"),
+            "{out:?}"
+        );
+        // A rerun the user approved runs without the sandbox: the host's
+        // /tmp, not a private one.
+        let marker = format!("/tmp/psi-test-{}", std::process::id());
+        let a = json!({"command": format!("touch {marker}")});
+        let out = run(a.as_object().unwrap().clone(), &c, true).await;
+        assert!(!out.is_error, "{out:?}");
+        assert!(Path::new(&marker).exists());
+        let _ = std::fs::remove_file(&marker);
     }
 
     #[test]

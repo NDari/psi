@@ -258,6 +258,9 @@ fn psi_run(
             "--json",
             "--max-turns",
             &steps,
+            // The container is the boundary (§12.5).
+            "--isolation",
+            "off",
         ])
         .run(&dir.join("run.jsonl"), &dir.join("run.stderr"))?;
     // The run's last event says how it ended.

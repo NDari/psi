@@ -13,6 +13,8 @@ pub enum SessionError {
     },
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error("no entry {0} in this session")]
+    NoEntry(String),
 }
 
 /// Reads entries, one JSON object per line. Blank lines are skipped.
@@ -55,8 +57,8 @@ mod tests {
     fn write_then_read() {
         let mut ids = IdGen::new();
         let entries = vec![
-            ids.push(1, EntryBody::Checkpoint { commit: "a".into() }),
-            ids.push(2, EntryBody::Checkpoint { commit: "b".into() }),
+            ids.push(1, EntryBody::checkpoint("a")),
+            ids.push(2, EntryBody::checkpoint("b")),
         ];
         let mut buf = Vec::new();
         write_entries(&mut buf, &entries).unwrap();

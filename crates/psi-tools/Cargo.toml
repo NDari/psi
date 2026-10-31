@@ -9,6 +9,7 @@ publish.workspace = true
 globset.workspace = true
 ignore.workspace = true
 psi-ai = { path = "../psi-ai" }
+psi-safety = { path = "../psi-safety" }
 regex.workspace = true
 rustix.workspace = true
 serde_json.workspace = true

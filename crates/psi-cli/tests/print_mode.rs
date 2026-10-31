@@ -291,3 +291,78 @@ fn copy_dir(src: &Path, dst: &Path) {
         }
     }
 }
+
+/// Headless runs never prompt (D-18): an always-ask command is denied and
+/// reported, `--allow` permits a named entry, and an unknown name is an error.
+#[test]
+fn print_mode_denies_always_ask_unless_allowed() {
+    let cmd = json!({"command": "cargo publish --dry-run"});
+    let replies = || {
+        vec![
+            Reply::Chat(ScriptedReply::call("bash", cmd.clone())),
+            text("done"),
+        ]
+    };
+    let server = ReplayServer::start(replies()).unwrap();
+    let e = env_for(&server);
+    let out = psi(&e, &["-p", "publish"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = sessions(&e);
+    let entries = read_entries(
+        std::fs::File::open(&s[0])
+            .map(std::io::BufReader::new)
+            .unwrap(),
+    )
+    .unwrap();
+    let result = entries.iter().find_map(|en| match &en.body {
+        EntryBody::ToolResult { content, .. } => Some(psi_session::text_of(content)),
+        _ => None,
+    });
+    assert!(
+        result
+            .unwrap()
+            .starts_with("Not run: `cargo publish` is on the always-ask list.")
+    );
+    // The session records how safety was set up, and the submit checkpoint.
+    let info = entries.iter().find_map(|en| match &en.body {
+        EntryBody::Custom { custom_type, data } if custom_type == "session_info" => {
+            Some(data.clone())
+        }
+        _ => None,
+    });
+    assert_eq!(info.unwrap()["safety"]["mode"], "auto");
+    assert!(entries.iter().any(
+        |en| matches!(&en.body, EntryBody::Checkpoint { trigger: Some(t), .. } if t == "submit")
+    ));
+
+    let server = ReplayServer::start(replies()).unwrap();
+    let e = env_for(&server);
+    let out = psi(
+        &e,
+        &[
+            "-p",
+            "publish",
+            "--allow",
+            "cargo-publish",
+            "--isolation",
+            "off",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = psi(&e, &["-p", "x", "--allow", "rm-rf"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("--allow rm-rf: no always-ask entry by that name"),
+        "{err}"
+    );
+}

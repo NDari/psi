@@ -66,7 +66,13 @@ pub enum EntryBody {
     /// A workspace snapshot in the shadow repository (§7.2).
     Checkpoint {
         commit: String,
-        // TODO(phase-3): what triggered it and the tool call it follows.
+        /// What took it: "submit" (a prompt), "tool" (after a call that
+        /// changed files) or "restore" (after /undo or /rewind).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger: Option<String>,
+        /// The tool call it follows.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_call_id: Option<String>,
     },
     /// Why a tool call ran, asked or was denied (§8), and any rewrite.
     PolicyDecision {
@@ -83,6 +89,17 @@ pub enum EntryBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_call_id: Option<String>,
     },
+}
+
+impl EntryBody {
+    /// A checkpoint entry with no trigger recorded.
+    pub fn checkpoint(commit: &str) -> Self {
+        EntryBody::Checkpoint {
+            commit: commit.into(),
+            trigger: None,
+            tool_call_id: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -267,8 +284,8 @@ mod tests {
     #[test]
     fn ids_chain_parents() {
         let mut ids = IdGen::new();
-        let a = ids.push(0, EntryBody::Checkpoint { commit: "x".into() });
-        let b = ids.push(0, EntryBody::Checkpoint { commit: "y".into() });
+        let a = ids.push(0, EntryBody::checkpoint("x"));
+        let b = ids.push(0, EntryBody::checkpoint("y"));
         assert_eq!(a.parent_id, None);
         assert_eq!(b.parent_id.as_deref(), Some(a.id.as_str()));
     }
@@ -276,9 +293,8 @@ mod tests {
     #[test]
     fn resume_continues_the_chain() {
         let mut ids = IdGen::new();
-        let a = ids.push(0, EntryBody::Checkpoint { commit: "x".into() });
-        let b = IdGen::resume(std::slice::from_ref(&a))
-            .push(0, EntryBody::Checkpoint { commit: "y".into() });
+        let a = ids.push(0, EntryBody::checkpoint("x"));
+        let b = IdGen::resume(std::slice::from_ref(&a)).push(0, EntryBody::checkpoint("y"));
         assert_eq!(b.id, "00000002");
         assert_eq!(b.parent_id.as_deref(), Some("00000001"));
     }
@@ -335,6 +351,8 @@ mod tests {
             },
             EntryBody::Checkpoint {
                 commit: "abc".into(),
+                trigger: Some("tool".into()),
+                tool_call_id: Some("c1".into()),
             },
             EntryBody::PolicyDecision {
                 tool_call_id: "c1".into(),

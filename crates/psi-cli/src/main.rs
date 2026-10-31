@@ -43,6 +43,18 @@ struct Cli {
     #[arg(long, value_enum)]
     mode: Option<Mode>,
 
+    /// Allow an always-ask entry without asking, like git-push (headless runs deny the rest).
+    #[arg(long, value_name = "ENTRY")]
+    allow: Vec<String>,
+
+    /// Run bash inside bubblewrap, or directly when something else is the boundary.
+    #[arg(long, value_enum)]
+    isolation: Option<IsolationArg>,
+
+    /// Let bash reach the network, or cut it off (needs isolation).
+    #[arg(long, value_enum)]
+    network: Option<OnOff>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -60,6 +72,18 @@ impl Mode {
             Mode::Strict => "strict",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum IsolationArg {
+    Bwrap,
+    Off,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum OnOff {
+    On,
+    Off,
 }
 
 #[derive(Debug, Subcommand)]
@@ -214,7 +238,6 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let paths = SettingsPaths::discover(std::env::home_dir().as_deref(), &cwd);
             let settings = config::load(&paths, flags_layer(&cli))?;
             tracing::debug!(%settings, "settings loaded");
-            // TODO(phase-3): the mode setting chooses what asks (D-11).
             let Some(prompt) = cli.print else {
                 // TODO(phase-4): interactive mode.
                 eprintln!(
@@ -229,6 +252,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 continue_last: cli.continue_last,
                 session: cli.session,
                 max_turns: cli.max_turns,
+                settings,
+                allow: cli.allow,
+                mode_flag: cli.mode.is_some(),
             };
             runtime()?.block_on(run_mode::run(args))
         }
@@ -298,6 +324,20 @@ fn flags_layer(cli: &Cli) -> Value {
     let mut m = Map::new();
     if let Some(mode) = cli.mode {
         m.insert("mode".into(), mode.as_str().into());
+    }
+    if let Some(i) = cli.isolation {
+        let v = match i {
+            IsolationArg::Bwrap => "bwrap",
+            IsolationArg::Off => "off",
+        };
+        m.insert("isolation".into(), v.into());
+    }
+    if let Some(n) = cli.network {
+        let v = match n {
+            OnOff::On => "on",
+            OnOff::Off => "off",
+        };
+        m.insert("network".into(), v.into());
     }
     Value::Object(m)
 }

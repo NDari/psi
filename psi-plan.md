@@ -295,7 +295,7 @@ If a capture fails, file writes **ask** instead of running unprotected. Log snap
 - Use `git cat-file --batch`, not one process per file.
 
 **Commands:**
-- `/undo` restores the checkpoint before the last turn.
+- `/undo` restores the checkpoint before the last turn: the files as they were at the last prompt submit that differs from now, so repeating it steps further back.
 - `/rewind` picks a tree node and restores both the conversation branch and the files.
 - `/diff` shows the session's changes, attributed by source ("by bash call N", "outside the agent"), using diffs between consecutive checkpoints.
 
@@ -339,11 +339,14 @@ Everything else runs without asking. Stricter layers (tiers, forbidden paths, re
 
 Asks in every mode:
 - a bash command containing an always-ask entry, or one that can't be parsed (§8.3);
-- a file-tool write to a gitignored path, since checkpoints can't recover it;
+- a file-tool write to a gitignored path, or outside the workspace (except the session `TMPDIR`), since checkpoints can't recover it (outside paths added 2026-10-31, Phase 3: same reason);
+- every file-tool write while checkpoint captures are failing (§7.2);
 - rerunning a blocked command outside the boundary, or adding a write directory (§8.5);
 - every bash call when no isolation backend works (§8.4).
 
 Switch with `/mode`. Headless modes never prompt (D-18): `--allow <entry>` permits named always-ask entries, and anything else that would ask is denied and reported.
+
+Isolation is the `isolation` setting (`bwrap`, or `off` when something else is the boundary, as in evals; `--isolation off`). `off` is a choice, not a fallback, so it doesn't make bash ask. Every ask carries grant keys (the always-ask entry, or the path for file writes); `s` on the card grants those keys for the session.
 
 ### 8.2 Network (D-08)
 
@@ -405,9 +408,11 @@ bwrap --ro-bind / / --dev /dev --proc /proc
 
 ### 8.6 Guardrails
 
-- **Repeated failures:** the same tool and arguments failing 3× in a row inject one line: "this tool failed the same way 3 times; change the call or try another approach." At 5×, pause and ask the user. (H-12)
+- **Repeated failures:** the same tool and arguments failing 3× in a row inject one line: "this tool failed the same way 3 times; change the call or try another approach." At 5×, pause and ask the user. (H-12) Nudges are appended to that call's result; a pause in a headless run stops it (`stop: guard`, exit 3).
 - **Error streaks:** after `max_consecutive_errors`, inject a nudge to re-read and re-plan; after 2× that, pause.
-- **No-progress heuristic:** N turns with no file change, no new read and no answer trigger a nudge (**[G-12]**).
+- **No-progress heuristic:** N turns with no file change, no new read and no answer trigger a nudge (**[G-12]**). First cut: 6 turns in which every call repeats an earlier one and no checkpoint saw a change.
+- **Announced stop (headless):** an answer whose last paragraph announces a next step ("Now I will examine money.py.") and asks nothing gets one line, once per run: make the call, or answer if done. Gemma 4 12B ended eval runs this way in Phases 2 and 3 (added 2026-10-31). Interactive runs skip it; the user can say "go on".
+- **Cut-off answer:** a reply that hits the output limit before any tool call is not an answer; it gets one line and another turn, at most twice per run (Gemma 4 12B, Phase 3 eval, multi_split_package).
 - **Output hygiene:** head+tail truncation, ANSI stripping, collapsing repetitive lines.
 - **Shape fixes and exact-fix refusals** from §4.4.
 - Every guard firing is recorded as a `guard_event` (§12.1).

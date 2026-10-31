@@ -1,8 +1,8 @@
 //! One run: turns until the model answers without tool calls, a budget is
 //! reached, or the run is aborted.
 
-use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::collections::{HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -10,13 +10,21 @@ use futures_util::future::join_all;
 use psi_ai::{
     AiError, ChatRequest, Client, Delta, FinishReason, RawToolCall, Response, ToolSchema, fix_call,
 };
+use psi_safety::always_ask::Rules;
+use psi_safety::blocked::{blocked_message, blocked_path, dir_to_add};
+use psi_safety::checkpoint::Checkpoints;
+use psi_safety::policy::{Decision, FileFacts, Mode, Policy};
 use psi_session::{Block, Entry, EntryBody, Role, SessionFile, StopReason, Usage};
 use psi_tools::{Tool, ToolCtx, ToolOutput};
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
+use crate::approval::{
+    Approval, ApprovalRequest, Approver, BlockedChoice, BlockedRequest, Headless,
+};
 use crate::events::AgentEvent;
+use crate::guards::{GuardAction, Guards};
 use crate::messages::{build_messages, plan_drop};
 
 /// Limits on one run (§5). Reaching one stops a headless run.
@@ -26,7 +34,7 @@ pub struct Budgets {
     pub max_turns: u32,
     pub max_tool_calls: u32,
     pub max_wall: Option<Duration>,
-    /// Failed tool calls in a row.
+    /// Failed tool calls in a row before a nudge; twice this pauses (§8.6).
     pub max_consecutive_errors: u32,
 }
 
@@ -36,7 +44,7 @@ impl Default for Budgets {
             max_turns: 40,
             max_tool_calls: 200,
             max_wall: None,
-            max_consecutive_errors: 20,
+            max_consecutive_errors: 10,
         }
     }
 }
@@ -78,6 +86,8 @@ pub enum Stop {
     /// A budget was reached (the model's run, cut short).
     Budget(String),
     Aborted,
+    /// A guard paused the run and nobody chose to go on (§8.6).
+    Guard(String),
     /// The harness or the server failed.
     Failed(String),
 }
@@ -88,13 +98,14 @@ impl Stop {
             Stop::Done => "done",
             Stop::Budget(_) => "budget",
             Stop::Aborted => "aborted",
+            Stop::Guard(_) => "guard",
             Stop::Failed(_) => "failed",
         }
     }
 
     pub fn reason(&self) -> Option<&str> {
         match self {
-            Stop::Budget(r) | Stop::Failed(r) => Some(r),
+            Stop::Budget(r) | Stop::Guard(r) | Stop::Failed(r) => Some(r),
             _ => None,
         }
     }
@@ -109,6 +120,31 @@ pub struct RunOutcome {
     pub tool_calls: u32,
 }
 
+/// What asks and what can be undone (psi-plan.md §8).
+pub struct Safety {
+    pub policy: Policy,
+    /// `None` when checkpoints are off (no git).
+    pub checkpoints: Option<Arc<Checkpoints>>,
+    pub approver: Arc<dyn Approver>,
+    /// Keys granted for the session: `--allow` entries, and `s` answers.
+    pub grants: HashSet<String>,
+    /// Mode, isolation and checkpoint state, recorded in `session_info`.
+    pub info: Value,
+}
+
+impl Safety {
+    /// Auto mode with the shipped list, no checkpoints, nobody to ask.
+    pub fn headless(root: &Path, home: Option<&Path>, tmpdir: &Path) -> Self {
+        Self {
+            policy: Policy::new(Mode::Auto, Rules::shipped(), root, home, tmpdir),
+            checkpoints: None,
+            approver: Arc::new(Headless),
+            grants: HashSet::new(),
+            info: Value::Null,
+        }
+    }
+}
+
 pub struct Agent {
     client: Client,
     session: SessionFile,
@@ -117,11 +153,29 @@ pub struct Agent {
     schemas: Vec<ToolSchema>,
     queues: Queues,
     events: Option<UnboundedSender<AgentEvent>>,
+    safety: Safety,
+    /// The last checkpoint capture failed: file writes ask (§7.2).
+    capture_failing: bool,
+    /// A checkpoint in this turn found changed files.
+    turn_changed: bool,
 }
 
 /// A call after the shape-fix pipeline: the tool and its arguments, or the
 /// refusal sent back instead.
 type Planned = Result<(Tool, serde_json::Map<String, Value>), String>;
+
+/// A call's identity for the guards: the tool and its arguments, without
+/// the free-text intent.
+fn signature(call: &RawToolCall, p: &Planned) -> String {
+    match p {
+        Ok((t, args)) => {
+            let mut a = args.clone();
+            a.remove("intent");
+            format!("{} {}", t.name(), Value::Object(a))
+        }
+        Err(_) => format!("{} {}", call.name, call.arguments),
+    }
+}
 
 /// The pause before the one retry of a request that may pass.
 const RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -129,6 +183,7 @@ const RETRY_DELAY: Duration = Duration::from_secs(1);
 impl Agent {
     pub fn new(client: Client, session: SessionFile, cfg: AgentConfig, ctx: ToolCtx) -> Self {
         let schemas = cfg.tools.iter().map(|t| t.schema()).collect();
+        let safety = Safety::headless(&ctx.cwd, cfg.home.as_deref(), &ctx.tmpdir);
         Self {
             client,
             session,
@@ -137,7 +192,23 @@ impl Agent {
             schemas,
             queues: Queues::default(),
             events: None,
+            safety,
+            capture_failing: false,
+            turn_changed: false,
         }
+    }
+
+    pub fn with_safety(mut self, safety: Safety) -> Self {
+        self.safety = safety;
+        self
+    }
+
+    pub fn safety(&self) -> &Safety {
+        &self.safety
+    }
+
+    pub fn session_mut(&mut self) -> &mut SessionFile {
+        &mut self.session
     }
 
     pub fn with_events(mut self, tx: UnboundedSender<AgentEvent>) -> Self {
@@ -216,13 +287,16 @@ impl Agent {
             self.record(EntryBody::Custom {
                 custom_type: "session_info".into(),
                 data: json!({"agent": "psi", "version": env!("CARGO_PKG_VERSION"),
-                             "cwd": self.ctx.cwd, "model": self.cfg.model}),
+                             "cwd": self.ctx.cwd, "model": self.cfg.model,
+                             "safety": self.safety.info}),
             })?;
         }
+        // At submit: this also captures the user's own edits (§7.2).
+        self.capture("submit", None).await?;
         self.record(Self::user_message(input))?;
         let start = Instant::now();
         let b = self.cfg.budgets.clone();
-        let mut consecutive_errors = 0u32;
+        let mut guards = Guards::new(b.max_consecutive_errors);
         let mut overflow_retries = 0u32;
         loop {
             if self.ctx.cancel.is_cancelled() {
@@ -297,6 +371,38 @@ impl Agent {
                 self.emit(AgentEvent::TurnEnd { turn });
                 let follow = Queues::take(&self.queues.follow_up);
                 if follow.is_empty() {
+                    let cut_off = (resp.finish == FinishReason::Length)
+                        .then(|| guards.on_truncated(self.cfg.max_output))
+                        .flatten();
+                    if let Some(GuardAction::Nudge { guard, text }) = cut_off {
+                        self.record(EntryBody::GuardEvent {
+                            guard: guard.into(),
+                            message: text.clone(),
+                            tool_call_id: None,
+                        })?;
+                        self.record(EntryBody::CustomMessage {
+                            custom_type: "guard".into(),
+                            content: vec![Block::Text { text }],
+                        })?;
+                        continue;
+                    }
+                    // Headless only: a person at the keyboard can just say
+                    // "go on", and a false alarm would cost them a turn.
+                    if !self.safety.approver.interactive()
+                        && let Some(GuardAction::Nudge { guard, text }) =
+                            guards.on_answer(&resp.text)
+                    {
+                        self.record(EntryBody::GuardEvent {
+                            guard: guard.into(),
+                            message: text.clone(),
+                            tool_call_id: None,
+                        })?;
+                        self.record(EntryBody::CustomMessage {
+                            custom_type: "guard".into(),
+                            content: vec![Block::Text { text }],
+                        })?;
+                        continue;
+                    }
                     return Ok(Stop::Done);
                 }
                 for f in follow {
@@ -305,19 +411,21 @@ impl Agent {
                 continue;
             }
 
-            let results = self.run_calls(&resp).await?;
-            out.tool_calls += results.len() as u32;
-            for failed in results {
-                consecutive_errors = if failed { consecutive_errors + 1 } else { 0 };
-            }
+            let (n, pause) = self.run_calls(&resp, &mut guards).await?;
+            out.tool_calls += n;
             self.emit(AgentEvent::TurnEnd { turn });
             if self.ctx.cancel.is_cancelled() {
                 return Ok(Stop::Aborted);
             }
-            if consecutive_errors >= b.max_consecutive_errors {
-                return Ok(Stop::Budget(format!(
-                    "{consecutive_errors} tool calls in a row failed"
-                )));
+            if let Some(reason) = pause {
+                let go_on = tokio::select! {
+                    g = self.safety.approver.pause(reason.clone()) => g,
+                    () = self.ctx.cancel.cancelled() => return Ok(Stop::Aborted),
+                };
+                if !go_on {
+                    return Ok(Stop::Guard(reason));
+                }
+                guards.reset();
             }
             for s in Queues::take(&self.queues.steering) {
                 self.record(Self::user_message(&s))?;
@@ -416,8 +524,13 @@ impl Agent {
     }
 
     /// Runs the calls of one response: read-only ones side by side, the
-    /// rest one at a time, in order. Returns, per call, whether it failed.
-    async fn run_calls(&mut self, resp: &Response) -> Result<Vec<bool>, String> {
+    /// rest one at a time, in order, each through the policy. Returns how
+    /// many ran, and why a guard paused, if one did.
+    async fn run_calls(
+        &mut self,
+        resp: &Response,
+        guards: &mut Guards,
+    ) -> Result<(u32, Option<String>), String> {
         let truncated = resp.finish == FinishReason::Length;
         let n = resp.tool_calls.len();
         let mut planned: Vec<(RawToolCall, Planned)> = Vec::new();
@@ -447,6 +560,7 @@ impl Agent {
             planned.push((call.clone(), fixed));
         }
 
+        self.turn_changed = false;
         let mut outputs: Vec<Option<ToolOutput>> = vec![None; planned.len()];
         let mut i = 0;
         while i < planned.len() {
@@ -466,6 +580,13 @@ impl Agent {
                     });
                 }
             }
+            if let (call, Ok((t, args))) = &planned[i]
+                && !t.read_only()
+            {
+                outputs[i] = Some(self.run_one(&call.id, *t, args, &resp.text).await?);
+                i = j;
+                continue;
+            }
             let ctx = &self.ctx;
             let futs = planned[i..j].iter().map(|(_, p)| async move {
                 match p {
@@ -479,9 +600,50 @@ impl Agent {
             i = j;
         }
 
-        let mut failed = Vec::new();
+        // Guards see every call, then the turn (§8.6).
+        let mut outputs: Vec<ToolOutput> = outputs
+            .into_iter()
+            .map(|o| o.unwrap_or_else(|| ToolOutput::err("not run")))
+            .collect();
+        let mut pause = None;
+        let mut fired = Vec::new();
+        for ((call, p), o) in planned.iter().zip(outputs.iter_mut()) {
+            let sig = signature(call, p);
+            for action in guards.on_call(&sig, o.is_error) {
+                fired.push((call.id.clone(), action.clone()));
+                match action {
+                    GuardAction::Nudge { text, .. } => {
+                        o.text.push('\n');
+                        o.text.push_str(&text);
+                    }
+                    GuardAction::Pause { reason, .. } => {
+                        pause.get_or_insert(reason);
+                    }
+                }
+            }
+        }
+        if let Some(action) = guards.on_turn_end(self.turn_changed)
+            && let (Some((call, _)), Some(o)) = (planned.last(), outputs.last_mut())
+        {
+            if let GuardAction::Nudge { text, .. } = &action {
+                o.text.push('\n');
+                o.text.push_str(text);
+            }
+            fired.push((call.id.clone(), action));
+        }
+        for (id, action) in fired {
+            let (guard, message) = match action {
+                GuardAction::Nudge { guard, text } => (guard, text),
+                GuardAction::Pause { guard, reason } => (guard, format!("paused: {reason}")),
+            };
+            self.record(EntryBody::GuardEvent {
+                guard: guard.into(),
+                message,
+                tool_call_id: Some(id),
+            })?;
+        }
+
         for ((call, p), o) in planned.iter().zip(outputs) {
-            let o = o.unwrap_or_else(|| ToolOutput::err("not run"));
             let name = match p {
                 Ok((t, _)) => t.name().to_owned(),
                 Err(_) => call.name.clone(),
@@ -489,9 +651,7 @@ impl Agent {
             self.record(EntryBody::ToolResult {
                 tool_call_id: call.id.clone(),
                 tool_name: name.clone(),
-                content: vec![Block::Text {
-                    text: o.text.clone(),
-                }],
+                content: vec![Block::Text { text: o.text }],
                 is_error: o.is_error,
             })?;
             self.emit(AgentEvent::ToolEnd {
@@ -499,9 +659,222 @@ impl Agent {
                 name,
                 is_error: o.is_error,
             });
-            failed.push(o.is_error);
         }
-        Ok(failed)
+        Ok((planned.len() as u32, pause))
+    }
+
+    /// One call that may change something: the policy decides whether it
+    /// runs, asks or is refused; a blocked bash write offers the user a
+    /// rerun (D-23); a checkpoint follows.
+    async fn run_one(
+        &mut self,
+        id: &str,
+        tool: Tool,
+        args: &serde_json::Map<String, Value>,
+        preceding: &str,
+    ) -> Result<ToolOutput, String> {
+        let decision = match tool {
+            Tool::Bash => self
+                .safety
+                .policy
+                .bash(args.get("command").and_then(Value::as_str).unwrap_or("")),
+            Tool::Write | Tool::Edit => {
+                let path = tool.target(args, &self.ctx).unwrap_or_default();
+                let ignored = match self.safety.checkpoints.clone() {
+                    Some(cp) => {
+                        let p = path.clone();
+                        tokio::task::spawn_blocking(move || cp.is_ignored(&p))
+                            .await
+                            .unwrap_or(false)
+                    }
+                    None => false,
+                };
+                let facts = FileFacts {
+                    ignored,
+                    capture_failing: self.capture_failing,
+                };
+                let shown = args.get("path").and_then(Value::as_str).unwrap_or("");
+                self.safety
+                    .policy
+                    .file_write(tool.name(), &path, shown, facts)
+            }
+            _ => Decision::Allow,
+        };
+        match decision {
+            Decision::Allow => {}
+            Decision::Refuse(msg) => {
+                self.policy(id, "refused", &msg)?;
+                return Ok(ToolOutput::err(msg));
+            }
+            Decision::Ask { reason, keys } => {
+                if keys.iter().all(|k| self.safety.grants.contains(k)) {
+                    self.policy(id, "granted", &reason)?;
+                } else {
+                    let req = ApprovalRequest {
+                        tool_call_id: id.into(),
+                        tool: tool.name().into(),
+                        args: Value::Object(args.clone()),
+                        intent: args
+                            .get("intent")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        preceding_text: preceding.into(),
+                        reason: reason.clone(),
+                        keys: keys.clone(),
+                    };
+                    let answer = tokio::select! {
+                        a = self.safety.approver.approve(req) => a,
+                        () = self.ctx.cancel.cancelled() => Approval::Deny,
+                    };
+                    match answer {
+                        Approval::Once => self.policy(id, "approved", &reason)?,
+                        Approval::Session => {
+                            self.safety.grants.extend(keys);
+                            self.policy(id, "approved_session", &reason)?;
+                        }
+                        Approval::Deny | Approval::DenyWith(_) => {
+                            self.policy(id, "denied", &reason)?;
+                            return Ok(ToolOutput::err(self.denial(&reason, answer)));
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut out = tool.run(args, &self.ctx).await;
+        if tool == Tool::Bash
+            && out.is_error
+            && let Some(sb) = self.ctx.sandbox.clone()
+            && let Some(path) = blocked_path(&out.text, &sb.writable())
+        {
+            let dir = dir_to_add(&path);
+            let req = BlockedRequest {
+                tool_call_id: id.into(),
+                command: args
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .into(),
+                path: path.clone(),
+                dir: dir.clone(),
+            };
+            let choice = tokio::select! {
+                c = self.safety.approver.blocked(req) => c,
+                () = self.ctx.cancel.cancelled() => BlockedChoice::No,
+            };
+            let shown = path.display().to_string();
+            match choice {
+                BlockedChoice::RerunOutside => {
+                    self.policy(id, "rerun_outside", &shown)?;
+                    let again = psi_tools::bash::run(args.clone(), &self.ctx, true).await;
+                    out = ToolOutput {
+                        text: format!(
+                            "[the user approved running it outside the sandbox]\n{}",
+                            again.text
+                        ),
+                        is_error: again.is_error,
+                    };
+                }
+                BlockedChoice::AddDir => match sb.add_dir(&dir, self.cfg.home.as_deref()) {
+                    Ok(()) => {
+                        self.policy(id, "dir_added", &dir.display().to_string())?;
+                        let again = tool.run(args, &self.ctx).await;
+                        out = ToolOutput {
+                            text: format!(
+                                "[the user made {} writable for this session; it ran again]\n{}",
+                                dir.display(),
+                                again.text
+                            ),
+                            is_error: again.is_error,
+                        };
+                    }
+                    Err(e) => {
+                        self.policy(id, "blocked", &e)?;
+                        out.text.push_str(&format!("\n{}", blocked_message(&path)));
+                    }
+                },
+                BlockedChoice::No => {
+                    self.policy(id, "blocked", &shown)?;
+                    out.text.push_str(&format!("\n{}", blocked_message(&path)));
+                }
+            }
+        }
+        if self.capture("tool", Some(id)).await? {
+            self.turn_changed = true;
+        }
+        Ok(out)
+    }
+
+    /// The model's message for a denied call.
+    fn denial(&self, reason: &str, answer: Approval) -> String {
+        if let Approval::DenyWith(m) = answer {
+            return format!("The user denied this call: {m}");
+        }
+        if self.safety.approver.interactive() {
+            format!(
+                "The user denied this call ({reason}). Don't retry it in another form; ask the user if you need it."
+            )
+        } else {
+            format!(
+                "Not run: {reason}. This run can't ask the user, so it was denied. Don't retry it in another form; say in your answer what you needed."
+            )
+        }
+    }
+
+    fn policy(&mut self, id: &str, decision: &str, reason: &str) -> Result<(), String> {
+        self.record(EntryBody::PolicyDecision {
+            tool_call_id: id.into(),
+            decision: decision.into(),
+            reason: reason.into(),
+            rewrite: None,
+        })
+        .map(|_| ())
+    }
+
+    /// Snapshots the workspace (§7.2). A submit is always recorded, so
+    /// /undo can find it; a tool step only when files changed. Returns
+    /// whether they did. A failed capture makes file writes ask.
+    async fn capture(&mut self, trigger: &str, call: Option<&str>) -> Result<bool, String> {
+        let Some(cp) = self.safety.checkpoints.clone() else {
+            return Ok(false);
+        };
+        let msg = match call {
+            Some(c) => format!("{trigger} {c}"),
+            None => trigger.to_owned(),
+        };
+        let res = tokio::task::spawn_blocking(move || cp.capture(&msg))
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r.map_err(|e| e.to_string()));
+        match res {
+            Ok(c) => {
+                self.capture_failing = false;
+                tracing::debug!(
+                    ms = c.elapsed.as_millis() as u64,
+                    changed = c.changed,
+                    "checkpoint"
+                );
+                if c.changed || trigger == "submit" {
+                    self.record(EntryBody::Checkpoint {
+                        commit: c.commit,
+                        trigger: Some(trigger.into()),
+                        tool_call_id: call.map(str::to_owned),
+                    })?;
+                }
+                Ok(c.changed)
+            }
+            Err(e) => {
+                self.capture_failing = true;
+                self.record(EntryBody::GuardEvent {
+                    guard: "checkpoint_failed".into(),
+                    message: format!(
+                        "the checkpoint failed, so file writes ask until one works: {e}"
+                    ),
+                    tool_call_id: call.map(str::to_owned),
+                })?;
+                Ok(false)
+            }
+        }
     }
 
     /// Context overflow (§4.2): drop the oldest turns so the request fits,

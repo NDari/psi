@@ -204,21 +204,45 @@ pub fn timeline(rec: &Record) -> Timeline {
     }
 }
 
-/// Flags loops, unchanged retries, no-op edits, truncated calls, doubled
-/// working-directory paths, context overflows and nested sessions.
-// TODO(phase-3): retries after a blocked call, once policy decisions exist.
+/// Flags loops, unchanged retries, retries after a block or denial (H-04),
+/// no-op edits, truncated calls, doubled working-directory paths, context
+/// overflows and nested sessions.
 fn detect(events: &[Event], cwd: Option<&str>) -> Vec<Pattern> {
     let mut out = Vec::new();
     let mut prev: Option<(&Call, u32)> = None;
     let mut run_len = 1;
+    let mut last_step: Option<&Step> = None;
+    // The tool of a call that was blocked or denied, until the next call.
+    let mut blocked: Option<(&str, &str)> = None;
     for ev in events {
         match ev {
+            Event::Policy {
+                tool_call_id,
+                decision,
+                ..
+            } if matches!(decision.as_str(), "blocked" | "denied" | "refused") => {
+                if let Some(c) =
+                    last_step.and_then(|s| s.calls.iter().find(|c| &c.id == tool_call_id))
+                {
+                    blocked = Some((c.name.as_str(), decision.as_str()));
+                }
+            }
             Event::RequestFailed { error } if is_overflow(error) => out.push(Pattern {
                 kind: "context_overflow",
                 step: None,
                 detail: error.clone(),
             }),
             Event::Step(s) => {
+                last_step = Some(s);
+                if let (Some((tool, how)), Some(c)) = (blocked.take(), s.calls.first())
+                    && c.name == tool
+                {
+                    out.push(Pattern {
+                        kind: "retry_after_block",
+                        step: Some(s.n),
+                        detail: format!("{tool} called again right after a call was {how}"),
+                    });
+                }
                 if s.stop_reason == Some(StopReason::Length) {
                     out.push(Pattern {
                         kind: "truncated",
@@ -590,6 +614,33 @@ mod tests {
                 ("retry_unchanged", Some(3))
             ]
         );
+    }
+
+    #[test]
+    fn detects_retries_after_a_block() {
+        let policy = |d: &str| Event::Policy {
+            tool_call_id: "c".into(),
+            decision: d.into(),
+            reason: "r".into(),
+        };
+        let ev = vec![
+            step(
+                1,
+                vec![call("bash", json!({"command": "touch /etc/x"}), true)],
+            ),
+            policy("blocked"),
+            step(
+                2,
+                vec![call("bash", json!({"command": "sudo touch /etc/x"}), true)],
+            ),
+            policy("denied"),
+            step(3, vec![call("read", json!({"path": "a"}), false)]),
+        ];
+        let kinds: Vec<_> = detect(&ev, None)
+            .into_iter()
+            .map(|p| (p.kind, p.step))
+            .collect();
+        assert_eq!(kinds, [("retry_after_block", Some(2))]);
     }
 
     #[test]

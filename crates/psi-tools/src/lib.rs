@@ -1,7 +1,7 @@
 //! Core tools: read, write, edit, bash, and the optional grep, find and ls
 //! (psi-plan.md §6). Results say exactly what happened and what to do next.
 
-mod bash;
+pub mod bash;
 mod edit;
 mod files;
 mod read;
@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use psi_ai::ToolSchema;
+use psi_safety::Sandbox;
 use serde_json::{Map, Value};
 use tokio_util::sync::CancellationToken;
 
@@ -29,6 +30,8 @@ pub struct ToolCtx {
     /// bash's `TMPDIR`, kept for the session.
     pub tmpdir: PathBuf,
     pub cancel: CancellationToken,
+    /// The boundary bash runs inside; `None` runs it directly (§8.4).
+    pub sandbox: Option<Arc<Sandbox>>,
 }
 
 impl ToolCtx {
@@ -39,6 +42,7 @@ impl ToolCtx {
             max_result_chars,
             tmpdir: tmpdir.to_owned(),
             cancel: CancellationToken::new(),
+            sandbox: None,
         }
     }
 
@@ -153,7 +157,7 @@ impl Tool {
             return ToolOutput::err("Aborted before it ran.");
         }
         let f: fn(&Map<String, Value>, &ToolCtx) -> ToolOutput = match self {
-            Tool::Bash => return bash::run(args.clone(), ctx).await,
+            Tool::Bash => return bash::run(args.clone(), ctx, false).await,
             Tool::Read => read::run,
             Tool::Write => write::run,
             Tool::Edit => edit::run,

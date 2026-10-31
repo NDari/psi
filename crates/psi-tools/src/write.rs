@@ -28,8 +28,8 @@ pub(crate) fn run(args: &Map<String, Value>, ctx: &ToolCtx) -> ToolOutput {
     let shown = str_arg(args, "path");
     let content = str_arg(args, "text");
     let path = ctx.resolve(shown);
-    // TODO(phase-3): refuse writes to ~/.psi and the workspace's .psi (D-27);
-    // ask before writing gitignored paths.
+    // The policy (psi-safety) refuses .psi and asks for gitignored paths
+    // before this runs (D-27).
     if path.is_dir() {
         return ToolOutput::err(format!("{shown} is a directory; give a file path."));
     }

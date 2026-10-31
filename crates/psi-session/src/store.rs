@@ -107,6 +107,21 @@ impl SessionFile {
             .unwrap_or_else(|| unreachable!("just pushed")))
     }
 
+    /// The entry new ones attach to.
+    pub fn leaf(&self) -> Option<&str> {
+        self.leaf.as_deref()
+    }
+
+    /// Moves the leaf to an existing entry (/rewind, /tree): the next entry
+    /// starts a new branch there. Persisted only once an entry is appended.
+    pub fn set_leaf(&mut self, id: &str) -> Result<(), SessionError> {
+        if !self.entries.iter().any(|e| e.id == id) {
+            return Err(SessionError::NoEntry(id.to_owned()));
+        }
+        self.leaf = Some(id.to_owned());
+        Ok(())
+    }
+
     /// The current branch, from the root to the leaf.
     pub fn branch(&self) -> Vec<&Entry> {
         branch(&self.entries, self.leaf.as_deref())
@@ -133,7 +148,7 @@ mod tests {
     use super::*;
 
     fn cp(c: &str) -> EntryBody {
-        EntryBody::Checkpoint { commit: c.into() }
+        EntryBody::checkpoint(c)
     }
 
     #[test]

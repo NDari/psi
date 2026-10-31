@@ -279,19 +279,39 @@ async fn turn_budget_stops_the_run() {
 }
 
 #[tokio::test]
-async fn consecutive_errors_stop_the_run() {
-    let replies = (0..5)
-        .map(|_| call("read", json!({"path": "missing"})))
+async fn error_streaks_nudge_then_stop_headless_runs() {
+    let replies = (0..6)
+        .map(|i| call("read", json!({"path": format!("missing{i}")})))
         .collect();
     let f = Fixture::new(replies);
     let mut a = f.agent(Budgets {
         max_consecutive_errors: 2,
         ..Budgets::default()
     });
+    // A nudge after 2 failures in a row; after 4 the run pauses, and a
+    // headless run stops.
     assert_eq!(
         a.run("x").await.stop,
-        Stop::Budget("2 tool calls in a row failed".into())
+        Stop::Guard("4 tool calls in a row failed".into())
     );
+    let results = tool_results(&a);
+    assert_eq!(results.len(), 4);
+    assert!(
+        results[1].0.ends_with(
+            "Re-read the relevant files and the last error, and re-plan before the next call."
+        ),
+        "{results:?}"
+    );
+    let guards: Vec<String> = a
+        .session()
+        .entries()
+        .iter()
+        .filter_map(|e| match &e.body {
+            EntryBody::GuardEvent { guard, .. } => Some(guard.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(guards, ["error_streak", "error_streak"]);
 }
 
 #[tokio::test]
@@ -428,4 +448,61 @@ fn copy_dir(src: &Path, dst: &Path) {
             std::fs::copy(e.path(), to).unwrap();
         }
     }
+}
+
+/// Gemma 4 12B ended runs by announcing a step without making the call
+/// (psi eval fix_invoice_rounding and multi_sqlite_migration, 2026-10-31).
+/// A headless run gets one nudge and goes on.
+#[tokio::test]
+async fn an_announced_step_gets_one_nudge() {
+    let f = Fixture::new(vec![
+        text("The totals are off by a cent.\n\nNow I will examine `billing/money.py`."),
+        call("read", json!({"path": "money.py"})),
+        text("Now I will fix it."),
+    ]);
+    std::fs::write(f.cwd.join("money.py"), "x = 1\n").unwrap();
+    let (out, a) = f.run("fix the rounding").await;
+    assert_eq!(out.stop, Stop::Done);
+    assert_eq!(out.turns, 3, "the second announcement ends the run");
+    let reqs = f.server.chat_requests();
+    let m = reqs[1]["messages"].as_array().unwrap();
+    assert_eq!(m.last().unwrap()["role"], "user");
+    assert!(
+        m.last().unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .starts_with("You described a next step but made no tool call")
+    );
+    assert!(a.session().entries().iter().any(
+        |e| matches!(&e.body, EntryBody::GuardEvent { guard, .. } if guard == "announced_stop")
+    ));
+}
+
+/// Gemma 4 12B rambled until max_tokens with no tool call (psi eval
+/// multi_split_package, 2026-10-31), and the run ended as if it had
+/// answered. A cut-off answer gets another turn, at most twice per run.
+#[tokio::test]
+async fn an_answer_cut_off_by_the_output_limit_continues() {
+    let cut = || {
+        Reply::Chat(ScriptedReply {
+            text: "I'll rewrite it.\n\nWait, I'll just".into(),
+            finish: Some("length".into()),
+            ..Default::default()
+        })
+    };
+    let f = Fixture::new(vec![cut(), cut(), cut(), text("never")]);
+    let (out, a) = f.run("split the module").await;
+    assert_eq!(out.stop, Stop::Done);
+    assert_eq!(out.turns, 3, "two retries, then the run ends");
+    let m = f.server.chat_requests()[1]["messages"].clone();
+    let last = m.as_array().unwrap().last().unwrap().clone();
+    assert!(
+        last["content"]
+            .as_str()
+            .unwrap()
+            .starts_with("Your reply hit the output limit (512 tokens)"),
+        "{last}"
+    );
+    let n = a.session().entries().iter().filter(|e| matches!(&e.body, EntryBody::GuardEvent { guard, .. } if guard == "truncated_answer")).count();
+    assert_eq!(n, 2);
 }

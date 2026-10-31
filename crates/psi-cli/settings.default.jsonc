@@ -6,4 +6,14 @@
   "mode": "auto",
   // "on" or "off"; "off" cuts bash off from the network (D-08).
   "network": "on",
+  // "bwrap" runs bash inside bubblewrap (§8.4). "off" runs it directly, for
+  // when something else is the boundary (an eval container).
+  "isolation": "bwrap",
+  // Writable inside the sandbox when they exist; ~ is the home directory.
+  "cache_dirs": ["~/.cache", "~/.cargo/registry", "~/.cargo/git", "~/.npm", "~/go/pkg/mod"],
+  // Entries added to the shipped always-ask list (rules/always-ask.jsonc). Every
+  // layer appends; for example ["terraform destroy", "make deploy"].
+  "always_ask": [],
+  // Shipped entries to drop, by name; every layer appends, e.g. ["git clean"].
+  "always_ask_remove": [],
 }

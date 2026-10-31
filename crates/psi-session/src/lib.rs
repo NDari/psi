@@ -14,4 +14,5 @@ pub use jsonl::{SessionError, read_entries, write_entries};
 pub use store::{SessionFile, branch, cwd_slug};
 
 // TODO(phase-4): /tree, /fork and /label in the TUI.
-// TODO(phase-3): checkpoints (§7.2). TODO(phase-7): compaction tuning (§7.4).
+// Checkpoints themselves live in psi-safety; sessions record them as entries.
+// TODO(phase-7): compaction tuning (§7.4).

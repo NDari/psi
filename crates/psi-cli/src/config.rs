@@ -1,7 +1,8 @@
 //! Layered JSONC settings (psi-plan.md §3.4, D-04).
 //!
 //! Layers, lowest first: built-in, user, project, command-line flags. A later
-//! layer overrides scalars and arrays, and merges objects key by key.
+//! layer overrides scalars and arrays, and merges objects key by key. Rule
+//! lists (`always_ask`, `always_ask_remove`) append instead (§8.3).
 
 use std::path::{Path, PathBuf};
 
@@ -61,20 +62,41 @@ pub fn parse_jsonc(text: &str, origin: &str) -> Result<Value> {
     jsonc_parser::parse_to_serde_value(text, &options).map_err(|e| anyhow::anyhow!("{origin}: {e}"))
 }
 
-/// Merges `over` into `base`: objects merge by key, everything else replaces.
+/// Top-level lists that every layer appends to.
+const APPEND_KEYS: &[&str] = &["always_ask", "always_ask_remove"];
+
+/// Merges `over` into `base`: objects merge by key, rule lists append,
+/// everything else replaces.
 pub fn merge(base: &mut Value, over: Value) {
+    let (Value::Object(b), Value::Object(o)) = (&mut *base, &over) else {
+        *base = over;
+        return;
+    };
+    for (k, v) in o.clone() {
+        match (b.get_mut(&k), v) {
+            (Some(Value::Array(list)), Value::Array(more)) if APPEND_KEYS.contains(&k.as_str()) => {
+                list.extend(more);
+            }
+            (Some(slot), v) => merge_value(slot, v),
+            (None, v) => {
+                b.insert(k, v);
+            }
+        }
+    }
+}
+
+fn merge_value(base: &mut Value, over: Value) {
     match (base, over) {
         (Value::Object(b), Value::Object(o)) => {
             for (k, v) in o {
                 match b.get_mut(&k) {
-                    Some(slot) => merge(slot, v),
+                    Some(slot) => merge_value(slot, v),
                     None => {
                         b.insert(k, v);
                     }
                 }
             }
         }
-        // TODO(phase-3): rule lists append instead of replacing (§8.3).
         (slot, v) => *slot = v,
     }
 }
@@ -152,6 +174,19 @@ mod tests {
     }
 
     #[test]
+    fn rule_lists_append_across_layers() {
+        let mut base = json!({"always_ask": ["a"], "always_ask_remove": [], "cache_dirs": ["x"]});
+        merge(
+            &mut base,
+            json!({"always_ask": ["b"], "always_ask_remove": ["git clean"], "cache_dirs": ["y"]}),
+        );
+        assert_eq!(
+            base,
+            json!({"always_ask": ["a", "b"], "always_ask_remove": ["git clean"], "cache_dirs": ["y"]})
+        );
+    }
+
+    #[test]
     fn merge_replaces_object_with_scalar() {
         let mut base = json!({"o": {"x": 1}});
         merge(&mut base, json!({"o": false}));
@@ -174,7 +209,9 @@ mod tests {
             project: Some(project),
         };
         let v = load(&paths, json!({"mode": "auto"})).unwrap();
-        assert_eq!(v, json!({"mode": "auto", "network": "off", "u": 2}));
+        assert_eq!(v["mode"], "auto");
+        assert_eq!(v["network"], "off");
+        assert_eq!(v["u"], 2);
     }
 
     #[test]
