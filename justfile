@@ -66,7 +66,10 @@ llm-up model="qwen":
     fi
     cmd="llama-server $args --no-mmproj --jinja --alias local -c {{ctx}} -ngl 99 --port {{port}} --reasoning off --seed 0"
     echo "$cmd" > "{{state}}/cmd"
-    setsid nohup $cmd > "{{state}}/log" 2>&1 < /dev/null &
+    # setsid is util-linux's; macOS has none, and nohup alone keeps it running.
+    detach="nohup"
+    command -v setsid >/dev/null && detach="setsid nohup"
+    $detach $cmd > "{{state}}/log" 2>&1 < /dev/null &
     echo $! > "{{state}}/pid"
     echo "llama-server starting ({{model}}), log: {{state}}/log"
     for _ in $(seq 600); do
