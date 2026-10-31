@@ -182,7 +182,7 @@ evals/              # Task sets, graders, adapters (not embedded)
   "models": [{
     "id": "qwen3.5-4b",
     "provider": "openai-compat",
-    "base_url": "http://127.0.0.1:8080/v1",
+    "base_url": "http://127.0.0.1:9931/v1",
     "context_window": "auto",          // from /props when available
     "max_output": 4096,
     "reasoning": { "format": "think_tags", "strip_from_history": true },

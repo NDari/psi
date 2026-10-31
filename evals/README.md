@@ -42,11 +42,11 @@ psi inspect RUN/TASK/trial-0       # one trial as a timeline
 ```
 
 `psi eval run` needs podman and a llama-server already running on
-`127.0.0.1:<port>` (default 8080) with `--jinja`. It does not start or
+`127.0.0.1:<port>` (default 9931) with `--jinja`. It does not start or
 restart the server; the run records what `/props` reports (model path,
 build, context window, default sampling) in `run.json`.
 
-The reference models (D-29) start with `just llm-up qwen` or `just llm-up gemma` (`just llm-down` stops it): Qwen3.5 4B Q4_K_M and Gemma 4 12B QAT Q4_0, context 131072, thinking off, seed 0, on port 8080. The exact command goes to `.llm/cmd`. `just eval-check` and `just eval-run` wrap the commands above.
+The reference models (D-29) start with `just llm-up qwen` or `just llm-up gemma` (`just llm-down` stops it): Qwen3.5 4B Q4_K_M and Gemma 4 12B QAT Q4_0, context 131072, thinking off, seed 0, on port 9931. The exact command goes to `.llm/cmd`. `just eval-check` and `just eval-run` wrap the commands above.
 
 The sampling flags are each model card's recommendation; the agents send
 no sampling fields, so the server's flags apply (H-08).

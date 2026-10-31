@@ -3,7 +3,7 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
 # llama-server settings for llm-up; override like `just ctx=65536 llm-up qwen`.
-port := "8080"
+port := "9931"
 ctx := "131072"
 state := justfile_directory() / ".llm"
 

@@ -67,7 +67,7 @@ enum EvalCommand {
         #[arg(long, value_enum, default_value = "pi")]
         agent: AgentArg,
         /// llama-server's port on 127.0.0.1.
-        #[arg(long, default_value_t = 8080)]
+        #[arg(long, default_value_t = 9931)]
         port: u16,
         /// Model requests per trial before it is stopped.
         #[arg(long, default_value_t = 40)]
