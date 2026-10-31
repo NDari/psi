@@ -12,6 +12,9 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+crossterm.workspace = true
+futures-util.workspace = true
+ignore.workspace = true
 jsonc-parser.workspace = true
 psi-agent = { path = "../psi-agent" }
 psi-ai = { path = "../psi-ai" }
@@ -19,13 +22,17 @@ psi-safety = { path = "../psi-safety" }
 psi-lab = { path = "../psi-lab" }
 psi-session = { path = "../psi-session" }
 psi-tools = { path = "../psi-tools" }
+psi-tui = { path = "../psi-tui" }
 serde_json.workspace = true
+similar.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+rustix = { workspace = true, features = ["pty", "termios", "process"] }
+vt100.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 

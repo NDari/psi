@@ -6,12 +6,13 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
+use psi_agent::approval::{Approver, Headless};
 use psi_agent::prompt::{PromptFacts, project_context, system_prompt};
 use psi_agent::{Agent, AgentConfig, Budgets, Stop};
 use psi_ai::profile::{ContextWindow, ModelProfile};
 use psi_ai::{AiError, Client, WireLog};
 use psi_cli::config;
-use psi_cli::safety::{SafetySetup, SetupPaths, setup};
+use psi_cli::safety::{SafetySetup, SetupPaths, setup_with};
 use psi_session::SessionFile;
 use psi_tools::{ToolCtx, core_tools};
 use serde_json::Value;
@@ -64,7 +65,25 @@ pub fn pick_profile(home: Option<&Path>, model: Option<&str>) -> Result<ModelPro
     }
 }
 
-pub async fn run(args: RunArgs) -> Result<ExitCode> {
+/// Everything a mode needs to run the agent.
+pub struct Prepared {
+    pub agent: Agent,
+    pub profile: ModelProfile,
+    pub n_ctx: u64,
+    pub tmpdir: PathBuf,
+    pub cwd: PathBuf,
+    pub home: Option<PathBuf>,
+    /// `~/.psi/sessions`.
+    pub sessions: PathBuf,
+    /// Said once at startup.
+    pub warnings: Vec<String>,
+    /// The safety setup, as recorded in `session_info`.
+    pub info: Value,
+}
+
+/// The model check, the session, safety and the agent, for print, JSON
+/// and interactive modes alike.
+pub async fn prepare(args: &RunArgs, approver: Arc<dyn Approver>) -> Result<Prepared> {
     let home = std::env::home_dir();
     let cwd = std::env::current_dir().context("reading the working directory")?;
     let profile = pick_profile(home.as_deref(), args.model.as_deref())?;
@@ -121,7 +140,7 @@ pub async fn run(args: RunArgs) -> Result<ExitCode> {
         safety,
         sandbox,
         warnings,
-    } = setup(
+    } = setup_with(
         &args.settings,
         &args.allow,
         args.mode_flag,
@@ -131,10 +150,8 @@ pub async fn run(args: RunArgs) -> Result<ExitCode> {
             tmpdir: &tmpdir,
             session: &stem,
         },
+        approver,
     )?;
-    for w in &warnings {
-        eprintln!("psi: {w}");
-    }
     let tools = core_tools(profile.tools.grep_find_ls);
     let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
     let facts = PromptFacts {
@@ -159,7 +176,31 @@ pub async fn run(args: RunArgs) -> Result<ExitCode> {
         tools,
         home: home.clone(),
     };
-    let mut agent = Agent::new(client, session, cfg, ctx).with_safety(safety);
+    let info = safety.info.clone();
+    let agent = Agent::new(client, session, cfg, ctx).with_safety(safety);
+    Ok(Prepared {
+        agent,
+        profile,
+        n_ctx,
+        tmpdir,
+        cwd,
+        home,
+        sessions,
+        warnings,
+        info,
+    })
+}
+
+pub async fn run(args: RunArgs) -> Result<ExitCode> {
+    let Prepared {
+        mut agent,
+        tmpdir,
+        warnings,
+        ..
+    } = prepare(&args, Arc::new(Headless)).await?;
+    for w in &warnings {
+        eprintln!("psi: {w}");
+    }
 
     let printer = if args.json {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

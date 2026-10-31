@@ -13,6 +13,6 @@ pub use entry::{Block, Entry, EntryBody, IdGen, Role, StopReason, Usage, text_of
 pub use jsonl::{SessionError, read_entries, write_entries};
 pub use store::{SessionFile, branch, cwd_slug};
 
-// TODO(phase-4): /tree, /fork and /label in the TUI.
+// TODO(phase-7): /fork and /export (HTML) alongside the export work.
 // Checkpoints themselves live in psi-safety; sessions record them as entries.
 // TODO(phase-7): compaction tuning (§7.4).

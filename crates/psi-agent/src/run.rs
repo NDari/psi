@@ -158,6 +158,8 @@ pub struct Agent {
     capture_failing: bool,
     /// A checkpoint in this turn found changed files.
     turn_changed: bool,
+    /// The token that aborts the current run; a new one per run after an abort.
+    abort: Arc<Mutex<CancellationToken>>,
 }
 
 /// A call after the shape-fix pipeline: the tool and its arguments, or the
@@ -195,6 +197,46 @@ impl Agent {
             safety,
             capture_failing: false,
             turn_changed: false,
+            abort: Arc::new(Mutex::new(CancellationToken::new())),
+        }
+        .with_abort_token()
+    }
+
+    fn with_abort_token(self) -> Self {
+        if let Ok(mut a) = self.abort.lock() {
+            *a = self.ctx.cancel.clone();
+        }
+        self
+    }
+
+    /// Cancelling the token inside aborts the run going on now (Esc). It
+    /// stays valid across runs: each run after an abort gets a fresh token.
+    pub fn abort_handle(&self) -> Arc<Mutex<CancellationToken>> {
+        self.abort.clone()
+    }
+
+    pub fn safety_mut(&mut self) -> &mut Safety {
+        &mut self.safety
+    }
+
+    /// Text the model sees with the next request, as a `custom_message`
+    /// (the output of `!cmd`, extension messages).
+    pub fn add_context(&mut self, custom_type: &str, text: &str) -> Result<(), String> {
+        self.record(EntryBody::CustomMessage {
+            custom_type: custom_type.into(),
+            content: vec![Block::Text { text: text.into() }],
+        })
+        .map(|_| ())
+    }
+
+    /// Continues in another session file (/new, /resume), with its own
+    /// checkpoints.
+    pub fn set_session(&mut self, session: SessionFile, checkpoints: Option<Arc<Checkpoints>>) {
+        self.session = session;
+        self.safety.checkpoints = checkpoints;
+        self.capture_failing = false;
+        if let Ok(mut f) = self.ctx.files.lock() {
+            *f = psi_tools::FileTracker::default();
         }
     }
 
@@ -259,6 +301,12 @@ impl Agent {
 
     /// Runs the agent on one user input.
     pub async fn run(&mut self, input: &str) -> RunOutcome {
+        if self.ctx.cancel.is_cancelled() {
+            self.ctx.cancel = CancellationToken::new();
+            if let Ok(mut a) = self.abort.lock() {
+                *a = self.ctx.cancel.clone();
+            }
+        }
         self.emit(AgentEvent::RunStart {
             session: self.session.path().display().to_string(),
         });

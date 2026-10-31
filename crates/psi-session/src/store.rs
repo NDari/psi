@@ -61,11 +61,11 @@ impl SessionFile {
         })
     }
 
-    /// The most recent session file for `cwd`, if any.
-    pub fn latest(root: &Path, cwd: &Path) -> Option<PathBuf> {
-        let dir = root.join(cwd_slug(cwd));
+    /// The session files in one directory (`<root>/<cwd-slug>`), oldest first.
+    pub fn list(dir: &Path) -> Vec<PathBuf> {
         let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
-            .ok()?
+            .into_iter()
+            .flatten()
             .flatten()
             .map(|e| e.path())
             .filter(|p| {
@@ -74,7 +74,12 @@ impl SessionFile {
             })
             .collect();
         files.sort();
-        files.pop()
+        files
+    }
+
+    /// The most recent session file for `cwd`, if any.
+    pub fn latest(root: &Path, cwd: &Path) -> Option<PathBuf> {
+        Self::list(&root.join(cwd_slug(cwd))).pop()
     }
 
     pub fn path(&self) -> &Path {

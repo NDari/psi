@@ -728,6 +728,7 @@ Each phase ends with its acceptance criteria passing in the local check, where a
 - Renderer, commit-once rules, editor, streaming, approval card, status line, slash commands, steering and follow-up, `/tree`, `/mode`, `/show`, `/diff`, `/stats`.
 - ✅ The feel targets in §11.3.
 - ✅ A manual QA checklist, including dropdown, modal and resize behavior.
+- Built 2026-10-31: `docs/qa-tui.md` is the checklist; `crates/psi-cli/tests/tui.rs` drives the real binary in a pseudo-terminal for the automatable items and measures the feel targets (release: about 10 ms to interactive, under 3 ms keystroke to screen). Narrowing the window assumes the terminal reflows lines (kitty, foot, alacritty, VTE, Konsole do; xterm doesn't). `/fork` and HTML `/export` move to Phase 7; keybindings and themes stay in Phase 6. `!cmd` adds its output to the context and `!!cmd` doesn't (pi parity).
 
 **Phase 5: extensions.**
 - Verify mlua limits on Lua 5.4. Then the API schema and codegen, Lua actors, manifests, the event set, tools, commands, renderers, UI primitives and custom components, `/reload`, project trust, script tools, `psi ext check`, `psi ext test`.

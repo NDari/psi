@@ -1,3 +1,4 @@
+mod interactive;
 mod run_mode;
 
 use std::path::{Path, PathBuf};
@@ -238,15 +239,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let paths = SettingsPaths::discover(std::env::home_dir().as_deref(), &cwd);
             let settings = config::load(&paths, flags_layer(&cli))?;
             tracing::debug!(%settings, "settings loaded");
-            let Some(prompt) = cli.print else {
-                // TODO(phase-4): interactive mode.
-                eprintln!(
-                    "psi: the interactive mode is not built yet; run a prompt with psi -p \"...\""
-                );
-                return Ok(ExitCode::from(2));
-            };
+            let interactive = cli.print.is_none();
             let args = run_mode::RunArgs {
-                prompt,
+                prompt: cli.print.unwrap_or_default(),
                 json: cli.json,
                 model: cli.model,
                 continue_last: cli.continue_last,
@@ -256,6 +251,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 allow: cli.allow,
                 mode_flag: cli.mode.is_some(),
             };
+            if interactive {
+                if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+                    bail!(
+                        "the interactive mode needs a terminal; run a prompt with psi -p \"...\""
+                    );
+                }
+                return interactive::run(args);
+            }
             runtime()?.block_on(run_mode::run(args))
         }
     }
