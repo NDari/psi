@@ -5,7 +5,8 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 # llama-server settings for llm-up; override like `just ctx=65536 llm-up qwen`.
 port := "9931"
 ctx := "131072"
-state := justfile_directory() / ".llm"
+# One state directory per port, so two servers can run side by side.
+state := justfile_directory() / ".llm" / port
 
 # The reference models (D-29) and each model card's sampling.
 qwen := "-hf bartowski/Qwen_Qwen3.5-4B-GGUF:Q4_K_M --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0 --presence-penalty 1.5 --repeat-penalty 1.0"
