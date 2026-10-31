@@ -1,4 +1,4 @@
-# Psi (ψ) — Implementation Plan
+# Psi (ψ): Implementation Plan
 
 > A pi-style coding agent harness in **Rust + mlua**, built first for its owner as a **replacement for pi**, tuned for **local models** that make mistakes.
 > Psi is the successor to Heimdall v1 (Go). The executable is `psi`.
@@ -13,6 +13,7 @@
 - "Pi parity" notes show where we deliberately mimic pi. Pi's source (`earendil-works/pi`, MIT) is the behavioral reference. Read it, but don't copy prompts or docs verbatim; write our own.
 - Heimdall's lessons document is input, not authority. Where this plan adopts a Heimdall finding, it says so, and measurable claims appear as hypotheses.
 - Naming: the project is **Psi** (ψ). The binary is `psi`, crates are `psi-*`, the config directory is `~/.psi/`, and the Lua global is `psi` (D-01).
+- `AGENTS.md` holds the working agreements for agents developing Psi.
 
 ---
 
@@ -35,15 +36,15 @@
 
 Psi defends against **a well-meaning model that makes mistakes**: wrong edits, deleting the wrong thing, bad commands, runaway loops, routing around a denial, and editing its own config to get unblocked.
 
-It does **not** yet defend against hostile repositories, malicious extensions, prompt injection or secret exfiltration. Those belong to the public-readiness phase (§13). The guarantee until then is **recoverability**: every change the model makes inside the workspace can be undone, and the irreversible ones ask first.
+It does **not** yet defend against hostile repositories, malicious extensions, prompt injection or secret exfiltration. Those belong to the public-readiness phase (§13). The guarantee until then is **recoverability**: every change the model makes inside the workspace can be undone, and the irreversible ones ask first. Isolation is a **good-enough boundary** against mistakes (minimal bubblewrap, or a container in evals), not a hardened sandbox (D-30).
 
 ### 1.4 Design principles
 
-1. **Reversible means free.** If an action can be undone automatically (a checkpointed file edit, sandboxed bash inside the workspace), allow it without asking.
+1. **Reversible means free.** If an action can be undone automatically (a checkpointed file edit, bash inside the boundary), allow it without asking.
 2. **Irreversible means a gate.** Pushing, publishing, deleting outside the workspace and similar actions ask, in every mode.
-3. **The sandbox enforces; classification advises.** Command parsing drives the UX: what to ask and how to explain it. The OS sandbox is the enforcement, so a classifier bug must never become an unrecoverable mistake.
+3. **Good enough first; stricter later.** The boundary (minimal bubblewrap, or a container) contains mistakes, checkpoints undo them, and the always-ask list catches the irreversible. Prefer simple mechanisms with known gaps over strict ones that grow out of control, and add strictness when real use shows a need (D-30).
 4. **The harness acts; the model isn't asked to.** Small models don't reliably use escape hatches, look things up or follow "don't do X" instructions. Prefer, in order: accept a mistake when its meaning is clear; refuse with the exact fix; hard-gate; nudge after repeated failures. Never design a feature that only works if the model chooses to use it.
-5. **Measure, don't assume.** Every tuning knob and every claim borrowed from elsewhere is checked with Psi's eval before it shapes the design.
+5. **Check, don't assume.** Claims borrowed from Heimdall, pi or elsewhere are checked with Psi's eval before they shape the design. Directional evidence is enough; the eval is not a benchmark.
 6. **Feel matters.** Latency, flicker and clutter are bugs.
 7. **Keep the context lean.** Every token in the system prompt and tool output must earn its place.
 8. **Mimic pi unless there's a reason not to.**
@@ -51,7 +52,8 @@ It does **not** yet defend against hostile repositories, malicious extensions, p
 ### 1.5 Non-goals before public release
 
 - Defenses against adversaries (§13).
-- A Windows-native sandbox (**[G-05]**).
+- Hardened isolation, forbidden paths and exhaustive command classification (§13).
+- Windows-native isolation (**[G-05]**).
 - An extension marketplace (**[G-04]**).
 - Self-extension by local models as a goal. It stays a measured experiment (H-01).
 
@@ -69,14 +71,16 @@ Full rationale is in §17.
 | Extension threading | One Lua state per extension, actor on a dedicated thread (D-13) |
 | TUI | Custom inline line-based differential renderer on crossterm (D-03) |
 | Config | JSONC (D-04) |
-| Checkpoints | Shadow git repo outside the workspace, via a hardened `git` CLI (D-05, D-06) |
-| Sandbox | bubblewrap (Linux) + Seatbelt (macOS), both from the start (D-07, D-08) |
+| Checkpoints | Shadow git repo outside the workspace, via the `git` CLI with basic hardening (D-05, D-06) |
+| Isolation | Minimal bubblewrap on Linux as a good-enough boundary; macOS later; evals run in podman with isolation off (D-07, D-08, D-30) |
+| Safety modes | `auto` by default (only always-ask items and a few cases ask); `strict` asks before every change (D-11) |
 | Network | On by default; `network: off` switch; domain filtering deferred (D-08) |
-| Bash classification | tree-sitter-bash; every simple command checked; data-driven rules; unparseable → ask in every mode (D-21) |
+| Bash classification | tree-sitter-bash, used only to find always-ask commands anywhere in a command; unparseable → ask (D-21) |
 | Blocked actions | The harness offers reruns to the user; the model gets no override (D-23) |
 | Tool calls | Native tool calls; startup check of the chat template's tool support (D-09) |
 | Edits | Exact matches, plus trailing-whitespace and line-ending differences, apply; anything else → hint (D-10) |
-| Eval and inspection | Built first, in Phase 1 (D-26) |
+| Eval and inspection | Built first, in Phase 1, for sanity checks, harness bugs and directional comparison with pi (D-26) |
+| Session record | Session JSONL + wire log is the only record; no separate dump format (D-31) |
 | Reference models | Qwen3.5 4B Q4_K_M and Gemma 4 12B QAT Q4_0 on llama-server, to verify (D-29) |
 
 ---
@@ -90,16 +94,16 @@ crates/
   psi-ai/        # Providers, streaming, tool-call shape fixes, model profiles, wire log (≈ pi-ai)
   psi-agent/     # Agent loop, turns, events, queues, budgets, guards (≈ pi-agent-core)
   psi-tools/     # read/write/edit/bash (+ optional grep/find/ls), script tools
-  psi-safety/    # Tiers, bash classifier, policy engine, sandbox backends, host-git hardening
+  psi-safety/    # Always-ask detection, policy, isolation backend, host-git flags
   psi-session/   # JSONL tree sessions, compaction, checkpoints
   psi-ext-api/   # API schema (api/*.toml) + build.rs codegen
   psi-ext/       # mlua host: loading, actors, events, UI bridge
   psi-tui/       # Terminal UI: renderer, components, editor (≈ pi-tui)
-  psi-lab/       # Recording, inspection, replay, eval runner, statistics
+  psi-lab/       # Recording, inspection, replay, eval runner
   psi-cli/       # Binary: modes, commands, config, resources (≈ pi-coding-agent)
 docs/               # User docs (embedded into binary)
 examples/extensions # Example extensions (embedded; also tests)
-rules/              # Built-in bash rule tables (embedded)
+rules/              # Built-in always-ask rules (embedded)
 evals/              # Task sets, graders, adapters (not embedded)
 ```
 
@@ -111,10 +115,10 @@ evals/              # Task sets, graders, adapters (not embedded)
                   │               │   └── tool results ◄┤
                   │               ▼                     ▼
                   │          psi-safety  ◄── tool call (parsed, shape-fixed)
-                  │      (classify → policy → ask? → checkpoint → sandbox)
+                  │      (always-ask → ask? → checkpoint → isolation)
                   │               │
                   │               ▼
-                  │          psi-tools ──► filesystem / sandboxed bash / script tools
+                  │          psi-tools ──► filesystem / isolated bash / script tools
                   │
                   ├──► psi-ext (Lua actors) ◄── events from agent/session/tools
                   ├──► psi-session (JSONL append, tree, compaction, checkpoints)
@@ -131,6 +135,22 @@ evals/              # Task sets, graders, adapters (not embedded)
   - Async host functions (such as `ui.confirm` or `model.complete`) use mlua's async support on a per-actor single-threaded runtime. From Lua they look blocking.
   - Render calls to extension UI components are synchronous requests with a deadline (for example 8ms). On timeout, the last frame is reused and the extension is flagged.
 - Instruction limits (mlua hooks) and memory limits apply to every Lua state, to catch buggy loops. Verify both work on Lua 5.4 with mlua at the start of Phase 5.
+
+### 3.4 Files and directories
+
+| Path | What |
+|---|---|
+| `~/.psi/settings.jsonc` | User settings |
+| `<project>/.psi/settings.jsonc` | Project settings (requires project trust) |
+| `~/.psi/models.jsonc` | Model profiles (§4.3) |
+| `~/.psi/sessions/<cwd-slug>/<timestamp>_<id>.jsonl` | Session files (§7.1) |
+| `~/.psi/sessions/<cwd-slug>/<timestamp>_<id>.wire.jsonl` | That session's wire log (§4.6) |
+| `~/.psi/checkpoints/<hash>/` | Shadow repositories (§7.2) |
+| `~/.psi/extensions/`, `skills/`, `prompts/`, `themes/`, `keybindings.json` | Resources (pi parity) |
+| `~/.cache/psi/tmp/<session-id>/` | The session's `TMPDIR` inside bash; removed when the session ends |
+
+- **Layers:** built-in → user → project → command-line flags. Later layers override scalar values and merge objects by key. Rule lists append (§8.3).
+- **Size caps:** wire logs are capped at 1 GiB in total by default, removing the oldest sessions' logs first. Session files are kept.
 
 ---
 
@@ -154,7 +174,7 @@ evals/              # Task sets, graders, adapters (not embedded)
 - **Thinking:** recommend `--reasoning off` on the server. Where the template supports it, send `chat_template_kwargs.enable_thinking` per request. Whether thinking helps is H-09.
 - **Context overflow:** llama-server returns HTTP 400 `exceed_context_size_error` with `n_prompt_tokens` and `n_ctx`. Recover by dropping the oldest turns until the request fits, and record the event.
 
-### 4.3 Model profiles (`models.json`)
+### 4.3 Model profiles (`models.jsonc`)
 
 ```jsonc
 {
@@ -194,7 +214,7 @@ JSON repair and a text tool protocol are only needed for backends without tool-c
 
 ### 4.6 Wire log
 
-Every request is logged **in the exact bytes sent**, and every streamed response in the raw bytes received. The wire log is what makes replay (§12.4) possible. It's on by default locally, size-capped and rotated.
+Every request is logged **in the exact bytes sent**, and every streamed response in the raw bytes received. The wire log is what makes replay (§12.4) possible. It's on by default locally, stored next to the session file and size-capped (§3.4).
 
 ---
 
@@ -207,7 +227,7 @@ Mirrors pi's lifecycle; see pi's `docs/extensions.md` for the reference flow.
 - **Queues** (pi parity): *steering* messages are injected before the next turn; *follow-up* messages wait until the run settles.
 - **Abort:** Esc cancels the in-flight request and tools, and records partial results.
 - **Budgets:** max turns per run (default 40; H-13), max tool calls, wall time, max consecutive errors. Hitting one pauses and asks; in headless modes it stops.
-- **Nested sessions:** running `psi` itself from bash is on the always-ask list (§8.4).
+- **Nested sessions:** running `psi` itself from bash is on the always-ask list (§8.3).
 - **Events** are emitted at every stage for extensions (§9.3) and for recording (§12.1).
 
 ---
@@ -216,13 +236,15 @@ Mirrors pi's lifecycle; see pi's `docs/extensions.md` for the reference flow.
 
 Pi's default four, plus optional structured helpers.
 
-| Tool | Tier | Behavior |
+| Tool | Asks? | Behavior |
 |---|---|---|
-| `read(path, offset?, limit?)` | R0 | Line-numbered output. The truncation notice says exactly how to continue ("call read with offset=201"). Results are capped **relative to the context window**, not a fixed byte count. |
-| `write(path, content)` | R1 in workspace | Overwriting an existing file requires that it was read this session and hasn't changed since. **No override flag** (D-24). Writes to gitignored paths ask, since checkpoints can't recover them. |
-| `edit(path, old_text, new_text)` | R1 in workspace | See edit matching below. An edit that changes nothing **fails**. |
-| `bash(command, timeout?)` | Classified (§8.3) | Runs in the sandbox, in a fresh process each time. Output truncated head+tail with a notice. Non-zero exit status reported clearly. |
-| `grep`, `find`, `ls` | R0 | Ripgrep's library crates; .gitignore-aware; capped. `find` has no `-exec` or `-delete`. **Available but off by default** (pi parity), until H-10 is measured (D-17). |
+| `read(path, offset?, limit?)` | Never | Line-numbered output. The truncation notice says exactly how to continue ("call read with offset=201"). Results are capped **relative to the context window**, not a fixed byte count (`max_tool_result_size`, default 15% of the window, configurable). |
+| `write(path, content)` | Gitignored paths only | Overwriting an existing file requires that it was read this session and hasn't changed since. **No override flag** (D-24). Writes to gitignored paths ask, since checkpoints can't recover them. |
+| `edit(path, old_text, new_text)` | Gitignored paths only | See edit matching below. An edit that changes nothing **fails**. Edits to gitignored paths ask, as for write. |
+| `bash(command, timeout?)` | Always-ask list only (§8.3) | Runs inside the isolation boundary (§8.4), in a fresh process each time. Output truncated head+tail to `max_tool_result_size`, with a notice. Non-zero exit status reported clearly. |
+| `grep`, `find`, `ls` | Never | Ripgrep's library crates; .gitignore-aware; capped. `find` has no `-exec` or `-delete`. **Available but off by default** (pi parity), until H-10 is measured (D-17). |
+
+In `strict` mode, every write, edit and bash call asks (§8.1).
 
 **Edit matching (D-10):**
 1. Exact match → apply.
@@ -231,9 +253,9 @@ Pi's default four, plus optional structured helpers.
 
 **Optional `intent`:** bash, write and edit accept an optional one-line `intent`. It's shown on approval cards and logged, but **never required** (D-19).
 
-**Script tools (D-22):** an extension can be a manifest plus any executable, receiving JSON arguments on stdin and returning text on stdout. Script tools run inside the bash sandbox. This is the cheapest way to add a tool, in any language.
+**Script tools (D-22):** an extension can be a manifest plus any executable, receiving JSON arguments on stdin and returning text on stdout. Script tools run inside the same boundary as bash. This is the cheapest way to add a tool, in any language.
 
-**User bash** (pi parity): `!cmd` in the editor runs a command as the user. It goes through policy at user-level trust, and its output is optionally added to the context.
+**User bash** (pi parity): `!cmd` in the editor runs a command as the user. It runs as the user, outside the boundary and without approval, and its output is optionally added to the context.
 
 ---
 
@@ -249,6 +271,7 @@ Pi's default four, plus optional structured helpers.
   - Maintenance: `compaction`, `label`.
   - Psi-specific: `checkpoint`, `policy_decision`, `guard_event`.
 - Commands: `/new`, `/resume`, `/tree`, `/fork`, `/label`, `/export` (HTML later).
+- **The session file plus its wire log (§4.6) is the full record** of a session. Evals keep both, inspection reads them, and adapters for other agents (pi) convert into session entries. There is no separate dump format (D-31).
 
 ### 7.2 Checkpoints (D-05, D-06)
 
@@ -277,14 +300,14 @@ If a capture fails, file writes **ask** instead of running unprotected. Log snap
 
 If `git` is missing, Psi warns at startup that checkpoints are off, and the default mode becomes `strict`.
 
-### 7.3 Host git hardening (adopted from Heimdall)
+### 7.3 Host git hardening (basic)
 
-Any git command Psi runs on the host is a code-execution path, because sandboxed bash can write `.git/config` in the workspace. All host git runs with:
+Psi's own git calls (checkpoints, `@` completion, `/diff`) run on the host, and bash can write the workspace's `.git/config`. So they run with:
 
 - `-c core.fsmonitor=false -c core.hooksPath=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`, and no inherited `GIT_*` variables.
 - For checkpoint repositories, additionally: `GIT_CONFIG_GLOBAL=/dev/null`, `core.attributesFile=/dev/null`, `core.autocrlf=false`, and `info/attributes` set to `* -text -filter -ident -working-tree-encoding`, so the stored bytes are the bytes on disk.
-- Auto-allowed read-only git (from the classifier) runs as `git --no-pager -c core.fsmonitor=false -c log.showSignature=false`, plus `--no-ext-diff --no-textconv` where accepted.
-- Settings that make read-only git run a program: `core.fsmonitor`, `core.pager`, `pager.<cmd>`, `diff.external`, `diff.<driver>.command`, `diff.<driver>.textconv`, `filter.<driver>.clean`, `filter.<driver>.process`, `gpg.program`. A repository that defines filters doesn't get auto-allowed git, since filters can't be disabled by a flag.
+
+Fuller hardening, needed only if read-only git is ever auto-allowed outside the boundary, is deferred with the tier system (§13).
 
 ### 7.4 Compaction (D-16)
 
@@ -298,109 +321,88 @@ Any git command Psi runs on the host is a code-execution path, because sandboxed
 
 ## 8. Safety (`psi-safety`)
 
-### 8.1 Tiers
+Safety before public release is three cheap mechanisms that each cover a lot, not a strict policy engine (D-30):
 
-| Tier | Meaning | Examples | Default (`guarded`) |
-|---|---|---|---|
-| **R0 Observe** | No side effects | read; read-only bash (seed table in §8.3); hardened read-only git | Allow |
-| **R1 Reversible-local** | Confined to the workspace and checkpointed | write/edit; sandboxed bash; unknown commands (the sandbox contains them) | Allow + checkpoint |
-| **R2 Leaves the workspace** | Reversible with effort | package installs, writes to gitignored paths, writes outside the workspace (only via a granted directory), long-running/background processes | Ask |
-| **R3 Irreversible** | Can't be undone locally | the **always-ask list** (§8.4) | Ask, **in every mode** |
-| **Forbidden** | Hard deny | writing Psi's own config from the agent (§8.6); reading fixed secret paths like `~/.ssh/id_*`, `~/.aws/credentials`, `~/.gnupg/` | Deny |
+| Mechanism | What it covers |
+|---|---|
+| **Undo** (checkpoints, §7.2) | Any change inside the workspace, by any tool, can be rolled back |
+| **Boundary** (isolation, §8.4) | bash can't write outside the workspace, its git directories, caches and its `TMPDIR` |
+| **Gate** (always-ask list, §8.3) | The few irreversible actions ask the user, in every mode |
 
-**Modes** (D-11), switchable with `/mode`:
-- `strict`: ask for R1 and above.
-- `guarded` (default): ask for R2 and above.
-- `free`: R0–R2 automatic; R3 still asks.
+Everything else runs without asking. Stricter layers (tiers, forbidden paths, read masks, config re-trust, network filtering) are listed in §13 and added only if a need shows up.
 
-Every mode keeps the sandbox, checkpoints and forbidden list. Secret-looking files *inside* the workspace (such as `.env`) are R0 (D-12). Reading them is not a mistake that causes harm. Forbidden paths are a **fixed list, never glob patterns**, so they don't require walking the tree.
+### 8.1 Modes and what asks (D-11)
+
+- `auto` (default): asks only for the cases below.
+- `strict`: also asks before every write, edit and bash call. The default when checkpoints are off (§7.2).
+
+Asks in every mode:
+- a bash command containing an always-ask entry, or one that can't be parsed (§8.3);
+- a file-tool write to a gitignored path, since checkpoints can't recover it;
+- rerunning a blocked command outside the boundary, or adding a write directory (§8.5);
+- every bash call when no isolation backend works (§8.4).
+
+Switch with `/mode`. Headless modes never prompt (D-18): `--allow <entry>` permits named always-ask entries, and anything else that would ask is denied and reported.
 
 ### 8.2 Network (D-08)
 
-- **On by default.** Network *actions* that matter (push, publish, deploy) are commands on the always-ask list.
-- **`network: off`** per session or project: `--unshare-net` on Linux, a network deny in the Seatbelt profile on macOS. Use it for unfamiliar repositories or unattended runs.
-- **Not detected, and the docs say so:** network side effects inside arbitrary programs, such as `curl -X POST` or a test suite calling a live API.
-- Domain-level filtering via a proxy is deferred to public readiness (**[G-03]**).
+- **On by default.** Network actions that matter (push, publish, deploy) are on the always-ask list.
+- **`network: off`** per session or project adds `--unshare-net`. Use it for unfamiliar repositories or unattended runs.
+- **Not detected, and the docs say so:** network side effects inside programs, such as `curl -X POST` or a test suite calling a live API.
+- Domain filtering is deferred (**[G-03]**).
 
-### 8.3 Bash classification (D-21)
+### 8.3 Always-ask detection (D-21)
 
-**The rule: approve every command in the parsed tree, never the command string.**
+The classifier has one job: find always-ask commands wherever they hide in a bash command. It doesn't compute tiers or decide that anything is safe; the boundary and checkpoints cover the rest.
 
-**Parser:** tree-sitter-bash via the `tree-sitter` crate. Evaluate `bash-ast` as a typed convenience layer.
+1. **Parse** with tree-sitter-bash. A tree with ERROR or MISSING nodes asks, since bash runs the lines before a syntax error. tree-sitter-bash misparses some valid bash; if that asks too often in practice, relax it with fixtures.
+2. **Collect every simple command,** recursing into pipelines, `;`/`&&`/`||` lists, subshells, `{ }` groups, `$(…)` and backtick substitutions, `<(…)`, and function bodies. Match programs by basename (`/usr/bin/git` is `git`).
+3. **Look inside common wrappers and runners:** `timeout`, `nice`, `nohup`, `time`, `command`, `env`, `sudo`, `xargs`, `sh -c`/`bash -c` with a literal script (parsed recursively, depth limit 3), `eval` with literal arguments, and `find -exec`. Dynamic forms (`$CMD push`, `eval "$x"`) aren't resolved; they run, and the boundary contains them.
+4. **Match entry words in any order** after the program, so `git push` matches `git -C /p push`, and `git reset --hard` matches `git reset HEAD~1 --hard`.
 
-**Algorithm:**
-1. **Parse.** Any syntax error → **ask, in every mode.** Bash runs the lines before a syntax error, so a parse failure can't be treated as harmless.
-2. **Collect every simple command,** recursing into pipelines, `;`/`&&`/`||` lists, subshells, `{ }` groups, `$(…)` and backtick substitutions, `<(…)`/`>(…)`, and function bodies. Match programs by basename (`/usr/bin/git` is `git`).
-3. **Strip wrappers** before matching: `timeout` (its duration is an operand), `nice`, `nohup`, `stdbuf`, `time`, `command`, `builtin`. Not stripped: `time -o`/`-a` (they write a file), and `command -v`/`-V` (they only print).
-4. **Classify the inner command of runners:** `env` (except `-S`), `sudo`, `doas`, `exec`, `xargs`, `setsid`, `ionice`, `watch`, `flock` (a lock file, then a command or `-c` script), `su -c`, `sh`/`bash -c` (parse a literal script recursively, depth limit 3), `eval`, and `find -exec`/`-execdir`/`-ok`/`-okdir` (up to `;` or `{} +`). Handle clustered short options (`sudo -iu root`).
-5. **"Allow" never applies through a runner,** to a command with dynamic words (such as `$CMD args`), or to one with leading environment assignments. Deny and ask rules still look inside. This keeps a mistaken allow from covering a chained destructive command.
-6. **Ask and deny entries match their words in any order** after the program, so `git push` matches `git -C /p push`, and `git reset --hard` matches `git reset HEAD~1 --hard`.
-7. **Read-only flag checks** count forbidden flags after `--`, inside short-option clusters (`-dr`), and as unambiguous abbreviations of long options (git accepts `--edit-desc`).
-8. **Redirects:** for R0, the only allowed output redirect is to `/dev/null`. Other writes are R1 in the workspace, otherwise R2.
-9. **Overall tier = the highest of all parts,** with a reason for each escalation, shown on approval cards and in block messages.
+**The list** (`rules/always-ask.jsonc`, embedded): `git push`, `git reset --hard`, `git clean`, `git branch -D`, `git branch --delete --force`, `git stash drop`, `git stash clear`, `npm publish`, `cargo publish`, `docker push`, `podman push`, `terraform apply`, `kubectl`, `sudo`, `doas`, and **Psi itself** (`psi -p`, `psi --json`), to prevent nested sessions.
 
-**Rule tables** (`rules/bash.jsonc`, embedded). Lists **append** at every config layer (built-in → user → project → extension), so a layer can't silently drop shipped entries; removal must be explicit. Extensions can only escalate.
+**Layers:** user and project files append entries. Removing a shipped entry takes an explicit `"remove": ["git clean"]`. Extensions can add entries but not remove them.
 
-Seed for the read-only (R0) table (from Heimdall; verify with fixtures):
-- `ls cat head tail wc grep stat diff pwd echo which cd`
-- `rg` without `--pre`; `file` without `-C`/`--compile`
-- `find` without `-exec -execdir -ok -okdir -delete -fprint -fprint0 -fprintf -fls`
-- `git status`, `git blame`; `git diff|log|show` without `--output`; `git branch` with no operands and no mutating flags
+**Fixtures:** a focused suite of commands that hide list entries (pipelines, substitutions, wrappers, reordered flags, clustered options), grown from real misses.
 
-A fixture suite of 300+ commands, including escape attempts, gates every rule change (§16).
+### 8.4 Isolation (D-07, D-08)
 
-### 8.4 Always-ask list (R3, every mode)
+The boundary is good enough, not airtight: it stops a mistaken command from writing outside the workspace, and little more.
 
-`git push`, `git reset --hard`, `git clean`, `git branch -D`, `git branch --delete --force`, `git stash drop`, `git stash clear`, `npm publish`, `cargo publish`, `docker push`, `podman push`, `terraform apply`, `kubectl`, `sudo`/`doas`, `rm` with paths outside the workspace, and **Psi itself** (`psi -p`, `psi --json`), to prevent nested sessions.
-
-### 8.5 Sandbox (D-07, D-08)
-
-**bubblewrap on Linux and Seatbelt on macOS, both from Phase 3.** The policy is shared, so the second backend is cheap.
-
-**Linux (bubblewrap).** Argument order adopted from Heimdall; bind order matters, because later binds cover earlier ones:
+**Linux: minimal bubblewrap.** Every bash call and script tool runs as:
 
 ```
 bwrap --ro-bind / / --dev /dev --proc /proc
-      --tmpfs $XDG_RUNTIME_DIR            # hide the session bus and user sockets
-      --bind-try <ssh-agent socket> ...   # bind back only the agent sockets
       --tmpfs /tmp                        # private /tmp per call
-      --bind <root>                       # --ro-bind in read-only mode
+      --bind <root> <root>
       --bind-try <git dirs outside root>  # linked worktrees, submodules
-      --bind-try <write roots> <caches>   # caches after write roots
+      --bind-try <cache dirs>             # configurable; defaults below
       --bind <session TMPDIR>             # last, so nothing covers it
       [--unshare-net]                     # when network: off
       --unshare-pid --new-session --die-with-parent --chdir <cwd> --
 ```
 
-**macOS (Seatbelt).** An SBPL profile built only from denies with `require-not`, so rule order doesn't matter:
-- Deny `file-write*` except under `/dev`, `/private/tmp`, `/private/var/folders`, the root, git directories, write roots, caches and `TMPDIR`.
-- Add a rule denying writes to the root, git directories and write roots wherever they sit, which closes the hole when a project lives under `/private/tmp` or `/private/var/folders` in read-only mode.
-- Hide other sessions' `TMPDIR`s.
-- Resolve every path (`/tmp`, `/var` and `/etc` are symlinks into `/private`).
-- Add a network deny when `network: off`.
-- **Accepted gaps:** `/tmp` is shared between sessions; there is no PID namespace or parent-death signal, so commands can outlive a killed agent; "Operation not permitted" is also an ordinary error, so a path inside a writable directory never counts as blocked.
+- **Cache dirs** default to `~/.cache`, `~/.cargo/registry`, `~/.cargo/git`, `~/.npm` and `~/go/pkg/mod`, configurable in settings. `/` and `$HOME` themselves are refused as write roots or cache dirs.
+- **Session `TMPDIR`:** `~/.cache/psi/tmp/<session-id>/` (§3.4).
+- **Environment:** drop provider API keys, `BASH_ENV` and `ENV`. Set `TMPDIR`, `LC_MESSAGES=C` (so errors can be parsed), and `PAGER=cat GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 TERM=dumb` (so nothing waits for input).
+- **Startup check:** run bwrap once with the real flags. If it fails, print the error and the likely fix (for example, Ubuntu 24.04+ restricting unprivileged user namespaces), run bash without isolation, ask before every call, and show `UNISOLATED` in the status line. Never fall back silently.
+- **Known gaps, accepted for now (§13):** sockets under `$XDG_RUNTIME_DIR` (including the session bus) are reachable, and reads are unrestricted.
 
-**Both platforms:**
-- **Environment:** drop provider keys, `BASH_ENV`, `ENV` and `DBUS_SESSION_BUS_ADDRESS`. Force `TMPDIR`, and `LC_MESSAGES=C` so errors can be parsed. Default `PAGER=cat GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0 TERM=dumb`.
-- **Refuse dangerous write roots:** `/`, `$HOME`, `/tmp`, Psi's own directories, and anything inside or above them.
-- **Robustness:** use `--bind-try` and warn when a write root has been deleted; a project under `/tmp` must not undo the private `/tmp`.
-- **Detecting a blocked write:** on Linux, match "read-only file system" (case-insensitive), take the last absolute path on the line, resolve symlinks, and count it only if it lies outside every writable directory.
-- **Startup check:** run the sandbox once with the real flags. On Linux, detect Ubuntu 24.04+ AppArmor restrictions on unprivileged user namespaces and print the exact fix. Fail loudly and **never fall back silently**. With no working sandbox, bash requires per-command approval, and the status bar shows `UNSANDBOXED`.
-- Unsandboxed execution is always R3.
+**macOS:** not in the first cut. When needed, choose between libkrun (a micro-VM that works on both platforms, but needs an image with the user's tools) and a Seatbelt profile (host tools stay available); see **[G-20]**. Windows via WSL.
 
-### 8.6 When something is blocked (D-23)
+**Evals** run Psi inside a podman container with isolation off; the container is the boundary (§12.5).
 
-- **The harness offers the fix, not the model.** When the sandbox blocks a write, the user sees "rerun once outside the sandbox" or "add this directory for the session and rerun." There's no "always" option, and **the model has no flag to request an unsandboxed run.**
+### 8.5 When something is blocked (D-23)
+
+- **Detecting a blocked write:** match "read-only file system" (case-insensitive), take the last absolute path on the line, resolve symlinks, and count it as blocked only if it lies outside every writable directory.
+- **The harness offers the fix, not the model:** "rerun once outside the boundary" or "add this directory for the session and rerun". There's no "always" option, and **the model has no flag to request an unisolated run.**
 - **In headless runs the call stays failed** (D-18).
 - **The model's message is short, with one concrete next step:** "Blocked: writing /etc/hosts is outside the workspace. Explain to the user what you needed instead of trying variants."
-- **Config self-protection** (a mistakes-model concern: models route around denials):
-  - File tools refuse writes to `.psi/` in the workspace and to `~/.psi/`.
-  - `~/.psi/` is never a write root.
-  - If a checkpoint diff shows `.psi/` changed during a session, by any means, project settings and extensions **are not reloaded** until the user re-approves (project trust).
-  - No placeholder mounts.
-- **Retries after a block are counted** and shown in inspection (§12). A guard nudges after repeated identical blocked calls (§8.7).
+- **Config:** file tools refuse writes to `~/.psi/` and the workspace's `.psi/` (D-27). bash can't reach `~/.psi/` through the boundary.
+- **Retries after a block are counted** and shown in inspection (§12). A guard nudges after repeated identical blocked calls (§8.6).
 
-### 8.7 Guardrails
+### 8.6 Guardrails
 
 - **Repeated failures:** the same tool and arguments failing 3× in a row inject one line: "this tool failed the same way 3 times; change the call or try another approach." At 5×, pause and ask the user. (H-12)
 - **Error streaks:** after `max_consecutive_errors`, inject a nudge to re-read and re-plan; after 2× that, pause.
@@ -409,12 +411,12 @@ bwrap --ro-bind / / --dev /dev --proc /proc
 - **Shape fixes and exact-fix refusals** from §4.4.
 - Every guard firing is recorded as a `guard_event` (§12.1).
 
-### 8.8 Approval UX
+### 8.7 Approval UX
 
-- **Interactive:** a card under the input box (the draft never disappears) showing the tool, a compact argument summary, the tier, the intent if given, and the classification reasons.
+- **Interactive:** a card under the input box (the draft never disappears) showing the tool, a compact argument summary, the intent if given, and why it asks.
   - Keys: `y` once, `s` session grant, `n` deny, `e` deny with a message to the model.
   - BEL when an approval appears while the terminal is unfocused.
-- **Print/JSON modes (D-18):** no prompts. Use flags such as `--allow pkg-install` and `--mode free`. Anything else above the threshold is denied and reported.
+- **Print/JSON modes (D-18):** no prompts. Use flags such as `--allow git-push` and `--mode strict`. Anything else that would ask is denied and reported.
 - **RPC mode:** forwarded to the client.
 
 ---
@@ -428,7 +430,7 @@ The owner, usually with a strong model (Claude Code), and later possibly other u
 ### 9.2 Two kinds
 
 - **Lua extensions (D-02)** for anything in-process: `tool_call` gates, event hooks, renderers, UI components, commands, providers. Lua 5.4 via mlua (`lua54`, `vendored`, `async`, `serialize`). In-process calls keep hooks and rendering snappy, and Lua extensions hot-reload, avoiding a Rust rebuild for every experiment.
-- **Script tools (D-22):** a manifest plus any executable, receiving JSON on stdin and writing text to stdout, run in the bash sandbox. For tools that don't need hooks or UI.
+- **Script tools (D-22):** a manifest plus any executable, receiving JSON on stdin and writing text to stdout, run inside the bash boundary. For tools that don't need hooks or UI.
 
 ### 9.3 Loading, manifests and trust
 
@@ -449,20 +451,20 @@ return {
 }
 ```
 
-**Script tool shape:** a directory with `tool.json` (name, description, parameter schema, tier) and an executable.
+**Script tool shape:** a directory with `tool.json` (name, description, parameter schema, optional `always_ask`) and an executable.
 
 **Trust (D-25):** before public release, **all extensions are trusted**, like pi's. Lua extensions get the full Lua standard library (`io`, `os`), plus host APIs. Their own file writes inside the workspace are still captured by the next checkpoint. Memory and instruction limits stay on to catch bugs.
 
-**Project trust** (pi parity): project-local extensions and settings require a one-time trust prompt per project, and a re-prompt if they change (§8.6).
+**Project trust** (pi parity): project-local extensions and settings require a one-time trust prompt per project, and a re-prompt when they change on disk.
 
-**Extension tools** declare a tier (R0–R3) and annotations (`read_only`, `destructive`, `open_world`) and go through the same policy.
+**Extension tools** declare annotations (`read_only`, `destructive`, `open_world`), can mark themselves always-ask, and go through the same policy.
 
 ### 9.4 API surface (pi parity target)
 
 | Pi | Psi (Lua) | Phase |
 |---|---|---|
 | `pi.on(event, handler)` | `psi.on(event, fn(ev, ctx))` | 5 |
-| `pi.registerTool` | `psi.register_tool{ name, description, params, tier, annotations, execute }` | 5 |
+| `pi.registerTool` | `psi.register_tool{ name, description, params, annotations, always_ask, execute }` | 5 |
 | `pi.registerCommand` | `psi.register_command(name, { description, handler })` | 5 |
 | `pi.registerShortcut` / `registerFlag` | `psi.register_shortcut` / `register_flag` | 5 |
 | `pi.sendUserMessage` / `sendMessage` | `psi.send_user_message` / `psi.send_message` | 5 |
@@ -539,7 +541,7 @@ These ship in the binary as core features, tuned and measured with the eval rath
 - **Todo:** a branch-aware task list stored in session entries and shown in the TUI.
 - **`/diff`, `/undo`, `/rewind`:** session change review and recovery (§7.2).
 - **Post-edit check:** run the project's configured check command after edits, and feed back a short summary.
-- **Status line:** model, context usage, tok/s, time to first token, mode, network state, checkpoint count, `UNSANDBOXED` when applicable.
+- **Status line:** model, context usage, tok/s, time to first token, mode, network state, checkpoint count, `UNISOLATED` when applicable.
 - **Skills** (pi parity): `SKILL.md` with name and description frontmatter. Only descriptions go in the prompt.
 - **Prompt templates:** `prompts/name.md` → `/name args`.
 - **Themes and keybindings** (pi parity).
@@ -595,12 +597,12 @@ The goal is to answer *why* a run failed, how a model behaves under different ap
 - The session JSONL (§7.1).
 - The **wire log** with exact request and response bytes (§4.6).
 - Per-step timing: wait to first token, generation tok/s, tool duration, checkpoint time.
-- Every `policy_decision` (with tier, reasons, any rewrite) and every `guard_event`.
+- Every `policy_decision` (with its reason and any rewrite) and every `guard_event`.
 - Checkpoint IDs per step, so file changes can be shown per step.
 
 ### 12.2 `psi inspect <session|trial>`
 
-- A **timeline**: each turn's assistant text, tool calls with arguments, results (truncated), tier and decision, guard events, tokens and timing, and the per-step file diff from checkpoints.
+- A **timeline**: each turn's assistant text, tool calls with arguments, results (truncated), policy decisions, guard events, tokens and timing, and the per-step file diff from checkpoints.
 - Filters: `--failures`, `--guards`, `--blocked`, `--step N`.
 - Output: terminal view, `--json`, or `--html` (one self-contained report file).
 - Detected patterns are flagged automatically: loops, retries after a block, doubled working-directory paths, edits that changed nothing, truncated calls, context overflows, step-cap hits, nested-session attempts.
@@ -622,18 +624,16 @@ Failure attribution for an eval trial:
 
 ### 12.5 `psi eval`
 
-- **Task sets:** port Heimdall's 40 tasks (prompt, repo, reference solution, hidden `check.sh` printing PASS/FAIL per check) and its 11-task canonical subset. **Verify the graders first:** every reference solution must pass and every untouched repo must fail.
-- **Isolation:** each trial in a fresh rootless podman container. The only network route is to the model server, and the run verifies that other traffic is blocked. Grading runs with no network. Podman is a dependency of `psi eval` only, never of normal use.
-- **Matrix:** tasks × models × variants × trials, with seeds recorded.
-- **Adapters:** Psi, **pi** and **Heimdall**, all producing the same dump format, so one scoring path serves all three.
-- **Statistics:**
-  - Mean score with standard error.
-  - Fisher's exact test on pass counts.
-  - `psi eval compare A B` reports whether a difference is distinguishable from noise.
-  - Fixed seeds don't reproduce runs once anything changes, so comparisons use several seeds.
-  - Parallel trials share a KV cache, so record whether a run was parallel.
-- **Records:** per-run timing and score records committed to the repository, with model, server build and settings.
-- **Hypotheses:** each `H-xx` (§14) has an eval config and a recorded result.
+The eval is for sanity checks, finding harness bugs ("a tool result sent the model the wrong way") and directional comparisons with pi. It is not a benchmark (D-26).
+
+- **Tasks:** port Heimdall's 40 coding tasks (prompt, repo, reference solution, hidden `check.sh` printing PASS/FAIL per check), and start with its 11-task subset as the **quick set**. **Check the graders here first:** every reference solution must pass and every untouched repo must fail. Heimdall's results and timings are not used.
+- **Isolation:** each trial in a fresh rootless podman container, with Psi's own isolation off. The only network route is to the model server, and grading runs with no network. Podman is a dependency of `psi eval` only, never of normal use.
+- **Runs:** tasks × agents (Psi, pi) × variants × trials. Each run records the model, server build and settings.
+- **Records:** each trial keeps the Psi session file and wire log (§7.1, §4.6). The pi adapter converts pi's output into Psi session entries, so inspection and scoring read both agents alike.
+- **Outcomes:** pass, model failure, or harness failure. Harness failures (out of memory, server crash, the agent dying) never count as model results.
+- **Summary:** per task, passes, mean score, steps, tokens and harness failures. `psi eval diff A B` shows two runs side by side and points to the trials that changed.
+- **Reading results:** look for direction and for transcripts that show harness bugs. A task or two either way is noise. There's no significance testing by default; if a question needs rigor, run more trials for that question.
+- **Hypotheses:** each `H-xx` (§14) gets an eval config and a recorded, directional result.
 
 ### 12.6 In the TUI
 
@@ -641,27 +641,35 @@ Failure attribution for an eval trial:
 
 ---
 
-## 13. Public readiness (later, optional)
+## 13. Later, if needed: stricter safety and public readiness
 
-Built only if Psi is released to others. The seams already exist:
+Built only if real use shows a need, or if Psi is released to others. The seams exist; D-30 deferred these.
 
+**Stricter safety:**
+- **Tiers and policy:** R0-R3 tiers with three modes, a read-only allow table, and a 300-command classifier fixture suite (Heimdall's lessons have the details).
+- **Forbidden paths:** fixed secret paths (`~/.ssh` keys, `~/.aws/credentials`, `~/.gnupg/`) made unreadable from bash and file tools.
+- **Hardened bubblewrap:** hide `$XDG_RUNTIME_DIR`, bind back only the ssh and gpg agent sockets, and drop `DBUS_SESSION_BUS_ADDRESS`, closing the session-bus escape Heimdall found.
+- **Host-git hardening** for auto-allowed read-only git: `--no-pager`, `-c log.showSignature=false`, `--no-ext-diff --no-textconv`, and no auto-allow in repositories that define filters.
+- **Config re-trust:** if a checkpoint diff shows `.psi/` changed during a session, don't reload project settings and extensions until the user re-approves.
+- **A libkrun micro-VM** backend (**[G-16]**).
+
+**Public release:**
 - **A sandboxed extension tier** with declared capabilities. Capability checks are a codegen hook in the generated glue (§9.5).
 - **Package install review:** an aggregate capability manifest at install time (**[G-04]**).
 - **Domain-filtering network proxy** (**[G-03]**): HTTP CONNECT + SOCKS5, per-domain allowlists, live approvals.
 - **Prompt-injection mitigations** beyond one prompt line (**[G-09]**).
 - **Secret-taint tracking** (**[G-17]**).
-- **A libkrun micro-VM** `isolated` backend (**[G-16]**).
 - **Windows** (**[G-05]**).
 
 ---
 
 ## 14. Hypotheses to verify (trust but verify)
 
-Each is a claim from Heimdall (H) or general practice, with Psi's default until it's measured. Results are recorded here.
+Each is a claim from Heimdall (H) or general practice, with Psi's default until it's checked. A directional result is enough. Results are recorded here.
 
 | ID | Claim | Source | Default until measured | How Psi tests it |
 |---|---|---|---|---|
-| H-01 | Local 4–12B models can't reliably write working extensions, even with docs, lint and tests | Heimdall | Not a feature | Port the extension-writing eval; measure Lua vs. script tools |
+| H-01 | Local 4-12B models can't reliably write working extensions, even with docs, lint and tests | Heimdall | Not a feature | Port the extension-writing eval; measure Lua vs. script tools |
 | H-02 | Lint after writing fixes flagged issues but doesn't raise pass rates | Heimdall | Lint is an author tool only | Part of the H-01 eval |
 | H-03 | Small models don't use lookup commands they're told about | Heimdall | No docs map in the prompt | Prompt variant with a docs map; count lookups |
 | H-04 | Models retry blocked or denied calls in other forms | Heimdall | Count retries; nudge guard | Retry-after-block metric across tasks |
@@ -674,7 +682,7 @@ Each is a claim from Heimdall (H) or general practice, with Psi's default until 
 | H-11 | A structured compaction summary beats free-form | Unmeasured | Structured | Eval variant at small windows |
 | H-12 | A one-line nudge after 3 identical failures breaks loops | Heimdall | Enabled | Loop counts with and without |
 | H-13 | 40 steps is enough; more mostly adds tokens | Heimdall | 40 | Step-cap sweep |
-| H-14 | Psi beats or matches pi and Heimdall on the canonical set | — | — | Baselines in Phase 1; every phase after |
+| H-14 | Psi matches or beats pi on the quick set | Goal | n/a | Pi baseline in Phase 1; every phase after |
 
 ---
 
@@ -683,26 +691,26 @@ Each is a claim from Heimdall (H) or general practice, with Psi's default until 
 Each phase ends with its acceptance criteria passing in CI, where automatable.
 
 **Phase 0: skeleton.**
-- Workspace and crates, CI on Linux and macOS (fmt, clippy, tests), `psi --version`, tracing, JSONC config loading.
+- Workspace and crates, `rust-toolchain.toml` (stable, edition 2024), CI on Linux (fmt, clippy, tests), `psi --version`, tracing, JSONC config loading with the layers in §3.4. macOS is checked by the owner when needed.
 
 **Phase 1: eval and inspection foundation.**
-- Port the task sets and verify the graders; podman isolation; the three outcome classes; the pi and Heimdall adapters; the dump format; statistics and `psi eval compare`; `psi inspect` over dumps.
+- Port the 40 tasks and the quick set; check the graders; the podman runner; the three outcome classes; the session entry types (§7.1) as the record format; the pi adapter; run summaries and `psi eval diff`; `psi inspect` over trial records.
 - ✅ Every reference solution passes and every untouched repo fails.
-- ✅ **Baselines recorded** for pi and Heimdall on the canonical set with both reference models (D-29), with standard errors. Compare against Heimdall's reported numbers (trust but verify).
+- ✅ A pi baseline on the quick set with both reference models (D-29), run on this machine.
 
 **Phase 2: providers, agent loop, core tools, sessions** (print and JSON modes).
-- llama-server client with `/props` checks; wire log; shape-fix pipeline; agent loop with queues, abort and budgets; read/write/edit/bash (unsandboxed, behind a dev flag); optional grep/find/ls; JSONL tree sessions; the Psi eval adapter; `psi replay`.
-- ✅ Shape-fix fixtures built from **real transcripts**, including recorded Heimdall and pi failures.
+- llama-server client with `/props` checks; wire log; shape-fix pipeline; agent loop with queues, abort and budgets; read/write/edit/bash (no isolation yet); optional grep/find/ls; JSONL tree sessions; the Psi eval adapter; `psi replay`.
+- ✅ Shape-fix fixtures built from **real transcripts**, including recorded pi failures.
 - ✅ Edit matching passes its fixtures, including indentation cases that must *not* apply.
-- ✅ **First Psi score** on the canonical set, compared with the baselines.
+- ✅ **First Psi score** on the quick set, compared with the pi baseline.
 
-**Phase 3: safety core.**
-- Tiers, the bash classifier and rule tables, the always-ask list, bubblewrap and Seatbelt backends with startup checks, network on/off, shadow-git checkpoints with the capture and restore pipeline, host git hardening, harness-offered reruns, config self-protection, guards, policy and guard recording.
-- ✅ The classifier passes a 300+ command fixture suite, including escape attempts.
-- ✅ The sandbox suite passes on **Linux and macOS**: writes outside write roots fail, forbidden paths are unreadable, `network: off` blocks traffic, bind-order and `/tmp` edge cases hold.
+**Phase 3: safety.**
+- Shadow-git checkpoints with the capture and restore pipeline; basic host-git flags; always-ask detection and rule layers; modes; minimal bubblewrap with its startup check; network on/off; harness-offered reruns; `.psi/` write refusal; guards; policy and guard recording.
+- ✅ Always-ask fixtures pass, including entries hidden in pipelines, substitutions, wrappers and reordered flags.
+- ✅ Under bubblewrap: writes outside the workspace and caches fail and offer a rerun, `/tmp` is private per call, and `network: off` blocks traffic.
 - ✅ `/undo` and `/rewind` restore after both edits and bash changes.
-- ✅ The host-git suite: a planted `core.fsmonitor`, pager or filter never runs on the host.
-- ✅ The eval score doesn't drop versus Phase 2 beyond noise.
+- ✅ A `core.fsmonitor` or hook planted in the workspace repository never runs from Psi's own git calls.
+- ✅ The eval shows no obvious regression versus Phase 2.
 
 **Phase 4: interactive TUI.**
 - Renderer, commit-once rules, editor, streaming, approval card, status line, slash commands, steering and follow-up, `/tree`, `/mode`, `/show`, `/diff`, `/stats`.
@@ -721,19 +729,19 @@ Each phase ends with its acceptance criteria passing in CI, where automatable.
 - ✅ Each battery has eval coverage or a documented reason it can't.
 
 **Phase 7: experiments and polish.**
-- Work through the hypothesis table; compaction tuning; RPC mode; HTML export; MCP (**[G-08]**); sub-agents (**[G-07]**); other backends (**[G-18]**).
+- Work through the hypothesis table; compaction tuning; RPC mode; HTML export; MCP (**[G-08]**); sub-agents (**[G-07]**); other backends (**[G-18]**); macOS isolation (**[G-20]**).
 - ✅ Every hypothesis has a recorded result.
 
-**Phase 8 (optional): public readiness.** §13.
+**Phase 8 (optional): stricter safety and public readiness.** §13.
 
 ---
 
 ## 16. Testing strategy
 
-- **Fixtures:** shape fixes, bash classification (300+ commands with escape attempts), edit matching (including indentation cases), session tree operations, checkpoint capture and restore, host-git hardening.
-- **Real-transcript fixtures:** fixtures for tool-call shapes, loops and blocked-retry behavior come from recorded trials (Psi's own, plus Heimdall's and pi's), replayable via the wire log.
-- **Sandbox suites** on Linux and macOS CI runners (**[G-14]**: confirm the Linux runner allows unprivileged user namespaces). Test portability carefully: macOS lacks `setsid` and `/proc`, has different error text and resolved paths, and keeps some tool caches in `~/Library/Caches`.
-- **Eval:** the canonical set on every significant change, the full set weekly, and hypothesis variants as scheduled. Runs differing by less than about 3× the standard error are treated as noise.
+- **Fixtures:** shape fixes, always-ask detection (commands that hide list entries), edit matching (including indentation cases), session tree operations, checkpoint capture and restore, host-git flags.
+- **Real-transcript fixtures:** fixtures for tool-call shapes, loops and blocked-retry behavior come from recorded trials (Psi's own and pi's), replayable via the wire log.
+- **Isolation tests** on Linux CI (**[G-14]**: confirm the runner allows unprivileged user namespaces); macOS when that backend exists (**[G-20]**).
+- **Eval:** the quick set after significant changes, the full set when useful. Look for direction and for transcripts that show harness bugs, not small score differences.
 - **Extension tests:** every example has `*_test.lua`, run with `psi ext test`.
 
 ---
@@ -747,13 +755,13 @@ Each phase ends with its acceptance criteria passing in CI, where automatable.
 | D-03 | **Custom inline differential renderer** on crossterm, with commit-once rules | Native scrollback and selection; matches the extension component model; Heimdall had to fight Bubble Tea's inline renderer |
 | D-04 | **JSONC** config | Pi parity; LLMs edit JSON reliably; comments explain policy |
 | D-05 | **Shadow git** checkpoints, captured at prompt submit and after every non-read-only step | Only whole-workspace snapshots capture bash side effects; Heimdall's working pipeline is adopted |
-| D-06 | **Hardened `git` CLI** | Battle-tested and nearly always installed; hardening closes the host code-execution path |
-| D-07 | **Linux and macOS** sandboxes from Phase 3; Windows via WSL | The policy is shared, so the second backend is cheap |
-| D-08 | **bubblewrap + Seatbelt; network on by default, with an `off` switch** | Proven in daily use in Heimdall. *Superseded:* the earlier filtering-proxy design was untested new work (wrongly described as proven in v1) and serves defense, not mistakes; it moves to public readiness (G-03). |
+| D-06 | **`git` CLI with basic hardening** | Battle-tested and nearly always installed; basic flags close the host code-execution path for Psi's own git calls. *Superseded (2026-10-31):* fuller hardening for auto-allowed read-only git moves to §13 with the tier system (D-30). |
+| D-07 | **Linux isolation first; macOS later** (libkrun or Seatbelt, tested by the owner); Windows via WSL | *Superseded (2026-10-31):* both platforms from Phase 3 was more than the current need, and macOS isn't needed right away (D-30, G-20). |
+| D-08 | **Minimal bubblewrap as a good-enough boundary; network on by default, with an `off` switch** | Proven in daily use in Heimdall. *Superseded:* the earlier filtering-proxy design was untested new work (wrongly described as proven in v1) and serves defense, not mistakes; it moves to public readiness (G-03). *Superseded (2026-10-31):* the hardened argument list (hidden runtime directory, agent socket bind-backs) moves to §13; the boundary only needs to stop mistaken writes outside the workspace (D-30). |
 | D-09 | **Native tool calls**, with a `/props` startup check and a shape-fix pipeline | On llama-server, failures are argument shapes in valid JSON. *Superseded:* the text protocol and JSON repair move to G-18. |
 | D-10 | Apply **exact** and **trailing-whitespace or line-ending** matches only; everything else → hint | *Superseded:* indentation normalization was unsafe in Python and YAML |
-| D-11 | Default mode **`guarded`**; R3 asks in every mode | "Freedom with intent": reversible work runs freely, irreversible work always asks |
-| D-12 | Workspace secret-looking files are **R0**; fixed secret paths outside are forbidden | *Superseded:* R2 served defense, not mistakes; fixed paths avoid the tree walks that glob masks need |
+| D-11 | Modes **`auto`** (default) and **`strict`**; always-ask items ask in every mode | "Freedom with intent": reversible work runs freely, irreversible work always asks. *Superseded (2026-10-31):* the R0-R3 tiers and three modes were policy machinery without a matching threat; what asks is now a short list (§8.1, D-30). |
+| D-12 | **No forbidden paths before public release**; secret-looking files are ordinary files | *Superseded:* R2 served defense, not mistakes; fixed paths avoid the tree walks that glob masks need. *Superseded (2026-10-31):* fixed forbidden paths also move to §13; under a mistakes-only model, reading a secret isn't the harm (D-30). |
 | D-13 | **One Lua state per extension**, actor on a dedicated thread | mlua states aren't `Send` by default; isolates hangs; per-extension memory accounting |
 | D-14 | **TOML schema + `build.rs` codegen** | One source for the trait, glue, stubs, docs and lint tables; drift is caught by CI (Heimdall's drift test found 7 undocumented functions on its first run) |
 | D-15 | **`psi ext check` is an author CLI**, not a model tool | *Superseded:* H-02 suggests lint doesn't raise a weak model's pass rate; it still helps human and strong-model authors |
@@ -762,15 +770,17 @@ Each phase ends with its acceptance criteria passing in CI, where automatable.
 | D-18 | Headless runs **fail closed** | Unattended runs are where mistakes go unnoticed |
 | D-19 | **`intent` optional, never required** | *Superseded:* rejecting for a missing intent adds a retry cycle weak models fail; the approval card can show the model's preceding text instead |
 | D-20 | Tokens: usage → tokenize endpoint → 3 chars/token; context window from `/props` | Exact when possible; conservative otherwise |
-| D-21 | **tree-sitter-bash**, every simple command checked, data-driven rules with Heimdall's details; **unparseable → ask in every mode** | Closes the pipe and substitution hole; bash runs the lines before a syntax error |
+| D-21 | **tree-sitter-bash, used only to find always-ask commands** anywhere in a command; **unparseable → ask** | Closes the pipe and substitution hole for the commands that matter; bash runs the lines before a syntax error. *Superseded (2026-10-31):* no read-only allow tables or tier computation; the boundary and checkpoints cover everything else (D-30). |
 | D-22 | **Script tools** (manifest + executable, JSON stdin) | The cheapest way to add a tool, in any language; Heimdall measured scripts at about a fifth of the cost for models to write |
 | D-23 | **Harness-offered reruns**; the model has no unsandboxed flag; `request_scope` dropped | *Supersedes `request_scope`:* small models don't reliably use escape hatches, and models with an override flag overuse it |
 | D-24 | **No `force` flag on write**; a read since the last change is required | A one-word override becomes a habit |
-| D-25 | **Mistakes-only threat model** until public release; all extensions trusted with the full Lua stdlib | Psi is for its owner now; defenses for strangers wait for strangers (§13) |
-| D-26 | **Eval and inspection built first** (Phase 1) | Every tuning decision depends on measurement; baselines exist before Psi's loop does |
-| D-27 | **Config self-protection** via file-tool refusal and checkpoint-diff re-trust, with no mount tricks | Routing around a denial is a predictable mistake; placeholder mounts leaked into git in Heimdall |
+| D-25 | **Mistakes-only threat model** until public release; all extensions trusted with the full Lua stdlib | Psi is for its owner now; defenses for strangers wait for strangers (§13). *Extended (2026-10-31):* isolation is a good-enough boundary, not a hardened sandbox (D-30). |
+| D-26 | **Eval and inspection built first** (Phase 1), for sanity checks, harness bugs and directional comparison with pi | Tuning decisions need evidence, and a pi baseline exists before Psi's loop does. *Superseded (2026-10-31):* no statistics by default and no Heimdall baselines or data; small score differences don't matter, transcripts that show harness bugs do. |
+| D-27 | **Config self-protection** via file-tool refusal, with no mount tricks | Routing around a denial is a predictable mistake; placeholder mounts leaked into git in Heimdall. *Superseded (2026-10-31):* checkpoint-diff re-trust moves to §13; bash already can't reach `~/.psi/` through the boundary (D-30). |
 | D-28 | **Self-knowledge prompt line** instead of a docs map | H-03: small models don't fetch what they're told about; a specific "run X when asked about psi" line is the pattern that measured well |
 | D-29 | Reference models: **Qwen3.5 4B Q4_K_M** and **Gemma 4 12B QAT Q4_0** on llama-server | Heimdall's measured pair gives comparable baselines; add a larger model when available |
+| D-30 | **Good enough first, stricter later:** a container or minimal bubblewrap as the boundary, checkpoints for undo, a short always-ask list; stricter mechanisms (§13) only when real use shows a need | Heimdall started strict and grew out of control; simple mechanisms with known gaps cover the mistakes model at a fraction of the cost |
+| D-31 | **The session JSONL plus its wire log is the only record**; no separate dump format; other agents' output (pi) is converted into session entries | Heimdall needed a dump only because it stored sessions in a database; one format means one inspection and scoring path |
 
 ---
 
@@ -786,16 +796,17 @@ Each phase ends with its acceptance criteria passing in CI, where automatable.
 | G-09 | Prompt-injection mitigations | Public readiness; one prompt line until then |
 | G-12 | No-progress heuristic tuning | Calibrate with the eval |
 | G-14 | CI support for bubblewrap | Verify the Linux runner allows unprivileged user namespaces |
-| G-16 | libkrun isolated backend | Public readiness |
+| G-16 | libkrun backend | Candidate for macOS (G-20) and for stronger isolation (§13) |
 | G-17 | Secret-taint tracking | Public readiness |
 | G-18 | Backends without tool-call templates (text protocol, JSON repair) | Phase 7, only if a needed backend requires it |
 | G-19 | Task-set refresh | Replace tasks that give the same result every trial |
+| G-20 | macOS isolation backend | When needed: libkrun or Seatbelt (Heimdall's profile is in its lessons); the owner tests by hand |
 
 (Resolved: G-01 by D-29; G-02 and G-15 by the Heimdall lessons, now tracked as hypotheses; G-11 by D-09; G-13 by D-25.)
 
 ## Appendix A: candidate crates (verify current versions and maintenance)
 
-`tokio`, `reqwest` (rustls), `serde`/`serde_json`, a JSONC parser, `mlua` (`lua54`, `vendored`, `async`, `serialize`), `crossterm`, `unicode-width`, `tree-sitter` + `tree-sitter-bash` (+ evaluate `bash-ast`), `grep` + `ignore` (ripgrep), `similar` (diffs), `full_moon`, `toml`, `clap`, `thiserror`/`anyhow`, `tracing`, `regex`, `statrs` or similar (Fisher's exact test), `syntect` (later).
+`tokio`, `reqwest` (rustls), `serde`/`serde_json`, a JSONC parser, `mlua` (`lua54`, `vendored`, `async`, `serialize`), `crossterm`, `unicode-width`, `tree-sitter` + `tree-sitter-bash` (+ evaluate `bash-ast`), `grep` + `ignore` (ripgrep), `similar` (diffs), `full_moon`, `toml`, `clap`, `thiserror`/`anyhow`, `tracing`, `regex`, `syntect` (later).
 
 ## Appendix B: core system prompt draft (keep it short; measure every line)
 
