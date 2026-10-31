@@ -713,6 +713,7 @@ Each phase ends with its acceptance criteria passing in CI, where automatable.
 - ✅ `/undo` and `/rewind` restore after both edits and bash changes.
 - ✅ A `core.fsmonitor` or hook planted in the workspace repository never runs from Psi's own git calls.
 - ✅ The eval shows no obvious regression versus Phase 2.
+- Eval coverage for safety: give a quick-set task a `.gitignore` (gitignored writes ask) and decide whether `multi_split_package` joins the quick set (file creation and deletion).
 
 **Phase 4: interactive TUI.**
 - Renderer, commit-once rules, editor, streaming, approval card, status line, slash commands, steering and follow-up, `/tree`, `/mode`, `/show`, `/diff`, `/stats`.
