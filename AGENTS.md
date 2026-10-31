@@ -26,13 +26,15 @@ A pi-style coding agent harness in Rust + mlua, built for its owner as a daily r
 
 ## Checks
 
-Before calling anything done, run and report the result of:
+Before calling anything done, run `just check` (the local check, D-33; there is no hosted CI) and report the result. It runs:
 
 ```
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
+
+`just` lists the other recipes (evals, llama-server). Add a recipe when a command gets run often.
 
 If a check can't run, say what is unverified.
 

@@ -46,12 +46,7 @@ psi inspect RUN/TASK/trial-0       # one trial as a timeline
 restart the server; the run records what `/props` reports (model path,
 build, context window, default sampling) in `run.json`.
 
-The reference models (D-29), as the baselines were run (fish or bash):
-
-```
-llama-server -m <Qwen_Qwen3.5-4B-Q4_K_M.gguf> --jinja --alias local -c 131072 -ngl 99 --port 8080 --reasoning off --seed 0 --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0 --presence-penalty 1.5 --repeat-penalty 1.0
-llama-server -m <gemma-4-12b-it-qat-q4_0.gguf> --jinja --alias local -c 131072 -ngl 99 --port 8080 --reasoning off --seed 0 --temp 1.0 --top-p 0.95 --top-k 64 --min-p 0
-```
+The reference models (D-29) start with `just llm-up qwen` or `just llm-up gemma` (`just llm-down` stops it): Qwen3.5 4B Q4_K_M and Gemma 4 12B QAT Q4_0, context 131072, thinking off, seed 0, on port 8080. The exact command goes to `.llm/cmd`. `just eval-check` and `just eval-run` wrap the commands above.
 
 The sampling flags are each model card's recommendation; the agents send
 no sampling fields, so the server's flags apply (H-08).

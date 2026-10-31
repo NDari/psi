@@ -520,7 +520,7 @@ result = "ToolCallResult?"
 
 **Type grammar:** `string | integer | number | boolean | table | T? | T[] | {K: V} | "lit"|"lit" | function(args): ret`, plus named types.
 
-A CI check regenerates the artifacts and fails on drift.
+The local check regenerates the artifacts and fails on drift (D-33).
 
 ### 9.6 Author tooling (D-15)
 
@@ -581,7 +581,7 @@ An inline TUI can't redraw the past, so each piece is committed once, in a form 
 | Long sessions | 10k committed lines with no input lag |
 | Approvals | Appear within one frame of the decision |
 
-Measure them in CI where possible, and show internal render timings in a debug overlay.
+Measure them in the local check where possible, and show internal render timings in a debug overlay.
 
 ### 11.4 Must-haves
 
@@ -691,10 +691,10 @@ Each is a claim from Heimdall (H) or general practice, with Psi's default until 
 
 ## 15. Roadmap
 
-Each phase ends with its acceptance criteria passing in CI, where automatable.
+Each phase ends with its acceptance criteria passing in the local check, where automatable (D-33).
 
 **Phase 0: skeleton.**
-- Workspace and crates, `rust-toolchain.toml` (stable, edition 2024), CI on Linux (fmt, clippy, tests), `psi --version`, tracing, JSONC config loading with the layers in §3.4. macOS is checked by the owner when needed.
+- Workspace and crates, `rust-toolchain.toml` (stable, edition 2024), a local check (fmt, clippy, tests), `psi --version`, tracing, JSONC config loading with the layers in §3.4. macOS is checked by the owner when needed.
 
 **Phase 1: eval and inspection foundation.**
 - Port the 40 tasks and the quick set; check the graders; the podman runner; the three outcome classes; the session entry types (§7.1) as the record format; the pi adapter; run summaries and `psi eval diff`; `psi inspect` over trial records.
@@ -725,7 +725,7 @@ Each phase ends with its acceptance criteria passing in CI, where automatable.
 
 **Phase 5: extensions.**
 - Verify mlua limits on Lua 5.4. Then the API schema and codegen, Lua actors, manifests, the event set, tools, commands, renderers, UI primitives and custom components, `/reload`, project trust, script tools, `psi ext check`, `psi ext test`.
-- ✅ Generated stubs, glue and docs are drift-free in CI.
+- ✅ Generated stubs, glue and docs are drift-free in the local check.
 - ✅ A runaway Lua loop is killed without freezing the UI.
 - ✅ Example extensions covering each API area pass their tests.
 - ✅ H-01 measured (the extension-writing eval with both reference models), as information only.
@@ -749,7 +749,7 @@ Each phase ends with its acceptance criteria passing in CI, where automatable.
 - **Replay tests (D-32):** a fake model server plays back a recorded transcript's responses while Psi's real loop and tools run on a temp project. Deterministic and fast; they cover the loop, tools, shape fixes, edit matching, guards, records and outcome classification. A replay goes stale when model-facing text changes, since the model would have seen something else; refresh it from a new eval run.
 - **Golden tests for model-facing text:** exact tool result text, truncation notices and error messages, so changes to what the model sees are deliberate.
 - **Eval pipeline smoke test:** `psi eval run` on one task against the replay server, through podman, without a GPU.
-- **Isolation tests** on Linux CI (**[G-14]**: confirm the runner allows unprivileged user namespaces); macOS when that backend exists (**[G-20]**).
+- **Isolation tests** on Linux, in the local check; macOS when that backend exists (**[G-20]**).
 - **Eval:** run only when tests can't answer (§12.5, D-32). Look for transcripts that show harness bugs, not score differences.
 - **Extension tests:** every example has `*_test.lua`, run with `psi ext test`.
 
@@ -772,7 +772,7 @@ Each phase ends with its acceptance criteria passing in CI, where automatable.
 | D-11 | Modes **`auto`** (default) and **`strict`**; always-ask items ask in every mode | "Freedom with intent": reversible work runs freely, irreversible work always asks. *Superseded (2026-10-31):* the R0-R3 tiers and three modes were policy machinery without a matching threat; what asks is now a short list (§8.1, D-30). |
 | D-12 | **No forbidden paths before public release**; secret-looking files are ordinary files | *Superseded:* R2 served defense, not mistakes; fixed paths avoid the tree walks that glob masks need. *Superseded (2026-10-31):* fixed forbidden paths also move to §13; under a mistakes-only model, reading a secret isn't the harm (D-30). |
 | D-13 | **One Lua state per extension**, actor on a dedicated thread | mlua states aren't `Send` by default; isolates hangs; per-extension memory accounting |
-| D-14 | **TOML schema + `build.rs` codegen** | One source for the trait, glue, stubs, docs and lint tables; drift is caught by CI (Heimdall's drift test found 7 undocumented functions on its first run) |
+| D-14 | **TOML schema + `build.rs` codegen** | One source for the trait, glue, stubs, docs and lint tables; drift is caught by the local check (Heimdall's drift test found 7 undocumented functions on its first run) |
 | D-15 | **`psi ext check` is an author CLI**, not a model tool | *Superseded:* H-02 suggests lint doesn't raise a weak model's pass rate; it still helps human and strong-model authors |
 | D-16 | Compaction: room-reserve trigger with a minimum answer room, a ~20% verbatim tail, tool results capped relative to the window, and server-overflow recovery | Avoids triggers that can never fire and summaries that can't succeed |
 | D-17 | **grep/find/ls available, off by default** | *Superseded:* "on" was unmeasured; pi parity and a smaller tool list win until H-10 decides |
@@ -791,6 +791,7 @@ Each phase ends with its acceptance criteria passing in CI, where automatable.
 | D-30 | **Good enough first, stricter later:** a container or minimal bubblewrap as the boundary, checkpoints for undo, a short always-ask list; stricter mechanisms (§13) only when real use shows a need | Heimdall started strict and grew out of control; simple mechanisms with known gaps cover the mistakes model at a fraction of the cost |
 | D-31 | **The session JSONL plus its wire log is the only record**; no separate dump format; other agents' output (pi) is converted into session entries | Heimdall needed a dump only because it stored sessions in a database; one format means one inspection and scoring path |
 | D-32 | **Tests carry everyday checking; the eval runs sparingly.** A replay server plays back recorded transcripts so scenario tests exercise the real loop and tools; the eval runs when model-facing text changes, a model changes, at phase ends, and to refresh fixtures | The eval takes minutes per model; most harness behavior is deterministic given the model's responses. Only a real model shows how a change to what it sees affects it (2026-10-31) |
+| D-33 | **Checks run locally; no hosted CI for now.** fmt, clippy and tests (plus later the drift check, isolation tests and the eval smoke test) run on the owner's machine before each commit | Psi has one user; local runs need no runner setup and can use bubblewrap and podman directly. Hosted CI can return for a public release (2026-10-31) |
 
 ---
 
@@ -805,7 +806,7 @@ Each phase ends with its acceptance criteria passing in CI, where automatable.
 | G-08 | MCP support | Phase 7 |
 | G-09 | Prompt-injection mitigations | Public readiness; one prompt line until then |
 | G-12 | No-progress heuristic tuning | Calibrate with the eval |
-| G-14 | CI support for bubblewrap | Verify the Linux runner allows unprivileged user namespaces |
+| G-14 | CI support for bubblewrap | Only if hosted CI returns (D-33): verify the runner allows unprivileged user namespaces |
 | G-16 | libkrun backend | Candidate for macOS (G-20) and for stronger isolation (§13) |
 | G-17 | Secret-taint tracking | Public readiness |
 | G-18 | Backends without tool-call templates (text protocol, JSON repair) | Phase 7, only if a needed backend requires it |
