@@ -160,7 +160,8 @@ mod tests {
         }
     }
 
-    /// native/compat.c stands in for libm's cosh and sinh.
+    /// The 5.3-compat math functions are there (they need libm's cosh and
+    /// sinh, which tie a glibc build to the build machine's glibc).
     #[test]
     fn math_cosh_and_sinh_still_work() {
         let (msg, _) = run(

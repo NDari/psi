@@ -1071,7 +1071,6 @@ dependencies = [
 name = "psi-ext"
 version = "0.1.0"
 dependencies = [
- "cc",
  "full_moon",
  "futures-util",
  "mlua",

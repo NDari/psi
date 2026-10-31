@@ -42,6 +42,14 @@ psi eval diff RUN_A RUN_B          # two runs side by side
 psi inspect RUN/TASK/trial-0       # one trial as a timeline
 ```
 
+Trials run a static (musl) build of psi, mounted into the container:
+the image's glibc is older than this machine's, and psi's vendored Lua
+ties a glibc build to the glibc it was built against. `just eval-run`
+builds it (`just eval-build`, which needs the `musl` package and the
+`x86_64-unknown-linux-musl` Rust target) and passes it with
+`--psi-binary`; `psi eval run` checks first that the binary starts in
+the image.
+
 `psi eval run` needs podman and a llama-server already running on
 `127.0.0.1:<port>` (default 9931) with `--jinja`. It does not start or
 restart the server; the run records what `/props` reports (model path,

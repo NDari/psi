@@ -45,6 +45,13 @@ fn script() -> Vec<Reply> {
     ]
 }
 
+/// The static build `just eval-smoke` makes: the host's glibc can be newer
+/// than the image's.
+fn eval_binary() -> String {
+    std::env::var("PSI_EVAL_BINARY")
+        .expect("set PSI_EVAL_BINARY to the static psi build; run with just eval-smoke")
+}
+
 fn run(agent: &str) {
     let server = ReplayServer::start(script()).unwrap();
     server.set_n_ctx(16384);
@@ -59,6 +66,8 @@ fn run(agent: &str) {
             "fix_invoice_rounding",
             "--timeout",
             "120",
+            "--psi-binary",
+            &eval_binary(),
         ])
         .arg("--port")
         .arg(server.port().to_string())

@@ -23,9 +23,15 @@ check:
     cargo test --workspace
     just eval-smoke
 
+# The static psi the eval trials run: the host's glibc can be newer than the image's
+eval-build:
+    cargo build -q --target x86_64-unknown-linux-musl -p psi-cli
+
+eval-binary := justfile_directory() / "target/x86_64-unknown-linux-musl/debug/psi"
+
 # The eval pipeline through podman with the replay server as the model (no GPU)
-eval-smoke:
-    cargo test -q -p psi-cli --test eval_smoke -- --ignored --test-threads 1
+eval-smoke: eval-build
+    env PSI_EVAL_BINARY={{eval-binary}} cargo test -q -p psi-cli --test eval_smoke -- --ignored --test-threads 1
 
 # Regenerate docs/api.md and docs/api/psi.lua from the extension API definition
 api-docs:
@@ -51,8 +57,8 @@ eval-check *args: build
     ./target/debug/psi eval check {{args}}
 
 # One trial per quick-set task (needs llm-up); extra args go to psi eval run
-eval-run *args: build
-    ./target/debug/psi eval run --port {{port}} {{args}}
+eval-run *args: build eval-build
+    ./target/debug/psi eval run --port {{port}} --psi-binary {{eval-binary}} {{args}}
 
 # Show an eval trial or session as a timeline
 inspect path *args: build

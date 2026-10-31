@@ -64,6 +64,9 @@ pub fn run(cfg: &RunConfig, progress: &mut dyn FnMut(&str)) -> Result<Vec<TrialR
     let network = format!("pasta:--splice-only,-T,{}", cfg.port);
     let net = network_check(&network, cfg.port, &cfg.results_dir)?;
     progress(&format!("network: {}", net.join("; ")));
+    if cfg.agent == Agent::Psi {
+        binary_check(cfg.psi_binary.as_deref(), &cfg.results_dir)?;
+    }
 
     let meta = RunMeta {
         agent: cfg.agent.as_str().into(),
@@ -126,6 +129,29 @@ pub fn run(cfg: &RunConfig, progress: &mut dyn FnMut(&str)) -> Result<Vec<TrialR
 /// Checks from a trial container that the model server is the only route
 /// out: it must be reachable, and the internet and another host port must
 /// not. Returns one line per probe; fails the run otherwise.
+/// The psi binary must start in the trial image. One built against the
+/// host's glibc may not (the image's is older); the static musl build
+/// always does (`just eval-build`).
+fn binary_check(binary: Option<&Path>, results: &Path) -> Result<()> {
+    let binary = binary.ok_or_else(|| other("no psi binary to run"))?;
+    let home = results.join("binary-home");
+    fsutil::create_dir_all(&home)?;
+    let (out, err) = (results.join("binary.txt"), results.join("binary.stderr"));
+    let code = Container::new("none", &home)
+        .mount(binary, "/usr/local/bin/psi", true)
+        .cmd(["psi", "--version"])
+        .run(&out, &err)?;
+    if code != 0 {
+        let why = fsutil::read_to_string(&err).unwrap_or_default();
+        return Err(other(format!(
+            "{} does not run in the eval image: {}. Build the static one with `just eval-build` and pass it with --psi-binary",
+            binary.display(),
+            why.trim()
+        )));
+    }
+    Ok(())
+}
+
 fn network_check(network: &str, port: u16, results: &Path) -> Result<Vec<String>> {
     // A host port that is listening but not forwarded must stay unreachable.
     let decoy = TcpListener::bind("127.0.0.1:0")

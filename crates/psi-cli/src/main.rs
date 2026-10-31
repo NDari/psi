@@ -194,6 +194,10 @@ enum EvalCommand {
         /// Appended to the results directory's name.
         #[arg(long)]
         label: Option<String>,
+        /// The psi binary the trials run (default: this one). It must run in
+        /// the Debian image: `just eval-build` makes a static one.
+        #[arg(long, value_name = "PATH")]
+        psi_binary: Option<PathBuf>,
     },
     /// Two runs side by side, pointing to the trials that changed.
     Diff { a: PathBuf, b: PathBuf },
@@ -512,6 +516,7 @@ fn eval_command(cmd: EvalCommand) -> Result<ExitCode> {
             timeout,
             max_output,
             label,
+            psi_binary,
         } => {
             check_evals_dir(&common.evals)?;
             let agent = match agent {
@@ -528,7 +533,9 @@ fn eval_command(cmd: EvalCommand) -> Result<ExitCode> {
                 steps,
                 timeout_s: timeout,
                 max_output,
-                psi_binary: std::env::current_exe().ok(),
+                psi_binary: psi_binary
+                    .map(|p| std::path::absolute(&p).unwrap_or(p))
+                    .or_else(|| std::env::current_exe().ok()),
             };
             let results = eval::run(&cfg, &mut progress)?;
             let summary = std::fs::read_to_string(cfg.results_dir.join("summary.md"))
