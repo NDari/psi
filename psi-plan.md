@@ -708,6 +708,7 @@ Each phase ends with its acceptance criteria passing in the local check, where a
 - ✅ Replay tests drive the agent loop from recorded transcripts, and `psi eval run` passes a smoke test against the replay server (podman, no GPU).
 - ✅ Edit matching passes its fixtures, including indentation cases that must *not* apply.
 - ✅ **First Psi score** on the quick set, compared with the pi baseline.
+- **Order (owner's GPU time is limited, 2026-10-31):** build all of Phase 2 against tests and fixtures from the existing pi transcripts, then stop. The model runs (both reference models, single runs) happen when the owner says so, and any harness bugs they show are fixed with replay tests before the phase closes.
 
 **Phase 3: safety.**
 - Shadow-git checkpoints with the capture and restore pipeline; basic host-git flags; always-ask detection and rule layers; modes; minimal bubblewrap with its startup check; network on/off; harness-offered reruns; `.psi/` write refusal; guards; policy and guard recording.
@@ -728,14 +729,13 @@ Each phase ends with its acceptance criteria passing in the local check, where a
 - ✅ Generated stubs, glue and docs are drift-free in the local check.
 - ✅ A runaway Lua loop is killed without freezing the UI.
 - ✅ Example extensions covering each API area pass their tests.
-- ✅ H-01 measured (the extension-writing eval with both reference models), as information only.
 
 **Phase 6: batteries.**
 - Plan mode, todo, post-edit check, skills, prompt templates, themes, keybindings, self-knowledge, `register_provider`, local and git packages.
 - ✅ Each battery has eval coverage or a documented reason it can't.
 
 **Phase 7: experiments and polish.**
-- Work through the hypothesis table; compaction tuning; RPC mode; HTML export; MCP (**[G-08]**); sub-agents (**[G-07]**); other backends (**[G-18]**); macOS isolation (**[G-20]**).
+- Work through the hypothesis table, including H-01 (the extension-writing eval, deferred from Phase 5 on 2026-10-31); compaction tuning; RPC mode; HTML export; MCP (**[G-08]**); sub-agents (**[G-07]**); other backends (**[G-18]**); macOS isolation (**[G-20]**).
 - ✅ Every hypothesis has a recorded result.
 
 **Phase 8 (optional): stricter safety and public readiness.** §13.
