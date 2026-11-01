@@ -58,6 +58,18 @@ impl Reply {
         ))
     }
 
+    /// A response from a wire log (`status` and body as recorded), sent
+    /// back byte for byte: a stream when 200, JSON otherwise.
+    pub fn recorded(status: u16, body: &str) -> Self {
+        if status == 200 {
+            Reply::stream(body)
+        } else {
+            Reply::Raw {
+                bytes: http(status, "application/json", body.as_bytes()),
+            }
+        }
+    }
+
     pub fn hang(text: &str) -> Self {
         Reply::Hang { text: text.into() }
     }

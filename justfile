@@ -166,3 +166,25 @@ llm-down:
       echo "not running"
     fi
     rm -f "{{state}}/pid"
+
+# Copy a trial's model responses (wire-log steps, e.g. 15-22 or 1,4) into
+# crates/psi-agent/tests/fixtures/recorded/<name>.jsonl, for tests that replay
+# real model mistakes (unhappy paths)
+record-fixture trial steps name:
+    #!/usr/bin/env python3
+    import json, pathlib
+    wanted = set()
+    for part in "{{steps}}".split(","):
+        a, _, b = part.partition("-")
+        wanted.update(range(int(a), int(b or a) + 1))
+    src = pathlib.Path("{{trial}}") / "wire.jsonl"
+    out = pathlib.Path("crates/psi-agent/tests/fixtures/recorded/{{name}}.jsonl")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    n = 0
+    with out.open("w") as f:
+        for line in src.open():
+            r = json.loads(line)
+            if r["kind"] == "response" and r["seq"] in wanted:
+                f.write(json.dumps({"step": r["seq"], "status": r.get("status", 200), "body": r["body"]}) + "\n")
+                n += 1
+    print(f"{n} responses from {src} in {out}")
