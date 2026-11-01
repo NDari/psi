@@ -102,9 +102,11 @@ impl SessionFile {
         &self.skipped
     }
 
-    /// The session files in one directory (`<root>/<cwd-slug>`), oldest first.
+    /// The session files in one directory (`<root>/<cwd-slug>`), least
+    /// recently written first. Names hold the minute and a random suffix,
+    /// so two sessions of one minute can't be ordered by name.
     pub fn list(dir: &Path) -> Vec<PathBuf> {
-        let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        let mut files: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir)
             .into_iter()
             .flatten()
             .flatten()
@@ -113,9 +115,15 @@ impl SessionFile {
                 p.extension().is_some_and(|e| e == "jsonl")
                     && !p.to_string_lossy().ends_with(".wire.jsonl")
             })
+            .map(|p| {
+                let t = std::fs::metadata(&p)
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::UNIX_EPOCH);
+                (t, p)
+            })
             .collect();
         files.sort();
-        files
+        files.into_iter().map(|(_, p)| p).collect()
     }
 
     /// The most recent session file for `cwd`, if any.
@@ -249,6 +257,27 @@ mod tests {
         assert_eq!(third.entries().len(), 3);
         assert_eq!(third.branch().len(), 3);
         assert_eq!(third.skipped().len(), 2);
+    }
+
+    #[test]
+    fn latest_is_the_last_written_not_the_last_named() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = Path::new("/p");
+        let mut a = SessionFile::create(root.path(), cwd).unwrap();
+        let mut b = SessionFile::create(root.path(), cwd).unwrap();
+        a.append(cp("a")).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        b.append(cp("b")).unwrap();
+        assert_eq!(
+            SessionFile::latest(root.path(), cwd).as_deref(),
+            Some(b.path())
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        a.append(cp("a2")).unwrap();
+        assert_eq!(
+            SessionFile::latest(root.path(), cwd).as_deref(),
+            Some(a.path())
+        );
     }
 
     #[test]

@@ -64,9 +64,19 @@ impl Tui {
         setup: impl FnOnce(&std::path::Path),
         args: &[&str],
     ) -> (Self, ReplayServer) {
-        let server = ReplayServer::start(replies).unwrap();
         // Not inside the psi repository, whose target/ is gitignored.
-        let tmp = tempfile::tempdir().unwrap();
+        Self::start_at(tempfile::tempdir().unwrap(), replies, setup, args)
+    }
+
+    /// As [`Self::start_with`], in `tmp`'s `home` and `project`, which may
+    /// hold earlier sessions (`-c`, `/resume`).
+    fn start_at(
+        tmp: tempfile::TempDir,
+        replies: Vec<Reply>,
+        setup: impl FnOnce(&std::path::Path),
+        args: &[&str],
+    ) -> (Self, ReplayServer) {
+        let server = ReplayServer::start(replies).unwrap();
         let home = tmp.path().join("home");
         let project = tmp.path().join("project");
         std::fs::create_dir_all(home.join(".psi")).unwrap();
@@ -810,5 +820,169 @@ fn a_slow_bang_command_keeps_the_screen_live_and_esc_stops_it() {
     });
     assert!(gone, "the command was left running");
     t.typ("\x03"); // Ctrl+C clears the typed text, so Ctrl+D quits
+    t.quit();
+}
+
+/// Runs `psi -p <prompt>` in `tmp`'s home and project (sessions for `-c`
+/// and `/resume`), against its own replay server.
+fn print_run(tmp: &std::path::Path, prompt: &str, answer: &str) {
+    let server = ReplayServer::start(vec![text(answer)]).unwrap();
+    let home = tmp.join("home");
+    let project = tmp.join("project");
+    std::fs::create_dir_all(home.join(".psi")).unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    let models =
+        json!({"models": [{"id": "local", "base_url": server.base_url(), "max_output": 256}]});
+    std::fs::write(home.join(".psi/models.jsonc"), models.to_string()).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_psi"))
+        .args(["-p", prompt])
+        .env("HOME", &home)
+        .current_dir(&project)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn strict_project(p: &std::path::Path) {
+    std::fs::create_dir_all(p.join(".psi")).unwrap();
+    std::fs::write(p.join(".psi/settings.jsonc"), r#"{"mode": "strict"}"#).unwrap();
+}
+
+#[test]
+fn trusting_a_project_loads_its_settings() {
+    let (mut t, _s) = Tui::start(vec![], strict_project);
+    t.wait_for("Load it? [y/N]", SLOW);
+    t.typ("y\r");
+    t.wait_for("· strict ·", SLOW);
+    let home = t.project.parent().unwrap().join("home");
+    assert!(home.join(".psi/trust.json").exists());
+    t.quit();
+}
+
+#[test]
+fn not_trusting_a_project_leaves_its_settings_out() {
+    let (mut t, _s) = Tui::start(vec![], strict_project);
+    t.wait_for("Load it? [y/N]", SLOW);
+    t.typ("n\r");
+    // (Its "not loading" line goes out before the screen starts.)
+    t.wait_for("· auto ·", SLOW);
+    let home = t.project.parent().unwrap().join("home");
+    assert!(!home.join(".psi/trust.json").exists());
+    t.quit();
+}
+
+#[test]
+fn the_approval_card_allows_once_for_the_session_or_denies_with_a_reason() {
+    let push = || call("bash", json!({"command": "git push --dry-run"}));
+    let (mut t, s) = Tui::start(
+        vec![
+            push(),
+            text("one"),
+            push(),
+            push(),
+            text("two"),
+            push(),
+            text("three"),
+        ],
+        |_| {},
+    );
+    t.wait_for("› ", SLOW);
+    // y: this call only.
+    t.typ("first\r");
+    t.wait_for("approve bash", SLOW);
+    t.typ("y");
+    t.wait_for("allowed once", SLOW);
+    t.wait_for("one", SLOW);
+    // s: the rest of the session; the next push runs without a card.
+    // (The card is drawn in place and goes when answered.)
+    t.typ("second\r");
+    t.wait_screen("approve bash", SLOW);
+    t.typ("s");
+    t.wait_for("allowed for this session", SLOW);
+    t.wait_for("two", SLOW);
+    let all = t.all();
+    assert_eq!(all.matches("● bash  git push").count(), 3, "{all}");
+    assert_eq!(all.matches("  allowed ").count(), 2, "{all}");
+    // A new session (grants don't carry), then e: denied with a reason the
+    // model reads.
+    t.typ("/new\r");
+    t.wait_for("new session", SLOW);
+    t.typ("third\r");
+    t.wait_screen("approve bash", SLOW);
+    t.typ("e");
+    t.typ("use the staging remote\r");
+    t.wait_for("denied: use the staging remote", SLOW);
+    t.wait_for("three", SLOW);
+    let last = s.chat_requests().last().unwrap()["messages"].to_string();
+    assert!(last.contains("use the staging remote"), "{last}");
+    t.quit();
+}
+
+#[test]
+fn continue_and_resume_bring_back_a_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    print_run(tmp.path(), "alpha question", "alpha answer");
+    let (mut t, s) = Tui::start_at(tmp, vec![text("more")], |_| {}, &["-c"]);
+    // -c replays the history and continues from it.
+    t.wait_for("› alpha question", SLOW);
+    t.wait_for("alpha answer", SLOW);
+    t.typ("and then?\r");
+    t.wait_for("more", SLOW);
+    let m = s.chat_requests()[0]["messages"].clone();
+    assert_eq!(m[1]["content"], "alpha question");
+    assert_eq!(m[2]["content"], "alpha answer");
+    // /new, then /resume picks a session back.
+    t.typ("/new\r");
+    t.wait_for("new session", SLOW);
+    t.typ("/resume\r");
+    t.wait_for("↑↓ choose", SLOW);
+    t.typ("\r");
+    t.wait_for("resumed", SLOW);
+    t.wait_count("› alpha question", 2, SLOW);
+    t.quit();
+}
+
+#[test]
+fn session_commands_answer() {
+    let (mut t, _s) = Tui::start(vec![text("hello")], |_| {});
+    t.wait_for("› ", SLOW);
+    t.typ("hi\r");
+    t.wait_for("hello", SLOW);
+    t.typ("/label start\r");
+    t.wait_for("labelled", SLOW);
+    t.typ("/compact\r");
+    t.wait_for("nothing to compact", SLOW);
+    t.typ("/mcp\r");
+    t.wait_for("no MCP servers", SLOW);
+    t.typ("/todos\r");
+    t.wait_for("todo", SLOW);
+    t.typ("/inspect\r");
+    t.wait_for("step 1", SLOW);
+    t.typ("/tree\r");
+    t.wait_for("↑↓ choose", SLOW);
+    t.esc();
+    t.quit();
+}
+
+#[test]
+fn a_paste_is_one_edit_not_a_submit() {
+    let (mut t, s) = Tui::start(vec![text("got it")], |_| {});
+    t.wait_for("› ", SLOW);
+    // Bracketed paste of two lines: the newline doesn't send.
+    t.send(b"\x1b[200~line one\nline two\x1b[201~");
+    t.wait_for("line two", SLOW);
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(s.chat_requests().is_empty(), "the paste was sent");
+    t.typ("\r");
+    t.wait_for("got it", SLOW);
+    let m = s.chat_requests()[0]["messages"].clone();
+    assert_eq!(
+        m.as_array().unwrap().last().unwrap()["content"],
+        "line one\nline two"
+    );
     t.quit();
 }

@@ -591,3 +591,150 @@ end }"#,
     let msgs = body["messages"].as_array().unwrap();
     assert_eq!(msgs.last().unwrap()["content"], "Say hello to print.\n");
 }
+
+fn error(status: u16, message: &str) -> Reply {
+    Reply::Error {
+        status,
+        body: json!({"error": {"code": status, "message": message, "type": "server_error"}}),
+    }
+}
+
+#[test]
+fn the_prompt_can_come_from_stdin() {
+    let server = ReplayServer::start(vec![text("ok")]).unwrap();
+    let e = env_for(&server);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_psi"))
+        .args(["-p", "-"])
+        .env("HOME", &e.home)
+        .current_dir(&e.project)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(child.stdin.as_mut().unwrap(), b"a prompt\nover two lines\n")
+        .unwrap();
+    drop(child.stdin.take());
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let m = server.chat_requests()[0]["messages"].clone();
+    assert_eq!(m[1]["content"], "a prompt\nover two lines\n");
+}
+
+#[test]
+fn a_failure_mid_run_says_why_and_exits_1() {
+    let server = ReplayServer::start(vec![
+        Reply::Chat(ScriptedReply::call("bash", json!({"command": "true"}))),
+        error(500, "CUDA error: out of memory"),
+    ])
+    .unwrap();
+    let e = env_for(&server);
+    let out = psi(&e, &["-p", "go"]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("out of memory"), "{err}");
+    // The same in --json: the last event says how it stopped and why.
+    let server = ReplayServer::start(vec![
+        Reply::Chat(ScriptedReply::call("bash", json!({"command": "true"}))),
+        error(500, "CUDA error: out of memory"),
+    ])
+    .unwrap();
+    let e = env_for(&server);
+    let out = psi(&e, &["-p", "go", "--json"]);
+    assert_eq!(out.status.code(), Some(1));
+    let end: Value = serde_json::from_str(
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(end["type"], "run_end");
+    assert_eq!(end["stop"], "failed");
+    assert!(
+        end["reason"].as_str().unwrap().contains("out of memory"),
+        "{end}"
+    );
+}
+
+#[test]
+fn a_guard_stop_exits_3_with_its_reason() {
+    let replies = (0..6)
+        .map(|_| Reply::Chat(ScriptedReply::call("bash", json!({"command": "false"}))))
+        .collect();
+    let server = ReplayServer::start(replies).unwrap();
+    let e = env_for(&server);
+    let out = psi(&e, &["-p", "go"]);
+    assert_eq!(out.status.code(), Some(3));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("the same call failed 5 times in a row"),
+        "{err}"
+    );
+}
+
+#[test]
+fn continue_with_no_earlier_session_says_so() {
+    let server = ReplayServer::start(vec![text("x")]).unwrap();
+    let e = env_for(&server);
+    let out = psi(&e, &["-c", "-p", "hi"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("no earlier session in"), "{err}");
+    assert!(server.chat_requests().is_empty());
+}
+
+#[test]
+fn a_session_file_can_be_named() {
+    let server = ReplayServer::start(vec![text("one"), text("two"), text("three")]).unwrap();
+    let e = env_for(&server);
+    assert!(psi(&e, &["-p", "first"]).status.success());
+    assert!(psi(&e, &["-p", "other"]).status.success());
+    // (Files of the same minute sort by a random suffix: find it by content.)
+    let first = sessions(&e)
+        .into_iter()
+        .find(|p| std::fs::read_to_string(p).unwrap().contains("\"first\""))
+        .unwrap();
+    let out = psi(&e, &["--session", first.to_str().unwrap(), "-p", "back"]);
+    assert!(out.status.success());
+    let m = server.chat_requests()[2]["messages"].clone();
+    assert_eq!(m[1]["content"], "first");
+    assert_eq!(m.as_array().unwrap().last().unwrap()["content"], "back");
+}
+
+#[test]
+fn ctrl_c_stops_a_print_run_with_130() {
+    let server = ReplayServer::start(vec![Reply::hang("Thinking")]).unwrap();
+    let e = env_for(&server);
+    let child = Command::new(env!("CARGO_BIN_EXE_psi"))
+        .args(["-p", "go"])
+        .env("HOME", &e.home)
+        .current_dir(&e.project)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let requests = server.chat_counter();
+    let start = std::time::Instant::now();
+    while requests() == 0 && start.elapsed() < std::time::Duration::from_secs(10) {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let pid = rustix::process::Pid::from_raw(child.id() as i32).unwrap();
+    rustix::process::kill_process(pid, rustix::process::Signal::INT).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(130));
+    // The session records the stopped answer and still opens.
+    let s = psi_session::SessionFile::open(&sessions(&e)[0]).unwrap();
+    assert!(s.entries().iter().any(|en| matches!(
+        &en.body,
+        EntryBody::Message {
+            stop_reason: Some(psi_session::StopReason::Aborted),
+            ..
+        }
+    )));
+}

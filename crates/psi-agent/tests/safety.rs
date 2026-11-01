@@ -334,6 +334,42 @@ async fn a_symlink_and_dotdot_cannot_reach_psi_config() {
 }
 
 #[tokio::test]
+async fn session_grants_end_with_the_session_but_allow_flags_stay() {
+    // --allow git push at the start; `s` on a git stash drop card. A new session
+    // keeps the first and asks for git stash drop again.
+    let fx = Fx::new();
+    let server = ReplayServer::start(vec![
+        call("bash", json!({"command": "git stash drop"})),
+        call("bash", json!({"command": "git push --dry-run"})),
+        text("one"),
+        call("bash", json!({"command": "git stash drop"})),
+        call("bash", json!({"command": "git push --dry-run"})),
+        text("two"),
+    ])
+    .unwrap();
+    let approver = Arc::new(Scripted::default());
+    approver
+        .approvals
+        .lock()
+        .unwrap()
+        .extend([Approval::Session, Approval::Deny]);
+    let mut safety = fx.safety(approver.clone(), None);
+    safety.grants.insert("git push".into());
+    let mut a = fx.agent(&server, fx.session(), safety, false);
+    a.run("go").await;
+    a.set_session(fx.session(), None);
+    a.run("again").await;
+    let asked: Vec<String> = approver
+        .asked
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|r| r.args["command"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(asked, ["git stash drop", "git stash drop"]);
+}
+
+#[tokio::test]
 async fn a_failing_checkpoint_makes_writes_ask() {
     let fx = Fx::new();
     let server = ReplayServer::start(vec![

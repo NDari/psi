@@ -214,6 +214,7 @@ pub struct App<W: Write> {
     last_ctrl_c: Option<Instant>,
     quit: bool,
     sessions_dir: PathBuf,
+    session_path: PathBuf,
     label_text: Option<String>,
     debug: bool,
     ext: Arc<ExtManager>,
@@ -240,6 +241,8 @@ pub struct AppParts<W: Write> {
     pub cancel: std::sync::Arc<std::sync::Mutex<CancellationToken>>,
     pub completer: Completer,
     pub sessions_dir: PathBuf,
+    /// The session file in use, left out of /resume.
+    pub session_path: PathBuf,
     pub history: Vec<String>,
     pub ext: Arc<ExtManager>,
     pub rt: tokio::runtime::Handle,
@@ -285,6 +288,7 @@ impl<W: Write> App<W> {
             last_ctrl_c: None,
             quit: false,
             sessions_dir: p.sessions_dir,
+            session_path: p.session_path,
             label_text: None,
             ext: p.ext,
             rt: p.rt,
@@ -1037,6 +1041,10 @@ impl<W: Write> App<W> {
             "resume" => {
                 let mut files = psi_session::SessionFile::list(&self.sessions_dir);
                 files.reverse();
+                // Not the one in use, nor one that holds nothing yet.
+                files.retain(|f| {
+                    *f != self.session_path && std::fs::metadata(f).is_ok_and(|m| m.len() > 0)
+                });
                 if files.is_empty() {
                     return self.info("no earlier sessions in this directory");
                 }
@@ -1141,6 +1149,7 @@ impl<W: Write> App<W> {
             } => {
                 self.shown.clear();
                 self.info(&format!("  {what}: {}", path.display()));
+                self.session_path = path;
                 // The agent takes plan mode from the new session; so does the screen.
                 self.set_plan(PlanState::default());
                 let _ = self.replay(&entries);

@@ -198,6 +198,7 @@ pub fn run(args: RunArgs) -> Result<ExitCode> {
         cancel,
         completer: Completer::new(&cwd),
         sessions_dir: sessions.join(psi_session::cwd_slug(&cwd)),
+        session_path: session_path.clone(),
         history,
         ext: ext.clone(),
         rt: rt.handle().clone(),

@@ -203,6 +203,9 @@ pub struct Agent {
     mcp_tools: Vec<Arc<McpTool>>,
     /// The first run waited for the servers to connect.
     mcp_waited: bool,
+    /// The grants given at the start (`--allow`); `s` answers come on top
+    /// and last until the session changes.
+    base_grants: HashSet<String>,
 }
 
 /// A call after the shape-fix pipeline: the tool and its arguments, or the
@@ -269,6 +272,7 @@ impl Agent {
             mcp: McpManager::empty(),
             mcp_tools: Vec::new(),
             mcp_waited: false,
+            base_grants: HashSet::new(),
         }
         .with_abort_token()
     }
@@ -482,6 +486,10 @@ impl Agent {
     pub fn set_session(&mut self, session: SessionFile, checkpoints: Option<Arc<Checkpoints>>) {
         self.session = session;
         self.safety.checkpoints = checkpoints;
+        // "Allow for this session" means this session: /new, /resume and
+        // /fork drop the `s` answers (always-ask entries) and keep only
+        // what --allow granted at the start.
+        self.safety.grants = self.base_grants.clone();
         self.capture_failing = false;
         self.restore_plan();
         if let Ok(mut f) = self.ctx.files.lock() {
@@ -573,6 +581,7 @@ impl Agent {
     }
 
     pub fn with_safety(mut self, safety: Safety) -> Self {
+        self.base_grants = safety.grants.clone();
         self.safety = safety;
         self
     }
