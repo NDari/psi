@@ -14,8 +14,13 @@ fn store(home: &Path) -> PathBuf {
 }
 
 /// The project's resource directories that need trust: what they hold
-/// runs as the user or instructs the model (pi parity).
-const TRUSTED_DIRS: &[&str] = &["extensions", "skills", "prompts", "themes"];
+/// runs as the user or instructs the model (pi parity), including
+/// sub-agent definitions (§10.1).
+const TRUSTED_DIRS: &[&str] = &["extensions", "skills", "prompts", "themes", "agents"];
+
+/// Files in `.psi` that need trust: settings, and MCP servers, whose
+/// commands run as the user (§10.2).
+const TRUSTED_FILES: &[&str] = &["settings.jsonc", "mcp.json"];
 
 fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
     for e in ignore::WalkBuilder::new(dir)
@@ -29,15 +34,16 @@ fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// A fingerprint of the project's `.psi/settings.jsonc`, extensions,
-/// skills, prompts and themes, and its `.agents/skills`, or `None` when it
-/// has none of them (nothing to trust).
+/// A fingerprint of the project's `.psi/settings.jsonc` and `mcp.json`,
+/// its extensions, skills, prompts, themes and agents, and its
+/// `.agents/skills`, or `None` when it has none of them (nothing to trust).
 pub fn fingerprint(project: &Path) -> Option<String> {
     let dir = project.join(".psi");
-    let mut files: Vec<PathBuf> = Vec::new();
-    if dir.join("settings.jsonc").is_file() {
-        files.push(dir.join("settings.jsonc"));
-    }
+    let mut files: Vec<PathBuf> = TRUSTED_FILES
+        .iter()
+        .map(|f| dir.join(f))
+        .filter(|f| f.is_file())
+        .collect();
     for d in TRUSTED_DIRS {
         files_under(&dir.join(d), &mut files);
     }
@@ -95,7 +101,10 @@ pub fn describe(project: &Path) -> String {
     if n > 0 {
         parts.push(format!("{n} extension(s), which run as you"));
     }
-    for d in ["skills", "prompts", "themes"] {
+    if dir.join("mcp.json").is_file() {
+        parts.push("MCP servers, which run as you".to_owned());
+    }
+    for d in ["skills", "prompts", "themes", "agents"] {
         if dir.join(d).is_dir() {
             parts.push(d.to_owned());
         }
@@ -145,5 +154,35 @@ mod tests {
         std::fs::create_dir_all(p.join(".agents/skills/y")).unwrap();
         std::fs::write(p.join(".agents/skills/y/SKILL.md"), "b").unwrap();
         assert_ne!(fingerprint(&p).unwrap(), f);
+    }
+
+    #[test]
+    fn mcp_servers_and_agents_need_trust() {
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path().join("home");
+        let p = d.path().join("proj");
+        std::fs::create_dir_all(p.join(".psi")).unwrap();
+        // Only an mcp.json: its commands run as the user, so there is
+        // something to trust, and a change asks again.
+        std::fs::write(p.join(".psi/mcp.json"), r#"{"mcpServers": {}}"#).unwrap();
+        let f = fingerprint(&p).expect("mcp.json needs trust");
+        assert!(
+            describe(&p).contains("MCP servers, which run as you"),
+            "{}",
+            describe(&p)
+        );
+        trust(&home, &p, &f).unwrap();
+        std::fs::write(
+            p.join(".psi/mcp.json"),
+            r#"{"mcpServers": {"x": {"command": "sh"}}}"#,
+        )
+        .unwrap();
+        assert!(!is_trusted(&home, &p, &fingerprint(&p).unwrap()));
+        // Only an agent file.
+        let q = d.path().join("proj2");
+        std::fs::create_dir_all(q.join(".psi/agents")).unwrap();
+        std::fs::write(q.join(".psi/agents/a.md"), "---\ndescription: x\n---\nhi").unwrap();
+        assert!(fingerprint(&q).is_some());
+        assert!(describe(&q).ends_with("agents"), "{}", describe(&q));
     }
 }
