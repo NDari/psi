@@ -23,14 +23,15 @@ use tokio_util::sync::CancellationToken;
 use crate::approval::{
     Approval, ApprovalRequest, Approver, BlockedChoice, BlockedRequest, Headless,
 };
-use crate::compact::{estimate_tokens, plan_clear, trigger};
 use crate::events::AgentEvent;
 use crate::ext::{Callable, decide, invoke, schema_of, tool_runner};
 use crate::guards::{GuardAction, Guards};
-use crate::messages::{build_messages, build_with_sources, plan_drop};
+use crate::messages::{build_messages, plan_drop};
 use crate::plan::{self, PlanState};
 use crate::post_edit::{self, PostEditCheck};
 use psi_ext::{AgentRequest, ExtManager, Gate, ToolInfo};
+
+mod fit;
 
 /// Limits on one run (§5). Reaching one stops a headless run.
 #[derive(Debug, Clone)]
@@ -180,6 +181,11 @@ pub struct Agent {
     plan_off_note: bool,
     /// The plan state changed before the session had its first entry.
     plan_unrecorded: bool,
+    /// The last request sent, to check a summary request extends it (D-38).
+    last_request: Option<ChatRequest>,
+    /// The context size when summarizing last failed: no new try until it
+    /// grows by a tenth of the window.
+    compact_failed_at: Option<u64>,
 }
 
 /// A call after the shape-fix pipeline: the tool and its arguments, or the
@@ -226,6 +232,8 @@ impl Agent {
             plan: PlanState::default(),
             plan_off_note: false,
             plan_unrecorded: false,
+            last_request: None,
+            compact_failed_at: None,
         }
         .with_abort_token()
     }
@@ -643,7 +651,7 @@ impl Agent {
             self.emit(AgentEvent::TurnStart { turn });
             self.ext.notify("turn_start", json!({"turn": turn})).await;
 
-            self.clear_old_results()?;
+            self.fit_context().await?;
             let resp = match self.request().await {
                 Ok(r) => r,
                 Err(AiError::ContextOverflow {
@@ -799,38 +807,9 @@ impl Agent {
         }
     }
 
-    /// Past the trigger (§7.4), old tool results are sent as a one-line
-    /// note from now on, in one batch, enough to get well below it.
-    fn clear_old_results(&mut self) -> Result<(), String> {
-        let n_ctx = self.cfg.n_ctx;
-        let result_tokens = (self.ctx.max_result_chars as u64) / crate::compact::CHARS_PER_TOKEN;
-        let at = trigger(n_ctx, self.cfg.max_output, result_tokens);
-        let branch = self.session.branch();
-        let (messages, sources) = build_with_sources(&self.system_prompt(), &branch);
-        let tools_chars: usize = self
-            .all_schemas()
-            .iter()
-            .map(|s| s.to_openai().to_string().len())
-            .sum();
-        let tokens = estimate_tokens(&branch, &messages, tools_chars);
-        if tokens < at {
-            return Ok(());
-        }
-        let need = tokens - at.saturating_sub(n_ctx / 5);
-        let Some((ids, freed)) = plan_clear(&messages, &sources, need, n_ctx / 10) else {
-            // TODO(phase-7): summarize when clearing can't free enough (§7.4).
-            return Ok(());
-        };
-        self.record(EntryBody::ClearedResults {
-            entry_ids: ids,
-            tokens_before: tokens,
-            tokens_freed: freed,
-        })?;
-        Ok(())
-    }
-
     async fn request(&mut self) -> Result<Response, AiError> {
         let req = self.build_request();
+        self.last_request = Some(req.clone());
         if self.ext.listens("context") {
             let m: Vec<Value> = req.messages.iter().map(|m| m.to_json()).collect();
             self.ext.notify("context", json!({"messages": m})).await;
@@ -1440,7 +1419,10 @@ impl Agent {
     async fn drop_old_turns(&mut self, n_prompt: u64, n_ctx: u64) -> Result<(), String> {
         if let Gate::Block(why) = self
             .ext
-            .gate("session_before_compact", json!({"tokens": n_prompt}))
+            .gate(
+                "session_before_compact",
+                json!({"tokens": n_prompt, "reason": "overflow"}),
+            )
             .await
         {
             return Err(format!(
@@ -1453,6 +1435,7 @@ impl Agent {
             summary: String::new(),
             first_kept_id: keep,
             tokens_before: Some(n_prompt),
+            replaces: vec![],
         })?;
         self.record(EntryBody::GuardEvent {
             guard: "context_overflow".into(),

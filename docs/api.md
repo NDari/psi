@@ -406,7 +406,7 @@ Subscribe with `psi.on(event, function(ev, ctx) ... end)`; `ev` is the payload a
 |---|---|---|---|---|
 | `session_start` | notify | `SessionEvent` |  | The session is open (also after /new, /resume and /reload). |
 | `session_shutdown` | notify | `SessionEvent` |  | psi is closing the session. |
-| `session_before_compact` | gate | `CompactEvent` | `GateResult?` | Old turns are about to be dropped to fit the context window. Return { cancel = true } to stop it. |
+| `session_before_compact` | gate | `CompactEvent` | `GateResult?` | Old turns are about to be summarized or dropped to fit the context window. Return { cancel = true } to stop it. |
 | `input` | chain | `InputEvent` | `InputResult?` | The user submitted text that is not a command (extension commands run first). Return { text = ... } to change it, or { handled = true } to consume it; skills and prompt templates expand after. |
 | `before_agent_start` | chain | `AgentStartEvent` | `AgentStartResult?` | A run is about to start. Return { system = ... } to add text to the end of the system prompt for this run. |
 | `agent_start` | notify | `AgentStartEvent` |  | A run started. |
@@ -546,7 +546,8 @@ A custom UI component (pi-tui parity), drawn under the input box under a deadlin
 
 | Field | Type | Description |
 |---|---|---|
-| `tokens` | `integer` | The request size that overflowed |
+| `tokens` | `integer` | The context size, in tokens |
+| `reason` | `string?` | "summary" (past the trigger) or "overflow" (the server refused the request) |
 
 ### GateResult
 

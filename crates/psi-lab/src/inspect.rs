@@ -175,6 +175,25 @@ pub fn timeline(rec: &Record) -> Timeline {
                 guard: guard.clone(),
                 message: message.clone(),
             }),
+            EntryBody::Compaction {
+                summary,
+                tokens_before,
+                replaces,
+                ..
+            } => events.push(Event::Guard {
+                guard: "compaction".into(),
+                message: if summary.is_empty() {
+                    "old turns dropped without a summary".into()
+                } else if !replaces.is_empty() {
+                    format!("the two oldest summaries merged ({} characters)", summary.len())
+                } else {
+                    format!(
+                        "summarized at about {} tokens ({} characters)",
+                        tokens_before.unwrap_or(0),
+                        summary.len()
+                    )
+                },
+            }),
             EntryBody::ClearedResults {
                 entry_ids,
                 tokens_before,

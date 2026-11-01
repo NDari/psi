@@ -250,7 +250,7 @@ payload = "SessionEvent"
 [[event]]
 name = "session_before_compact"
 kind = "gate"
-doc = "Old turns are about to be dropped to fit the context window. Return { cancel = true } to stop it."
+doc = "Old turns are about to be summarized or dropped to fit the context window. Return { cancel = true } to stop it."
 payload = "CompactEvent"
 result = "GateResult?"
 
@@ -465,7 +465,10 @@ fields = [{ name = "session_file", type = "string?", doc = "" }]
 
 [[type]]
 name = "CompactEvent"
-fields = [{ name = "tokens", type = "integer", doc = "The request size that overflowed" }]
+fields = [
+  { name = "tokens", type = "integer", doc = "The context size, in tokens" },
+  { name = "reason", type = "string?", doc = "\"summary\" (past the trigger) or \"overflow\" (the server refused the request)" },
+]
 
 [[type]]
 name = "GateResult"

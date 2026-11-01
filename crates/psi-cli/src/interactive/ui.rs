@@ -1409,6 +1409,13 @@ impl<W: Write> App<W> {
                 }
             }
             AgentEvent::TurnEnd { .. } => self.flush_text(),
+            AgentEvent::Compacting { tokens } => {
+                self.flush_text();
+                self.commit(vec![Line::styled(
+                    format!("  summarizing the earlier conversation (about {tokens} tokens)..."),
+                    dim(),
+                )]);
+            }
             _ => {}
         }
     }
@@ -1501,6 +1508,16 @@ impl<W: Write> App<W> {
                     ),
                     dim(),
                 )]);
+            }
+            EntryBody::Compaction {
+                summary, replaces, ..
+            } if !summary.is_empty() => {
+                let what = if replaces.is_empty() {
+                    "  summarized the earlier conversation; recent turns are kept as they are"
+                } else {
+                    "  merged the two oldest summaries"
+                };
+                self.commit(vec![Line::styled(what, dim())]);
             }
             EntryBody::PolicyDecision {
                 decision, reason, ..

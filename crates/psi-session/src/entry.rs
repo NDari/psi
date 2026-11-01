@@ -50,12 +50,17 @@ pub enum EntryBody {
         custom_type: String,
         content: Vec<Block>,
     },
-    /// A summary that replaces the entries before `first_kept_id`.
+    /// A summary of the entries before `first_kept_id`, back to the
+    /// previous compaction's cut; the summaries on a branch form a chain
+    /// (§7.4, D-40). An empty summary means those entries were dropped.
+    /// A merge names the earlier compactions whose summaries it replaces.
     Compaction {
         summary: String,
         first_kept_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tokens_before: Option<u64>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        replaces: Vec<String>,
     },
     /// Old tool results (by entry id) sent as a one-line note from here
     /// on, to save context (§7.4). Token counts are estimates.
@@ -353,6 +358,7 @@ mod tests {
                 summary: "s".into(),
                 first_kept_id: "00000001".into(),
                 tokens_before: Some(9),
+                replaces: vec!["00000003".into()],
             },
             EntryBody::ClearedResults {
                 entry_ids: vec!["00000002".into()],

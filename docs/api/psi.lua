@@ -6,7 +6,7 @@
 ---@alias EventName
 ---| "session_start" # The session is open (also after /new, /resume and /reload).
 ---| "session_shutdown" # psi is closing the session.
----| "session_before_compact" # Old turns are about to be dropped to fit the context window. Return { cancel = true } to stop it.
+---| "session_before_compact" # Old turns are about to be summarized or dropped to fit the context window. Return { cancel = true } to stop it.
 ---| "input" # The user submitted text that is not a command (extension commands run first). Return { text = ... } to change it, or { handled = true } to consume it; skills and prompt templates expand after.
 ---| "before_agent_start" # A run is about to start. Return { system = ... } to add text to the end of the system prompt for this run.
 ---| "agent_start" # A run started.
@@ -97,7 +97,8 @@
 ---@field session_file? string
 
 ---@class CompactEvent
----@field tokens integer The request size that overflowed
+---@field tokens integer The context size, in tokens
+---@field reason? string "summary" (past the trigger) or "overflow" (the server refused the request)
 
 ---@class GateResult
 ---@field cancel? boolean

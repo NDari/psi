@@ -39,12 +39,23 @@ impl Fixture {
     }
 
     fn agent_with(&self, budgets: Budgets, tools: Vec<psi_tools::Tool>) -> Agent {
+        self.agent_sized(budgets, tools, 8192, 20_000)
+    }
+
+    /// An agent with its own window and tool result cap (characters).
+    fn agent_sized(
+        &self,
+        budgets: Budgets,
+        tools: Vec<psi_tools::Tool>,
+        n_ctx: u64,
+        max_result_chars: usize,
+    ) -> Agent {
         let session = SessionFile::create(&self.sessions, &self.cwd).unwrap();
-        let ctx = ToolCtx::new(&self.cwd, &self.cwd.join("../tmp"), 20_000);
+        let ctx = ToolCtx::new(&self.cwd, &self.cwd.join("../tmp"), max_result_chars);
         let cfg = AgentConfig {
             model: "local".into(),
             max_output: 512,
-            n_ctx: 8192,
+            n_ctx,
             enable_thinking: None,
             budgets,
             system_prompt: "sys".into(),
@@ -342,7 +353,9 @@ async fn context_overflow_drops_old_turns_and_retries() {
     replies.push(Reply::from_http_file(&raw).unwrap());
     replies.push(text("done"));
     let f = Fixture::new(replies);
-    let (out, a) = f.run("count").await;
+    // A window the harness thinks is large: only the server's overflow cuts.
+    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 1 << 20, 20_000);
+    let out = a.run("count").await;
     assert_eq!(out.stop, Stop::Done, "{:?}", out.stop);
     let reqs = f.server.chat_requests();
     let last = reqs.last().unwrap()["messages"].as_array().unwrap().clone();
@@ -350,7 +363,7 @@ async fn context_overflow_drops_old_turns_and_retries() {
         last[1]["content"]
             .as_str()
             .unwrap()
-            .ends_with(psi_agent_note())
+            .starts_with(psi_agent_note())
     );
     assert!(last.len() < reqs[4]["messages"].as_array().unwrap().len());
     assert!(a.session().entries().iter().any(
@@ -358,22 +371,51 @@ async fn context_overflow_drops_old_turns_and_retries() {
     ));
 }
 
+/// Text files of `lines` numbered lines each, named f0.txt, f1.txt, ...
+fn write_files(cwd: &Path, n: usize, lines: usize) {
+    for i in 0..n {
+        let body: String = (0..lines)
+            .map(|l| format!("file {i} line {l:03}\n"))
+            .collect();
+        std::fs::write(cwd.join(format!("f{i}.txt")), body).unwrap();
+    }
+}
+
+fn reads(n: usize) -> Vec<Reply> {
+    (0..n)
+        .map(|i| call("read", json!({"path": format!("f{i}.txt")})))
+        .collect()
+}
+
+/// The kinds of entries a run wrote, for following what happened.
+fn kinds(a: &Agent) -> Vec<String> {
+    a.session()
+        .entries()
+        .iter()
+        .map(|e| match &e.body {
+            EntryBody::ToolResult { .. } => "result".into(),
+            EntryBody::ClearedResults { entry_ids, .. } => format!("cleared {}", entry_ids.len()),
+            EntryBody::Compaction { replaces, .. } if !replaces.is_empty() => "merge".into(),
+            EntryBody::Compaction { .. } => "compaction".into(),
+            EntryBody::GuardEvent { guard, .. } => format!("guard {guard}"),
+            _ => String::new(),
+        })
+        .filter(|k| !k.is_empty())
+        .collect()
+}
+
 #[tokio::test]
 async fn old_tool_results_are_cleared_past_the_trigger() {
-    // An 8K window: past a quarter of it, old reads become a note.
-    let mut replies: Vec<Reply> = (0..5)
-        .map(|i| call("read", json!({"path": format!("f{i}.txt")})))
-        .collect();
+    let mut replies = reads(8);
     replies.push(text("done"));
     let f = Fixture::new(replies);
-    for i in 0..5 {
-        let body: String = (0..200)
-            .map(|n| format!("file {i} line {n:03}\n"))
-            .collect();
-        std::fs::write(f.cwd.join(format!("f{i}.txt")), body).unwrap();
-    }
-    let (out, a) = f.run("read the files").await;
+    write_files(&f.cwd, 8, 200);
+    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    let out = a.run("read the files").await;
     assert_eq!(out.stop, Stop::Done, "{:?}", out.stop);
+    // One batch, once past the trigger; no summary was needed.
+    assert_eq!(kinds(&a)[7], "cleared 3", "{:?}", kinds(&a));
+    assert!(!kinds(&a).contains(&"compaction".to_owned()));
     let freed: Vec<u64> = a
         .session()
         .entries()
@@ -383,10 +425,7 @@ async fn old_tool_results_are_cleared_past_the_trigger() {
             _ => None,
         })
         .collect();
-    // Each clearing frees at least a tenth of the window: never a trickle
-    // of small ones, each breaking the prompt cache.
-    assert!(!freed.is_empty());
-    assert!(freed.iter().all(|&t| t >= 8192 / 10), "{freed:?}");
+    assert!(freed.iter().all(|&t| t >= 16_384 / 10), "{freed:?}");
     let reqs = f.server.chat_requests();
     let last = reqs.last().unwrap()["messages"].as_array().unwrap();
     let results: Vec<&str> = last
@@ -394,17 +433,209 @@ async fn old_tool_results_are_cleared_past_the_trigger() {
         .filter(|m| m["role"] == "tool")
         .map(|m| m["content"].as_str().unwrap())
         .collect();
-    assert_eq!(results.len(), 5);
+    assert_eq!(results.len(), 8);
     assert_eq!(
         results[0],
         "(Result cleared to save context: read f0.txt, 200 lines. Run it again if you need it.)"
     );
-    // The last three are always sent whole.
-    for r in &results[2..] {
+    // The most recent are sent whole, and the session keeps them all.
+    for r in &results[5..] {
         assert!(r.contains("line 199"), "{r}");
     }
-    // The session keeps the results themselves.
     assert!(tool_results(&a).iter().all(|(t, _)| t.contains("line 199")));
+}
+
+/// A session with a task holding planted facts, then `turns` small read
+/// turns (too small to clear), as if from earlier work.
+fn prefill(a: &mut Agent, turns: usize) {
+    let s = a.session_mut();
+    s.append(user_entry(
+        "Port the parser. The code word is PELICAN-42; keep the limit at 7 retries.",
+    ))
+    .unwrap();
+    for i in 0..turns {
+        let id = format!("old{i}");
+        s.append(EntryBody::Message {
+            role: psi_session::Role::Assistant,
+            content: vec![psi_session::Block::ToolCall {
+                id: id.clone(),
+                name: "read".into(),
+                arguments: json!({"path": format!("old{i}.txt")}),
+                raw: None,
+            }],
+            usage: None,
+            stop_reason: None,
+            error: None,
+            model: None,
+        })
+        .unwrap();
+        s.append(EntryBody::ToolResult {
+            tool_call_id: id,
+            tool_name: "read".into(),
+            content: vec![psi_session::Block::Text {
+                text: format!("old {i} ").repeat(80),
+            }],
+            is_error: false,
+        })
+        .unwrap();
+    }
+}
+
+fn user_entry(t: &str) -> EntryBody {
+    EntryBody::Message {
+        role: psi_session::Role::User,
+        content: vec![psi_session::Block::Text { text: t.into() }],
+        usage: None,
+        stop_reason: None,
+        error: None,
+        model: None,
+    }
+}
+
+/// A read call whose response says the prompt was `prompt_tokens` long.
+fn read_at(path: &str, prompt_tokens: u64) -> Reply {
+    Reply::Chat(ScriptedReply {
+        prompt_tokens,
+        ..ScriptedReply::call("read", json!({"path": path}))
+    })
+}
+
+fn compaction_info(a: &Agent) -> Vec<Value> {
+    a.session()
+        .entries()
+        .iter()
+        .filter_map(|e| match &e.body {
+            EntryBody::Custom { custom_type, data } if custom_type == "compaction" => {
+                Some(data.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+const SUMMARY: &str =
+    "## Goal\nPort the parser.\n## Constraints and facts\nCode word PELICAN-42; 7 retries.";
+
+#[tokio::test]
+async fn a_summary_extends_the_last_request_and_keeps_a_tail() {
+    let f = Fixture::new(vec![read_at("f0.txt", 9500), text(SUMMARY), text("done")]);
+    write_files(&f.cwd, 1, 200);
+    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    prefill(&mut a, 30);
+    let out = a.run("go on").await;
+    assert_eq!(out.stop, Stop::Done, "{:?} {:?}", out.stop, kinds(&a));
+    assert_eq!(compaction_info(&a)[0]["method"], "extend");
+    let reqs = f.server.chat_requests();
+    assert_eq!(reqs.len(), 3);
+    // The summary request is the last request plus the new result and
+    // the instruction, with the same tools (D-38).
+    let first = reqs[0]["messages"].as_array().unwrap();
+    let sum = reqs[1]["messages"].as_array().unwrap();
+    assert_eq!(sum[..first.len()], first[..]);
+    assert_eq!(reqs[1]["tools"], reqs[0]["tools"]);
+    let instruction = sum.last().unwrap()["content"].as_str().unwrap();
+    assert!(instruction.contains("Summarize the conversation so far"));
+    // After it: the summary, the task repeated (the cut is inside it), and
+    // the kept tail as it was.
+    let next = reqs[2]["messages"].as_array().unwrap();
+    let opening = next[1]["content"].as_str().unwrap();
+    assert!(opening.starts_with("[Summary of earlier work"), "{opening}");
+    assert!(opening.contains(SUMMARY));
+    assert!(opening.contains("[The last user message, repeated]\n\nPort the parser."));
+    assert!(next.len() < first.len());
+    let tail = &next[2..];
+    assert_eq!(tail[..], sum[sum.len() - 1 - tail.len()..sum.len() - 1]);
+    // The session keeps everything.
+    assert_eq!(tool_results(&a).len(), 31);
+}
+
+#[tokio::test]
+async fn a_summary_falls_back_to_a_plain_request() {
+    let f = Fixture::new(vec![
+        read_at("f0.txt", 9500),
+        call("read", json!({"path": "x"})),
+        text(SUMMARY),
+        text("done"),
+    ]);
+    write_files(&f.cwd, 1, 200);
+    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    prefill(&mut a, 30);
+    let out = a.run("go on").await;
+    assert_eq!(out.stop, Stop::Done, "{:?}", out.stop);
+    let info = &compaction_info(&a)[0];
+    assert_eq!(info["method"], "plain");
+    assert_eq!(info["fallback_reason"], "the model called a tool");
+    let reqs = f.server.chat_requests();
+    let plain = &reqs[2];
+    assert!(
+        plain
+            .get("tools")
+            .is_none_or(|t| t.as_array().is_some_and(Vec::is_empty))
+    );
+    let m = plain["messages"].as_array().unwrap();
+    assert_eq!(m.len(), 2);
+    let body = m[1]["content"].as_str().unwrap();
+    assert!(
+        body.starts_with("<conversation>\nUser: Port the parser."),
+        "{body}"
+    );
+    assert!(body.contains("Result of read: old 0"));
+    // The plain request covers only what the summary replaces.
+    assert!(!body.contains("go on"));
+    assert!(
+        reqs[3]["messages"][1]["content"]
+            .as_str()
+            .unwrap()
+            .contains(SUMMARY)
+    );
+}
+
+#[tokio::test]
+async fn summaries_chain_and_the_oldest_merge() {
+    let s1 = format!("S1 PELICAN-42 {}", "one ".repeat(700));
+    let s2 = format!("S2 {}", "two ".repeat(700));
+    let merged = "M PELICAN-42";
+    let f = Fixture::new(vec![
+        read_at("f0.txt", 9500),
+        text(&s1),
+        read_at("f1.txt", 9500),
+        text(&s2),
+        text(merged),
+        text("done"),
+    ]);
+    write_files(&f.cwd, 2, 200);
+    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    prefill(&mut a, 30);
+    let out = a.run("go on").await;
+    assert_eq!(out.stop, Stop::Done, "{:?} {:?}", out.stop, kinds(&a));
+    let methods: Vec<Value> = compaction_info(&a)
+        .iter()
+        .map(|i| i["method"].clone())
+        .collect();
+    assert_eq!(methods, ["extend", "extend", "merge"]);
+    let reqs = f.server.chat_requests();
+    // The second summary request carries the first summary and asks only
+    // for what came after it.
+    let second = reqs[3]["messages"].as_array().unwrap();
+    assert!(
+        second[1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("S1 PELICAN-42")
+    );
+    assert!(
+        second.last().unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .contains("everything after the last summary")
+    );
+    // The merge request has both, oldest first; afterwards one block.
+    let merge = reqs[4]["messages"][1]["content"].as_str().unwrap();
+    assert!(merge.find("S1 PELICAN").unwrap() < merge.find("S2 two").unwrap());
+    let last = reqs[5]["messages"][1]["content"].as_str().unwrap();
+    assert!(last.contains(merged));
+    assert!(!last.contains("S1 PELICAN") && !last.contains("S2 two"));
+    assert_eq!(last.matches("[Summary of earlier work").count(), 1);
 }
 
 fn psi_agent_note() -> &'static str {

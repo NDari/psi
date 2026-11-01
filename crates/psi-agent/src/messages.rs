@@ -6,17 +6,18 @@ use std::collections::{HashMap, HashSet};
 use psi_ai::{ChatMessage, RawToolCall};
 use psi_session::{Block, Entry, EntryBody, Role, text_of};
 
-use crate::compact::cleared_note;
+use crate::compact::{Chain, cleared_note, summary_chain};
 
 /// Sent in place of turns dropped to fit the context window.
 pub const DROPPED_NOTE: &str =
     "(Earlier turns of this conversation were removed to fit the context window.)";
 
-/// Builds the request messages: the system prompt, then the branch. Turns
-/// before the latest compaction's `first_kept_id` are left out, except the
-/// first user message (the task). Cleared tool results are sent as a note
-/// (§7.4). Consecutive user messages are merged, and a tool call without a
-/// result gets one, so every chat template accepts the conversation.
+/// Builds the request messages: the system prompt, then the branch. After
+/// a compaction, the entries before its cut are sent as the chain of
+/// summaries, then the last user message before the cut when the cut falls
+/// inside its turn (§7.4). Cleared tool results are sent as a note.
+/// Consecutive user messages are merged, and a tool call without a result
+/// gets one, so every chat template accepts the conversation.
 pub fn build_messages(system: &str, branch: &[&Entry]) -> Vec<ChatMessage> {
     build_with_sources(system, branch).0
 }
@@ -29,10 +30,15 @@ pub(crate) fn build_with_sources(
 ) -> (Vec<ChatMessage>, Vec<Option<String>>) {
     let mut out = vec![ChatMessage::System(system.to_owned())];
     let mut sources: Vec<Option<String>> = Vec::new();
-    let keep_from = branch.iter().rev().find_map(|e| match &e.body {
-        EntryBody::Compaction { first_kept_id, .. } => Some(first_kept_id.as_str()),
-        _ => None,
-    });
+    let chain = summary_chain(branch);
+    if chain.keep_from > 0 {
+        let opening = opening_text(
+            &chain,
+            &branch[..chain.keep_from],
+            branch.get(chain.keep_from),
+        );
+        push_user(&mut out, &opening);
+    }
     let cleared: HashSet<&str> = branch
         .iter()
         .filter_map(|e| match &e.body {
@@ -43,36 +49,19 @@ pub(crate) fn build_with_sources(
         .map(String::as_str)
         .collect();
     let mut calls: HashMap<String, (String, String)> = HashMap::new();
-    let mut skipping = false;
-    let mut seen_task = false;
     let mut pending: Vec<String> = Vec::new();
     let mut answered: HashSet<&str> = HashSet::new();
-    for e in branch {
-        if keep_from == Some(e.id.as_str()) {
-            skipping = false;
-        }
+    for e in &branch[chain.keep_from..] {
         match &e.body {
             EntryBody::Message {
                 role: Role::User,
                 content,
                 ..
             } => {
-                if skipping {
-                    continue;
-                }
                 close_calls(&mut out, &mut pending, &answered);
-                let text = text_of(content);
-                if !seen_task {
-                    seen_task = true;
-                    if keep_from.is_some() {
-                        push_user(&mut out, &format!("{text}\n\n{DROPPED_NOTE}"));
-                        skipping = true;
-                        continue;
-                    }
-                }
-                push_user(&mut out, &text);
+                push_user(&mut out, &text_of(content));
             }
-            EntryBody::CustomMessage { content, .. } if !skipping => {
+            EntryBody::CustomMessage { content, .. } => {
                 close_calls(&mut out, &mut pending, &answered);
                 push_user(&mut out, &text_of(content));
             }
@@ -80,7 +69,7 @@ pub(crate) fn build_with_sources(
                 role: Role::Assistant,
                 content,
                 ..
-            } if !skipping => {
+            } => {
                 if content.is_empty() {
                     continue; // a failed or aborted request
                 }
@@ -115,7 +104,7 @@ pub(crate) fn build_with_sources(
                 tool_call_id,
                 content,
                 ..
-            } if !skipping => {
+            } => {
                 answered.insert(tool_call_id);
                 let mut content = text_of(content);
                 if cleared.contains(e.id.as_str()) {
@@ -151,6 +140,46 @@ fn history_arguments(raw: Option<&str>, parsed: &serde_json::Value) -> String {
         None => "{}".into(),
     }
 }
+
+/// What stands in for the entries before the cut: the summaries, oldest
+/// first, a note if turns were dropped without one, and the last user
+/// message before the cut, unless the kept part starts with a user message.
+fn opening_text(chain: &Chain, before: &[&Entry], first_kept: Option<&&Entry>) -> String {
+    let mut parts: Vec<String> = chain
+        .summaries
+        .iter()
+        .map(|(_, s)| format!("{SUMMARY_HEADER}\n\n{s}"))
+        .collect();
+    if chain.dropped {
+        parts.push(DROPPED_NOTE.into());
+    }
+    let starts_with_user = first_kept.is_some_and(|e| {
+        matches!(
+            e.body,
+            EntryBody::Message {
+                role: Role::User,
+                ..
+            }
+        )
+    });
+    let last_user = before.iter().rev().find_map(|e| match &e.body {
+        EntryBody::Message {
+            role: Role::User,
+            content,
+            ..
+        } => Some(text_of(content)),
+        _ => None,
+    });
+    if let (false, Some(t)) = (starts_with_user, last_user) {
+        parts.push(format!("{RESTATED_HEADER}\n\n{t}"));
+    }
+    parts.join("\n\n")
+}
+
+/// Heads each summary in the context.
+pub const SUMMARY_HEADER: &str = "[Summary of earlier work in this conversation]";
+/// Heads the user message repeated after the summaries.
+pub const RESTATED_HEADER: &str = "[The last user message, repeated]";
 
 fn push_user(out: &mut Vec<ChatMessage>, text: &str) {
     if let Some(ChatMessage::User(prev)) = out.last_mut() {
@@ -351,11 +380,15 @@ mod tests {
                 summary: String::new(),
                 first_kept_id: keep.clone(),
                 tokens_before: Some(2000),
+                replaces: vec![],
             },
         ));
         let refs: Vec<&Entry> = es.iter().collect();
         let m = build_messages("s", &refs);
-        assert_eq!(m[1], ChatMessage::User(format!("task\n\n{DROPPED_NOTE}")));
+        assert_eq!(
+            m[1],
+            ChatMessage::User(format!("{DROPPED_NOTE}\n\n{RESTATED_HEADER}\n\ntask"))
+        );
         let kept_turns = m
             .iter()
             .filter(|x| matches!(x, ChatMessage::Assistant { .. }))

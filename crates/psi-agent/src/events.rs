@@ -35,6 +35,10 @@ pub enum AgentEvent {
     TurnEnd {
         turn: u32,
     },
+    /// A summary of the earlier conversation is being written (§7.4).
+    Compacting {
+        tokens: u64,
+    },
     RunEnd {
         stop: String,
         #[serde(skip_serializing_if = "Option::is_none")]
