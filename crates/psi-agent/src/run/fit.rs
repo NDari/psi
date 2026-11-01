@@ -18,6 +18,16 @@ use crate::compact::{
 use crate::events::AgentEvent;
 use crate::messages::build_with_sources;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Compacted {
+    Done,
+    /// The kept part already holds everything since the last cut.
+    Nothing,
+    Blocked(String),
+    Failed,
+    Aborted,
+}
+
 /// What the summary instruction adds to a request, in tokens (generous).
 const INSTRUCTION_TOKENS: u64 = 400;
 
@@ -39,7 +49,7 @@ impl Agent {
         let retry = self
             .compact_failed_at
             .is_none_or(|t| tokens >= t + n_ctx / 10);
-        if retry && self.compact(tokens).await? {
+        if retry && self.compact(tokens, None).await? == Compacted::Done {
             let (tokens, at) = self.context_size();
             if tokens >= at
                 && let Some((ids, freed)) = self.plan_clearing(tokens, at)
@@ -101,11 +111,34 @@ impl Agent {
         .map(|_| ())
     }
 
+    /// /compact: summarizes now, whatever the size; `focus` is added to
+    /// the instruction. Says what happened.
+    pub async fn compact_now(&mut self, focus: Option<&str>) -> Result<String, String> {
+        self.renew_cancel();
+        let (tokens, _) = self.context_size();
+        Ok(match self.compact(tokens, focus).await? {
+            Compacted::Done => {
+                let (after, _) = self.context_size();
+                format!("compacted: about {tokens} tokens before, {after} after")
+            }
+            Compacted::Nothing => {
+                "nothing to compact: the conversation fits in the part kept as is".into()
+            }
+            Compacted::Blocked(why) => format!("an extension stopped compaction: {why}"),
+            Compacted::Failed => "compaction failed; the conversation is unchanged".into(),
+            Compacted::Aborted => "compaction stopped".into(),
+        })
+    }
+
     /// Summarizes the entries since the last cut, up to a verbatim tail,
     /// and adds the summary to the chain (D-40). First by extending the
     /// last request, so the server reuses its prefix cache (D-38), then
-    /// from the entries as text. Returns whether it compacted.
-    pub(super) async fn compact(&mut self, tokens: u64) -> Result<bool, String> {
+    /// from the entries as text.
+    pub(super) async fn compact(
+        &mut self,
+        tokens: u64,
+        focus: Option<&str>,
+    ) -> Result<Compacted, String> {
         let gate = self
             .ext
             .gate(
@@ -115,7 +148,7 @@ impl Agent {
             .await;
         if let Gate::Block(why) = gate {
             tracing::info!("an extension stopped compaction: {why}");
-            return Ok(false);
+            return Ok(Compacted::Blocked(why));
         }
         let n_ctx = self.cfg.n_ctx;
         let branch = self.session.branch();
@@ -126,11 +159,15 @@ impl Agent {
             / CHARS_PER_TOKEN;
         let tail = tail_tokens(n_ctx, self.trigger(), overhead);
         let Some(cut) = plan_cut(&branch, from, tail) else {
-            return Ok(false);
+            return Ok(Compacted::Nothing);
         };
         let first_kept_id = branch[cut].id.clone();
         let after_summary = !chain.summaries.is_empty();
         let words = summary_words(n_ctx);
+        let focus_text = focus
+            .filter(|f| !f.trim().is_empty())
+            .map(|f| format!("\n\nThe user asks the summary to focus on: {}", f.trim()))
+            .unwrap_or_default();
         let max_chars = n_ctx.saturating_sub(self.cfg.max_output + 1500) * CHARS_PER_TOKEN;
         let text = flatten(&branch[from..cut], max_chars as usize);
         drop(branch);
@@ -158,12 +195,12 @@ impl Agent {
                     Ok(s) => done = Some(("extend", s, resp)),
                     Err(e) => fallback = Some(e),
                 },
-                Err(AiError::Aborted) => return Ok(false),
+                Err(AiError::Aborted) => return Ok(Compacted::Aborted),
                 Err(e) => fallback = Some(e.to_string()),
             }
         }
         if done.is_none() {
-            let r = self.plain_request(plain_summary_prompt(&text, words));
+            let r = self.plain_request(plain_summary_prompt(&text, words) + &focus_text);
             let failed = match self.summary_request(&r).await {
                 Ok(resp) => match check_summary(&resp) {
                     Ok(s) => {
@@ -172,7 +209,7 @@ impl Agent {
                     }
                     Err(e) => Some(e),
                 },
-                Err(AiError::Aborted) => return Ok(false),
+                Err(AiError::Aborted) => return Ok(Compacted::Aborted),
                 Err(e) => Some(e.to_string()),
             };
             if let Some(e) = failed {
@@ -182,11 +219,11 @@ impl Agent {
                     message: format!("could not summarize the earlier conversation: {e}"),
                     tool_call_id: None,
                 })?;
-                return Ok(false);
+                return Ok(Compacted::Failed);
             }
         }
         let Some((method, summary, resp)) = done else {
-            return Ok(false);
+            return Ok(Compacted::Failed);
         };
         self.compact_failed_at = None;
         self.record(EntryBody::Compaction {
@@ -202,7 +239,7 @@ impl Agent {
                          "ms": started.elapsed().as_millis() as u64}),
         })?;
         self.merge_summaries().await?;
-        Ok(true)
+        Ok(Compacted::Done)
     }
 
     /// When the summaries together pass a tenth of the window, the two

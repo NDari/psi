@@ -209,6 +209,68 @@ pub(crate) fn summary_chain<'a>(branch: &[&'a Entry]) -> Chain<'a> {
     chain
 }
 
+/// What the harness itself knows about the work before the cut (§7.4):
+/// the files read and changed (from the read, write and edit calls), the
+/// todo list and the steps of a plan being carried out. Sent after the
+/// summaries instead of trusting them to keep it. Taken as of the cut, so
+/// it changes only when a compaction does and the prompt cache holds.
+pub(crate) fn harness_state(before: &[&Entry]) -> Option<String> {
+    let mut read: Vec<&str> = Vec::new();
+    let mut changed: Vec<&str> = Vec::new();
+    for e in before.iter().rev() {
+        for (_, name, args) in e.tool_calls() {
+            let list = match name {
+                "read" => &mut read,
+                "write" | "edit" => &mut changed,
+                _ => continue,
+            };
+            if let Some(p) = args["path"].as_str()
+                && !list.contains(&p)
+                && list.len() < MAX_STATE_FILES
+            {
+                list.push(p);
+            }
+        }
+    }
+    let mut parts = Vec::new();
+    for (label, mut list) in [("Files read", read), ("Files changed", changed)] {
+        if !list.is_empty() {
+            list.reverse();
+            parts.push(format!("{label}: {}", list.join(", ")));
+        }
+    }
+    let custom = |kind: &str| {
+        before.iter().rev().find_map(|e| match &e.body {
+            EntryBody::Custom { custom_type, data } if custom_type == kind => Some(data),
+            _ => None,
+        })
+    };
+    if let Some(d) = custom("todo") {
+        let todos = psi_tools::TodoList::from_json(d);
+        if !todos.items.is_empty() {
+            parts.push(format!("Todo list:\n{}", todos.render()));
+        }
+    }
+    if let Some(d) = custom("plan") {
+        let plan = crate::plan::PlanState::from_json(d);
+        if plan.executing && !plan.steps.is_empty() {
+            let steps: Vec<String> = plan
+                .steps
+                .iter()
+                .enumerate()
+                .map(|(i, s)| format!("[{}] {}. {}", if s.done { "x" } else { " " }, i + 1, s.text))
+                .collect();
+            parts.push(format!("Plan being carried out:\n{}", steps.join("\n")));
+        }
+    }
+    (!parts.is_empty()).then(|| format!("{STATE_HEADER}\n{}", parts.join("\n")))
+}
+
+/// Heads the harness's own record in the context after a compaction.
+pub const STATE_HEADER: &str = "[Recorded by the harness for the earlier conversation]";
+/// The most files of each kind the harness state lists (the latest ones).
+const MAX_STATE_FILES: usize = 30;
+
 /// Tokens kept as they are after a summary: the larger of 20% of the
 /// window and 20K (pi's keepRecentTokens), but at most half of what is
 /// left under the trigger after `overhead` (system prompt, tools,
@@ -582,5 +644,58 @@ mod tests {
         assert!(t.starts_with("User: task\n\nResult of bash: yyy"));
         assert!(t.contains("[... 3000 characters cut ...]"));
         assert!(flatten(&refs, 500).chars().count() < 600);
+    }
+
+    fn step_with(name: &str, path: &str) -> EntryBody {
+        EntryBody::Message {
+            role: Role::Assistant,
+            content: vec![Block::ToolCall {
+                id: "c".into(),
+                name: name.into(),
+                arguments: serde_json::json!({"path": path}),
+                raw: None,
+            }],
+            usage: None,
+            stop_reason: None,
+            error: None,
+            model: None,
+        }
+    }
+
+    #[test]
+    fn harness_state_lists_files_todos_and_the_plan() {
+        let es = entries(vec![
+            msg(Role::User, "task"),
+            step_with("read", "a.py"),
+            step_with("edit", "a.py"),
+            step_with("read", "b.py"),
+            step_with("read", "a.py"),
+            step_with("write", "c.py"),
+            EntryBody::Custom {
+                custom_type: "todo".into(),
+                data: psi_tools::TodoList::default().to_json(),
+            },
+            EntryBody::Custom {
+                custom_type: "todo".into(),
+                data: serde_json::json!({"todos": [{"id": 1, "text": "port", "done": true},
+                                                    {"id": 2, "text": "test", "done": false}],
+                                          "next_id": 3}),
+            },
+            EntryBody::Custom {
+                custom_type: "plan".into(),
+                data: serde_json::json!({"enabled": false, "executing": true,
+                    "steps": [{"text": "one", "done": true}, {"text": "two", "done": false}]}),
+            },
+        ]);
+        let refs: Vec<&Entry> = es.iter().collect();
+        assert_eq!(
+            harness_state(&refs).unwrap(),
+            "[Recorded by the harness for the earlier conversation]\n\
+             Files read: b.py, a.py\n\
+             Files changed: a.py, c.py\n\
+             Todo list:\n[x] #1: port\n[ ] #2: test\n\
+             Plan being carried out:\n[x] 1. one\n[ ] 2. two"
+        );
+        assert_eq!(harness_state(&refs[..1]), None);
     }
 }

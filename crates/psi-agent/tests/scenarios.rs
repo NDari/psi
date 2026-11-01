@@ -1025,3 +1025,69 @@ async fn plan_mode_off_says_so_once() {
     );
     assert_eq!(last(2), "three");
 }
+
+#[tokio::test]
+async fn compact_by_hand_puts_back_the_harness_state() {
+    let f = Fixture::new(vec![text(SUMMARY), text("done")]);
+    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    prefill(&mut a, 30);
+    let s = a.session_mut();
+    s.append(EntryBody::Message {
+        role: psi_session::Role::Assistant,
+        content: vec![psi_session::Block::ToolCall {
+            id: "w".into(),
+            name: "write".into(),
+            arguments: json!({"path": "parser.rs", "text": "fn main() {}"}),
+            raw: None,
+        }],
+        usage: None,
+        stop_reason: None,
+        error: None,
+        model: None,
+    })
+    .unwrap();
+    s.append(EntryBody::ToolResult {
+        tool_call_id: "w".into(),
+        tool_name: "write".into(),
+        content: vec![psi_session::Block::Text {
+            text: "Created parser.rs (1 line).".into(),
+        }],
+        is_error: false,
+    })
+    .unwrap();
+    s.append(EntryBody::Custom {
+        custom_type: "todo".into(),
+        data: json!({"todos": [{"id": 1, "text": "port the lexer", "done": false}], "next_id": 2}),
+    })
+    .unwrap();
+    // The write and the todo fall before the cut: a long tail after them.
+    prefill(&mut a, 25);
+    let msg = a.compact_now(Some("the parser")).await.unwrap();
+    assert!(msg.starts_with("compacted: about"), "{msg}");
+    // No request yet in this process, so the summary is a plain request.
+    let reqs = f.server.chat_requests();
+    let body = reqs[0]["messages"][1]["content"].as_str().unwrap();
+    assert!(body.ends_with("The user asks the summary to focus on: the parser"));
+    let out = a.run("next").await;
+    assert_eq!(out.stop, Stop::Done);
+    let reqs = f.server.chat_requests();
+    let opening = reqs[1]["messages"][1]["content"].as_str().unwrap();
+    assert!(
+        opening.contains("[Recorded by the harness for the earlier conversation]"),
+        "{opening}"
+    );
+    assert!(opening.contains("Files changed: parser.rs"));
+    assert!(opening.contains("Todo list:\n[ ] #1: port the lexer"));
+    // The state comes after the summary, so the summary stays a stable prefix.
+    assert!(opening.find(SUMMARY).unwrap() < opening.find("[Recorded").unwrap());
+}
+
+#[tokio::test]
+async fn a_short_conversation_has_nothing_to_compact() {
+    let f = Fixture::new(vec![]);
+    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    prefill(&mut a, 3);
+    let msg = a.compact_now(None).await.unwrap();
+    assert!(msg.starts_with("nothing to compact"), "{msg}");
+    assert!(f.server.chat_requests().is_empty());
+}

@@ -538,14 +538,19 @@ impl Agent {
         }
     }
 
-    /// Runs the agent on one user input.
-    pub async fn run(&mut self, input: &str) -> RunOutcome {
+    /// After an abort, a fresh token for what runs next.
+    fn renew_cancel(&mut self) {
         if self.ctx.cancel.is_cancelled() {
             self.ctx.cancel = CancellationToken::new();
             if let Ok(mut a) = self.abort.lock() {
                 *a = self.ctx.cancel.clone();
             }
         }
+    }
+
+    /// Runs the agent on one user input.
+    pub async fn run(&mut self, input: &str) -> RunOutcome {
+        self.renew_cancel();
         self.emit(AgentEvent::RunStart {
             session: self.session.path().display().to_string(),
         });

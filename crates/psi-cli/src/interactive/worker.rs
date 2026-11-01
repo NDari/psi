@@ -44,6 +44,9 @@ pub enum Cmd {
     Plan,
     /// Leave plan mode and carry out the proposed plan.
     ExecutePlan,
+    /// Summarize the earlier conversation now (/compact), with what to
+    /// focus on.
+    Compact(String),
 }
 
 /// Opens the checkpoints for a session file.
@@ -110,6 +113,13 @@ impl Worker {
                     Ok(p) => UiMsg::RunDone(self.agent.run(&p).await),
                     Err(e) => UiMsg::Error(e),
                 },
+                Cmd::Compact(focus) => {
+                    let focus = (!focus.is_empty()).then_some(focus.as_str());
+                    match self.agent.compact_now(focus).await {
+                        Ok(m) => UiMsg::Info(m),
+                        Err(e) => UiMsg::Error(e),
+                    }
+                }
                 Cmd::Entries => UiMsg::Entries {
                     entries: self.agent.session().entries().to_vec(),
                     leaf: self.agent.session().leaf().map(str::to_owned),

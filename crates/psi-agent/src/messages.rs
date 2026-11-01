@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use psi_ai::{ChatMessage, RawToolCall};
 use psi_session::{Block, Entry, EntryBody, Role, text_of};
 
-use crate::compact::{Chain, cleared_note, summary_chain};
+use crate::compact::{Chain, cleared_note, harness_state, summary_chain};
 
 /// Sent in place of turns dropped to fit the context window.
 pub const DROPPED_NOTE: &str =
@@ -142,8 +142,9 @@ fn history_arguments(raw: Option<&str>, parsed: &serde_json::Value) -> String {
 }
 
 /// What stands in for the entries before the cut: the summaries, oldest
-/// first, a note if turns were dropped without one, and the last user
-/// message before the cut, unless the kept part starts with a user message.
+/// first, a note if turns were dropped without one, the harness's own
+/// record (files, todo, plan), and the last user message before the cut,
+/// unless the kept part starts with a user message.
 fn opening_text(chain: &Chain, before: &[&Entry], first_kept: Option<&&Entry>) -> String {
     let mut parts: Vec<String> = chain
         .summaries
@@ -152,6 +153,9 @@ fn opening_text(chain: &Chain, before: &[&Entry], first_kept: Option<&&Entry>) -
         .collect();
     if chain.dropped {
         parts.push(DROPPED_NOTE.into());
+    }
+    if let Some(state) = harness_state(before) {
+        parts.push(state);
     }
     let starts_with_user = first_kept.is_some_and(|e| {
         matches!(
@@ -264,6 +268,7 @@ fn size(e: &Entry) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compact::STATE_HEADER;
     use psi_session::IdGen;
     use serde_json::json;
 
@@ -387,7 +392,9 @@ mod tests {
         let m = build_messages("s", &refs);
         assert_eq!(
             m[1],
-            ChatMessage::User(format!("{DROPPED_NOTE}\n\n{RESTATED_HEADER}\n\ntask"))
+            ChatMessage::User(format!(
+                "{DROPPED_NOTE}\n\n{STATE_HEADER}\nFiles read: a\n\n{RESTATED_HEADER}\n\ntask"
+            ))
         );
         let kept_turns = m
             .iter()

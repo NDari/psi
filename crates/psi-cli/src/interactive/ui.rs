@@ -117,6 +117,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ),
     ("/diff", "the session's changes, by source"),
     ("/show", "a tool call in full: /show <n>"),
+    (
+        "/compact",
+        "summarize the earlier conversation now: /compact [what to keep]",
+    ),
     ("/stats", "tokens, timing, guards and asks this session"),
     ("/todos", "the todo list on this branch"),
     ("/mode", "auto or strict: /mode strict"),
@@ -888,6 +892,7 @@ impl<W: Write> App<W> {
             }
             "quit" | "exit" | "q" => self.quit = true,
             "undo" => self.send(Cmd::Undo),
+            "compact" => self.send(Cmd::Compact(arg.to_owned())),
             "diff" => self.send(Cmd::Diff),
             "rewind" | "tree" | "fork" | "stats" | "inspect" | "todos" => {
                 self.pending_entries = Some(match name {
