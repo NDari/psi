@@ -7,15 +7,18 @@
 # multi_split_package added (the one task that deletes a file and creates
 # a package, which checkpoints must capture), and multi_ini_to_json's repo
 # got an ordinary Python .gitignore (gitignored writes ask; a normal one
-# must not cause asks).
+# must not cause asks). 2026-11-01 (G-19): the four tasks every 35B run
+# passed (fix_invoice_rounding, multi_rename_callers, multi_shipping_bug,
+# sh_logreport) replaced by four the 35B failed quickly in a screening run
+# of the other 30 (~/.psi/evals/2026-11-01-1638-screen-qwen3.6-35b).
 
-fix_invoice_rounding
-multi_rename_callers
-multi_shipping_bug
+fix_retry_backoff
+multi_config_object
+feat_query_paging
 multi_sqlite_migration
 feat_logstats_jsonl
 multi_ini_to_json
 sh_archive_fix
 sh_changelog
-sh_logreport
+feat_config_env
 multi_split_package

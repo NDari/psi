@@ -36,6 +36,27 @@ Flags worth sweeping: `-fa`, `-b`/`-ub`, `-ctk`/`-ctv` (KV cache type), `-t`, `-
 - A draft model costs VRAM; check it still fits at 128K context on 16 GB.
 - Speculative decoding shouldn't change the output, but confirm on one run that nothing looks off.
 
+### A lower step cap for eval runs (added 2026-11-01)
+
+**Question:** can eval runs be faster, and fail sooner, with a lower step cap? The owner asked about a cap of 10 (the default is 40).
+
+**How:** a flat cap of 10 would turn most of the quick set into step-cap failures (35B passes took 6 to 40 steps; only `fix_invoice_rounding` and `sh_logreport` always finish within 10), which say nothing about the harness. The better candidate is a per-task cap of about twice the steps a pass takes (an optional `steps` file per task), as `just eval-ext` does with 20: a trial that hits it has gone well past normal and is worth reading.
+
+**Open:**
+- Earlier runs and the pi baselines used 40, so a changed cap breaks comparisons with them.
+- Deferred by the owner until run time becomes a problem.
+
+### write says what a replacement removed (added 2026-11-01)
+
+**Question:** does the model keep code it didn't mean to drop if write's result names what the replacement removed? In `fix_retry_backoff` the 35B replaced `retry.py` with write and dropped the `retrying` decorator that `sync_job.py` imports, in both runs (`~/.psi/evals/2026-11-01-1638-screen-qwen3.6-35b`, `2026-11-01-1705-quick-g19-qwen3.6-35b`); the result only said "Replaced retry.py (29 lines)".
+
+**How:** when write replaces a file, compare the definitions (`def`, `class`, `fn` and the like) in the old and new text and name the missing ones, for example "Replaced retry.py (38 → 29 lines). No longer defined: retrying. Put back anything removed by mistake." Then rerun `fix_retry_backoff` once.
+
+**Open:**
+- Model-facing text: a longer result on every replacement, and a nudge that may make the model restore code it meant to remove.
+- Matching definitions across languages is a heuristic; a rename shows up as a removal.
+- The owner isn't sure it's worth it yet.
+
 ## Done
 
 ### A faster 35B on the Mac for development (added 2026-11-01)

@@ -789,8 +789,8 @@ Each phase ends with its acceptance criteria passing in the local check, where a
 **Phase 7: experiments and polish.**
 - Re-scoped 2026-11-01 for the 35B-class daily driver (D-39). In this order:
   1. Compaction (§7.4, D-38), with runs at a small window (16K to 24K) for H-07 and H-11: no eval run so far went past 48% of its window, so the default setup never compacts. Stage 1, clearing old tool results, and stage 2, the summary chain with the D-38 request, its fallback and merges, built 2026-11-01 (replay scenario tests, no model run yet); stage 3, the harness state after a compaction and `/compact`, too. 16K runs done (§7.4, stage 4 results); the 64K daily setup still rarely compacts.
-  2. H-09, thinking on vs off, on the 35B (it runs with thinking on, and once spent all 8192 output tokens thinking).
-  3. Harder quick-set tasks (G-19): the 35B passes 9 of 10, too few failures to find harness problems.
+  2. H-09, thinking on vs off, on the 35B (it runs with thinking on, and once spent all 8192 output tokens thinking). Done 2026-11-01 (§14 results: off is the default).
+  3. Harder quick-set tasks (G-19): the 35B passes 9 of 10, too few failures to find harness problems. Done 2026-11-01: a screening run of the 30 tasks outside the quick set (`~/.psi/evals/2026-11-01-1638-screen-qwen3.6-35b`: 25 pass, 5 model failures, no harness failures, no guards, no shape fixes) picked four quick failures to replace the four tasks every 35B run passed (`fix_retry_backoff`, `multi_config_object`, `feat_query_paging`, `feat_config_env` for `fix_invoice_rounding`, `multi_rename_callers`, `multi_shipping_bug`, `sh_logreport`). The new set on the 35B (`2026-11-01-1705-quick-g19-qwen3.6-35b`): 4 pass, 6 model failures, no harness failures. `fix_retry_backoff` failed the same way both times: the model replaced `retry.py` with write and dropped the `retrying` decorator another file imports, and the result only said "Replaced retry.py (29 lines)".
   4. Sub-agents (G-07) and MCP (G-08): more useful with a model that can delegate and handle many tools.
   5. H-14 on the 35B (one pi run), finishing H-01 (below), and as wanted: RPC mode, HTML export, `/fork`, firing the `input` extension event (defined in Phase 5, never sent), macOS isolation (G-20, when Psi runs on the Mac).
   - Built 2026-11-01: the `input` extension event fires (pi parity: after commands, before `/skill:` and template expansion; `{ text = ... }` rewrites, `{ handled = true }` consumes; `source` is `interactive`, `print` or `extension`), and `/fork` starts a new session from the history before an earlier prompt, puts that prompt back in the editor and records a `forked_from` entry (pi's `session_before_fork` event is not added).
@@ -884,7 +884,7 @@ Each phase ends with its acceptance criteria passing in the local check, where a
 | G-16 | libkrun backend | Candidate for macOS (G-20) and for stronger isolation (§13) |
 | G-17 | Secret-taint tracking | Public readiness |
 | G-18 | Backends without tool-call templates (text protocol, JSON repair) | Phase 7, only if a needed backend requires it |
-| G-19 | Task-set refresh | Replace tasks that give the same result every trial |
+| G-19 | Task-set refresh | Replace tasks that give the same result every trial (done 2026-11-01, Phase 7) |
 | G-20 | macOS isolation backend | When needed: libkrun or Seatbelt (Heimdall's profile is in its lessons); the owner tests by hand |
 
 (Resolved: G-01 by D-29; G-02 and G-15 by the Heimdall lessons, now tracked as hypotheses; G-11 by D-09; G-13 by D-25.)
