@@ -27,6 +27,18 @@ The 40 coding tasks were ported from Heimdall. Names start with the kind of
 task: `fix_` (Python bug fixes), `feat_` (Python features), `sh_` (shell
 work), `multi_` (multi-file changes).
 
+## The compaction task
+
+`long_api_docs` (not in the quick set) is for compaction at a small window
+(psi-plan.md §7.4): documenting 8 modules means reading about 20K tokens,
+so at a 16K window the context is compacted several times. Its rules,
+including a reviewer's name, a ticket and a version for the last line, are
+in `NOTES.md`, which the model reads first: facts that only a summary (or a
+second read) carries to the end. Run it against a server started with
+`just ctx=16384 llm-up qwen35b`, with `--tasks long_api_docs --max-output
+4096`, and read the trial's compaction entries to see whether the facts
+survived each summary. `gen.py` generated the task.
+
 ## The extension tasks
 
 `ext_*` (four, from Heimdall's extension eval; H-01) ask for a psi Lua

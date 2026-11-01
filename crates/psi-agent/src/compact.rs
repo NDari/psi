@@ -320,10 +320,13 @@ pub(crate) fn plan_cut(branch: &[&Entry], from: usize, tail: u64) -> Option<usiz
         .then_some(cut)
 }
 
-/// How long a summary may be, in words: about half of a sixteenth of the
-/// window (512 to 4096 tokens), at about 1.3 tokens a word.
+/// How long a summary may be, in words: short enough that about three
+/// fit in the chain's budget (a tenth of the window) before the two oldest
+/// are merged. At about 7 characters a word and 3 characters a token,
+/// that is a seventieth of the window (234 words at 16K, 936 at 64K).
+/// Twice that at 16K merged after every compaction (2026-11-01 run).
 pub(crate) fn summary_words(n_ctx: u64) -> u64 {
-    (n_ctx / 16).clamp(512, 4096) * 3 / 4 / 2
+    (n_ctx / 70).clamp(150, 1500)
 }
 
 /// The length and headings every summary is asked for.
@@ -697,5 +700,17 @@ mod tests {
              Plan being carried out:\n[x] 1. one\n[ ] 2. two"
         );
         assert_eq!(harness_state(&refs[..1]), None);
+    }
+
+    #[test]
+    fn about_three_summaries_fit_the_chain_budget() {
+        for n_ctx in [16_384, 65_536, 131_072] {
+            let summary_tokens = summary_words(n_ctx) * 7 / CHARS_PER_TOKEN;
+            let budget = n_ctx / 10;
+            assert!(
+                (3 * summary_tokens..4 * summary_tokens).contains(&budget),
+                "{n_ctx}"
+            );
+        }
     }
 }

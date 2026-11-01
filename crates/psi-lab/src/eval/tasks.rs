@@ -130,7 +130,7 @@ mod tests {
     #[test]
     fn shipped_tasks_load() {
         let all = load_tasks(&evals_code(), &Selection::All).unwrap();
-        assert_eq!(all.len(), 44);
+        assert_eq!(all.len(), 45);
         let quick = load_tasks(&evals_code(), &Selection::Quick).unwrap();
         assert_eq!(quick.len(), 10);
         assert!(quick.iter().all(|t| t.total > 0));
