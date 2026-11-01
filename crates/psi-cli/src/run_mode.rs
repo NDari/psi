@@ -528,8 +528,12 @@ pub async fn run(args: RunArgs) -> Result<ExitCode> {
         agent = agent.with_events(tx);
         tokio::spawn(async move {
             while let Some(ev) = rx.recv().await {
-                if let psi_agent::AgentEvent::Notice { text } = ev {
-                    eprintln!("psi: {text}");
+                match ev {
+                    psi_agent::AgentEvent::Notice { text } => eprintln!("psi: {text}"),
+                    psi_agent::AgentEvent::Retrying { reason } => {
+                        eprintln!("psi: {reason}; trying again");
+                    }
+                    _ => {}
                 }
             }
         });

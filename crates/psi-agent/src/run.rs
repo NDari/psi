@@ -1011,9 +1011,18 @@ impl Agent {
             {
                 // One retry for errors that may pass: a dropped stream, a
                 // server that is still loading. Template errors never pass.
-                Err(AiError::Stream(_) | AiError::Connect { .. }) if !retried => {}
-                Err(AiError::Http { status, .. })
-                    if !retried && (status == 503 || status == 502) => {}
+                Err(e @ (AiError::Stream(_) | AiError::Connect { .. })) if !retried => {
+                    self.emit(AgentEvent::Retrying {
+                        reason: e.to_string(),
+                    });
+                }
+                Err(e @ AiError::Http { status, .. })
+                    if !retried && (status == 503 || status == 502) =>
+                {
+                    self.emit(AgentEvent::Retrying {
+                        reason: e.to_string(),
+                    });
+                }
                 other => return other,
             }
             retried = true;

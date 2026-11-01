@@ -30,6 +30,43 @@ pub enum Reply {
     Error { status: u16, body: Value },
 }
 
+impl Reply {
+    /// A 200 stream with `body` as its SSE events, closed after them.
+    fn stream(body: &str) -> Self {
+        let mut bytes = b"HTTP/1.1 200 OK\r\nServer: llama.cpp\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n".to_vec();
+        bytes.extend_from_slice(body.as_bytes());
+        Reply::Raw { bytes }
+    }
+
+    /// An answer that starts with `text` and stops: no finish reason, no
+    /// `[DONE]` (a server that died or a dropped connection).
+    pub fn cut(text: &str) -> Self {
+        let chunk = |delta: Value| {
+            json!({"choices": [{"finish_reason": null, "index": 0, "delta": delta}],
+                   "object": "chat.completion.chunk"})
+        };
+        Reply::stream(&format!(
+            "data: {}\n\ndata: {}\n\n",
+            chunk(json!({"role": "assistant", "content": null})),
+            chunk(json!({"content": text}))
+        ))
+    }
+
+    /// A stream that sends `{"error": ...}` after a little text.
+    pub fn stream_error(message: &str) -> Self {
+        Reply::stream(&format!(
+            "data: {}\n\ndata: {}\n\n",
+            json!({"choices": [{"finish_reason": null, "index": 0, "delta": {"content": "Let me"}}]}),
+            json!({"error": {"code": 500, "message": message, "type": "server_error"}})
+        ))
+    }
+
+    /// A stream whose data isn't JSON.
+    pub fn garbage() -> Self {
+        Reply::stream("data: <html>Bad Gateway</html>\n\n")
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ScriptedReply {
     #[serde(default)]

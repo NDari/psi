@@ -1431,6 +1431,17 @@ impl<W: Write> App<W> {
                     dim(),
                 )]);
             }
+            AgentEvent::Retrying { reason } => {
+                // Unfinished text of the failed attempt goes; the retry
+                // streams the answer again.
+                self.md = MdStream::new();
+                let w = self.width();
+                let line = Line::styled(
+                    format!("  {reason}; trying again"),
+                    theme::style(Token::Warning),
+                );
+                self.commit(line.wrap(w));
+            }
             AgentEvent::Notice { text } => {
                 self.flush_text();
                 let w = self.width();

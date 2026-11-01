@@ -734,3 +734,22 @@ fn themes_color_the_screen() {
     t.wait_for("no theme named 'nope'", SLOW);
     t.quit();
 }
+
+#[test]
+fn a_cut_answer_and_its_retry_dont_run_together() {
+    let (mut t, _s) = Tui::start(
+        vec![Reply::cut("The answer is"), text("The answer is 42.")],
+        |_| {},
+    );
+    t.wait_for("› ", SLOW);
+    t.typ("what is it?\r");
+    t.wait_for("42.", SLOW);
+    let all = t.all();
+    assert!(
+        all.contains("the server closed the stream before the answer finished; trying again"),
+        "{all}"
+    );
+    assert!(!all.contains("The answer isThe"), "{all}");
+    assert_eq!(all.matches("The answer is").count(), 1, "{all}");
+    t.quit();
+}

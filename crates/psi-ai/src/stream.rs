@@ -23,6 +23,11 @@ pub(crate) enum ChunkError {
 }
 
 impl Accumulator {
+    /// The server ended the answer: `[DONE]` or a finish reason.
+    pub fn finished(&self) -> bool {
+        self.done || self.finish.is_some()
+    }
+
     /// Applies one SSE data payload and returns its deltas.
     pub fn apply(&mut self, data: &str) -> Result<Vec<Delta>, ChunkError> {
         if data.trim() == "[DONE]" {

@@ -261,6 +261,13 @@ impl Client {
         let fed = feed(rest, &mut acc, &mut first_token_ms);
         log_response(status, &raw);
         fed?;
+        // A stream that stops without `[DONE]` or a finish reason is a cut
+        // answer, not a short one.
+        if !acc.finished() {
+            return Err(AiError::Stream(
+                "the server closed the stream before the answer finished".into(),
+            ));
+        }
         Ok(acc.finish(first_token_ms))
     }
 }

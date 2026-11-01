@@ -44,6 +44,11 @@ pub enum AgentEvent {
     Compacting {
         tokens: u64,
     },
+    /// A request failed in a way that may pass, and is sent once more. Text
+    /// streamed for the failed attempt is void.
+    Retrying {
+        reason: String,
+    },
     /// Something the user should know that isn't part of the conversation,
     /// such as an MCP server that failed to connect (§10.2).
     Notice {
