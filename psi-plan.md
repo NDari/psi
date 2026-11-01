@@ -693,6 +693,18 @@ Each is a claim from Heimdall (H) or general practice, with Psi's default until 
 | H-13 | 40 steps is enough; more mostly adds tokens | Heimdall | 40 | Step-cap sweep |
 | H-14 | Psi matches or beats pi on the quick set | Goal | n/a | Pi baseline in Phase 1; every phase after |
 
+**Results** (directional, one run each; 2026-11-01 unless noted). Phase 7 is scoped to the 35B-class daily driver (D-39), so questions only small models raise are closed with the evidence at hand or left to the counters:
+
+- **H-02:** folded into H-01. The 35B ran `psi ext check` without being told to; lint stays an author tool (D-15).
+- **H-03:** mixed for the 35B. It never read a listed skill (Phase 6 batteries run), but ran `psi ext example` in 2 of 4 extension tasks when it needed one. Lookups tied to the task at hand happen; ambient ones don't. D-28 and D-35 stand.
+- **H-04:** only Qwen 4B retried denied calls (2 of its 5 runs; `git reset --hard` 8 times in `sh_changelog`). Gemma 12B and the 35B had no denials. Left to the `retry_after_block` counter.
+- **H-05:** answered by flat schemas and key naming (§4.4); the 35B needed no shape fix in 3 runs. Closed.
+- **H-06:** the refusal is built; the 35B never repeated the working directory (8 runs). Left to the counter.
+- **H-08:** dropped: one run per setting can't show a difference this small. Each model card's sampling is used.
+- **H-10:** dropped for now: a small-model question; grep/find/ls stay off (D-17).
+- **H-12:** the guard stays. The 35B's long stretches in the H-01 runs came from misleading messages (the manifest, `test.eq`), fixed at the source.
+- **H-13:** answered for the 35B: its 25 passes on the coding set used 6 to 36 steps, and its 5 failures stopped on their own at 7 to 17. 40 stays; the extension eval uses 20.
+
 ---
 
 ## 15. Roadmap
@@ -762,7 +774,21 @@ Each phase ends with its acceptance criteria passing in the local check, where a
     - With thinking on, the 35B once spent all 8192 output tokens thinking; the truncated-answer guard (§8.6) nudged it and it went on.
 
 **Phase 7: experiments and polish.**
-- Work through the hypothesis table, including H-01 (the extension-writing eval, deferred from Phase 5 on 2026-10-31); compaction with the summary from the prefix cache (D-38) and its tuning; RPC mode; HTML export; MCP (**[G-08]**); sub-agents (**[G-07]**); other backends (**[G-18]**); macOS isolation (**[G-20]**).
+- Re-scoped 2026-11-01 for the 35B-class daily driver (D-39). In this order:
+  1. Compaction (§7.4, D-38), with runs at a small window (16K to 24K) for H-07 and H-11: no eval run so far went past 48% of its window, so the default setup never compacts.
+  2. H-09, thinking on vs off, on the 35B (it runs with thinking on, and once spent all 8192 output tokens thinking).
+  3. Harder quick-set tasks (G-19): the 35B passes 9 of 10, too few failures to find harness problems.
+  4. Sub-agents (G-07) and MCP (G-08): more useful with a model that can delegate and handle many tools.
+  5. H-14 on the 35B (one pi run), finishing H-01 (below), and as wanted: RPC mode, HTML export, `/fork`, firing the `input` extension event (defined in Phase 5, never sent), macOS isolation (G-20, when Psi runs on the Mac).
+  - Closed or left to the counters (§14 results): H-02, H-04, H-05, H-06, H-12, H-13; H-03 recorded. Dropped: H-08, H-10, other backends (G-18, unless a backend we need forces it) and no-progress tuning (G-12).
+- Original scope (before the re-scope above): work through the hypothesis table, including H-01 (the extension-writing eval, deferred from Phase 5 on 2026-10-31); compaction with the summary from the prefix cache (D-38) and its tuning; RPC mode; HTML export; MCP (**[G-08]**); sub-agents (**[G-07]**); other backends (**[G-18]**); macOS isolation (**[G-20]**).
+- H-01 started 2026-11-01, on the 35B (D-37) with Lua extensions, by the owner's choice: scripts were Heimdall's answer to weak models, at the cost of control. Four of Heimdall's nine tasks ported as `evals/code/ext_*` (a gate, a result rewrite with a flag, a new tool, a tool with session state and a command), graded by hidden `*_test.lua` files; `just eval-ext` puts `docs/extensions.md` and `docs/api.md` in context. One run each, correctness only:
+  - Docs only (`~/.psi/evals/2026-11-01-1228-h01-ext-qwen3.6-35b`): 3 of 4 pass. `ext_todo_scan` hit the step cap, about 20 steps lost to "the manifest is missing 'setup'", read as a file called manifest.json.
+  - Fixed from the transcripts: the missing-`setup` message names the returned table and shows the fix; the guide says test files use the global `test`, and to read files with `io` (its own example read them through `execute_tool("read")`, which numbers lines); `test.set_flag` added; `test.eq` showed only the first line of a multi-line mismatch, so the model debugged its own failing test blind for 7 tries (now one line, both values).
+  - The examples are now in the binary (`psi ext example`), and none solves a task: `tidy-results` strips terminal noise instead of trimming, and `todo` became `tally` (it also clashed with the built-in todo tool).
+  - With the fixes and examples, before the `test.eq` fix (`2026-11-01-1300-...-examples`): 1 of 4 pass, `ext_todo_scan` at 5/7 (was 2/7). The other two failures are spec slips: blank lines around the trim marker, and `not name and not note` with plain-string errors. The model read examples in 2 of 4 tasks, picking the ones that show the API it needed.
+  - From then on `just eval-ext` caps trials at 20 steps (the owner's call): passes took 7 to 16, and the run is a test for harness problems, not a score. The coding quick set keeps 40 (earlier runs and the pi baselines used it; H-13 is the step-cap question).
+  - With every fix and the 20-step cap (`2026-11-01-1329-...-cap20`): every trial done within 6 minutes, and the failure messages now show both values. The hidden tests then accepted one trailing newline after a multi-line result (a fair reading of the prompts; `trim_output` had failed on just that). Re-graded with them: 2 of 4 pass. The two failures are spec slips: `**/` that needs at least one directory, and `bookmarks` errors returned as plain text. Re-grading the earlier runs changes nothing else.
 - ✅ Every hypothesis has a recorded result.
 
 **Phase 8 (optional): stricter safety and public readiness.** §13.
@@ -824,6 +850,7 @@ Each phase ends with its acceptance criteria passing in the local check, where a
 | D-36 | **Post-edit check once per turn that edited files**, with a capped summary | Running after every edit costs context and time on small windows; once per turn still feeds back before the model's next step (2026-11-01) |
 | D-37 | **Batteries are built against the small reference models, then checked on a larger one** (Qwen3.6 35B-A3B MTP, UD-Q4_K_XL, 64K context, thinking on) | The small models are the floor the harness must hold; the larger model is the expected daily driver and reaches features the small ones don't. Its first quick-set run (2026-10-31) had no harness failures and needed no shape fixes (2026-11-01) |
 | D-38 | **Compaction asks for the summary by extending the last request** (§7.4), not with a new prompt | A new prompt makes the server re-read the whole history: minutes on a local GPU at 100K tokens. Extending the last request hits the prefix cache. Built in core, not as an extension: the extension API can't see or send raw requests, and Psi has one wire format, so most of pi's version (formats, credentials, per-family thinking switches) isn't needed. Open: Psi strips thinking from history, which may break the prefix match when the server keeps thinking (`preserve_thinking`) (2026-11-01) |
+| D-39 | **Phase 7 is scoped to the 35B-class daily driver** | The small models stay the floor the harness must hold (their guards and shape fixes stay), but experiments that only test weak-model habits are closed with the evidence at hand or left to the counters (§14 results). Work goes to what the daily model meets: compaction at its 64K window, thinking, harder tasks, delegation and more tools (2026-11-01) |
 
 ---
 

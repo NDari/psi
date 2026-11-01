@@ -248,13 +248,14 @@ pub async fn load<B: Backend>(
         ));
     };
     let get = |k: &str| -> Result<String, String> {
-        m.get::<String>(k)
-            .map_err(|_| format!("{shown}: the manifest needs a string '{k}'"))
+        m.get::<String>(k).map_err(|_| {
+            format!("{shown}: the table it returns (the manifest) needs a string '{k}'")
+        })
     };
     let (name, version, description) = (get("name")?, get("version")?, get("description")?);
     let setup: Function = m
         .get("setup")
-        .map_err(|_| format!("{shown}: the manifest needs a function 'setup'"))?;
+        .map_err(|_| format!("{shown}: the table it returns (the manifest) needs 'setup', a function: return {{ name = ..., version = ..., description = ..., setup = setup }}"))?;
     let host = Host::new(&name, backend, shared, busy);
     let psi = psi_ext_api::register(&lua, host.clone()).map_err(|e| e.to_string())?;
     let _ = lua.globals().set("psi", psi.clone());

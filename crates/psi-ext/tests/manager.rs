@@ -229,3 +229,22 @@ async fn load_errors_name_the_file_and_the_problem() {
     );
     assert!(errors[2].contains("c.lua"), "{}", errors[2]);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_setup_names_the_returned_table() {
+    let d = tempfile::tempdir().unwrap();
+    let a = write(
+        d.path(),
+        "a.lua",
+        r#"local function setup(psi) end
+return { name = "a", version = "1", description = "d" }"#,
+    );
+    let (_m, errors, _ui) = start(vec![Source::Lua(a)], Limits::default()).await;
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].contains("the table it returns (the manifest) needs 'setup'")
+            && errors[0].contains("setup = setup }"),
+        "{}",
+        errors[0]
+    );
+}

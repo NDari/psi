@@ -1,29 +1,30 @@
--- tidy-results: tool_result (chain) keeps long test runs short for the
--- model, a tool renderer draws bash calls its own way, and
+-- tidy-results: tool_result (chain) strips terminal noise (color codes,
+-- progress bars redrawn with \r) from bash output before the model sees
+-- it, a tool renderer draws bash calls its own way, and
 -- before_agent_start adds a line to the system prompt.
 
-local MAX_LINES = 60
-
 local function tidy(text)
-  local lines = {}
-  for line in (text .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
-  if #lines <= MAX_LINES then return nil end
-  -- Keep the start and the end, where test runners put the summary.
-  local head, tail = {}, {}
-  for i = 1, 10 do head[#head + 1] = lines[i] end
-  for i = #lines - 39, #lines do tail[#tail + 1] = lines[i] end
-  return table.concat(head, "\n") .. "\n[tidy-results: " .. (#lines - 50) .. " lines left out]\n" .. table.concat(tail, "\n")
+  local out, changed = {}, false
+  for line in (text .. "\n"):gmatch("(.-)\n") do
+    -- A terminal shows only what follows the last carriage return.
+    local shown = line:match("([^\r]*)\r*$") or line
+    shown = shown:gsub("\27%[[%d;?]*[A-Za-z]", "")
+    if shown ~= line then changed = true end
+    out[#out + 1] = shown
+  end
+  if not changed then return nil end
+  return table.concat(out, "\n")
 end
 
 return {
   name = "tidy-results",
   version = "0.1.0",
-  description = "Shorter test output, a bash renderer, a system line",
+  description = "Plain bash output, a bash renderer, a system line",
   setup = function(psi)
     psi.on("tool_result", function(ev)
       if ev.name ~= "bash" then return nil end
-      local short = tidy(ev.text)
-      if short then return { text = short } end
+      local clean = tidy(ev.text)
+      if clean then return { text = clean, is_error = ev.is_error } end
       return nil
     end)
     psi.register_tool_renderer("bash", function(call, width)

@@ -23,9 +23,29 @@ agent or model does, and don't re-run it for more trials.
 | `code/SET` | The quick set: what `psi eval run` runs by default |
 | `pi/step-cap.ts` | A pi extension that stops a trial after the step cap |
 
-The 40 tasks were ported from Heimdall. Names start with the kind of
+The 40 coding tasks were ported from Heimdall. Names start with the kind of
 task: `fix_` (Python bug fixes), `feat_` (Python features), `sh_` (shell
 work), `multi_` (multi-file changes).
+
+## The extension tasks
+
+`ext_*` (four, from Heimdall's extension eval; H-01) ask for a psi Lua
+extension in the project's `.psi/extensions/<name>/`: a `tool_call` gate
+(`ext_lockfile_guard`), a `tool_result` rewrite with a flag
+(`ext_trim_output`), a new tool (`ext_todo_scan`) and a tool with session
+state plus a command (`ext_bookmarks`). They are not in the quick set.
+`just eval-ext` runs them with `docs/extensions.md` and `docs/api.md` in
+the model's context (as `~/.psi/AGENTS.md`, built from `docs/` at run time,
+so it can't drift), with a step cap of 20 (`just ext-steps=40 eval-ext`
+for more): passes took 7 to 16 steps, and the runs are read for harness
+problems rather than scored. Headless runs skip the untrusted project's
+`.psi`, so the extension never loads into the session writing it.
+
+Grading copies the extension without its own `*_test.lua` files, adds the
+task's hidden tests and runs `psi ext test` (`exttests` in `_lib`), one
+check per test case. Graders run `psi`, so `psi eval check` and the trials
+mount the eval binary into the grading container (`just eval-check` passes
+the static one).
 
 ## Commands
 

@@ -25,8 +25,8 @@ fn every_example_passes_its_tests() {
             "focus",
             "git-guard",
             "llama-box",
-            "tidy-results",
-            "todo"
+            "tally",
+            "tidy-results"
         ]
     );
     for (p, r) in &runs {

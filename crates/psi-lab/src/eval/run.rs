@@ -224,9 +224,11 @@ impl CheckReport {
 }
 
 /// Grades each task's `repo/` with `reference/` overlaid, and the bare `repo/`.
+/// `psi` is mounted for graders that run it (it must run in the image).
 pub fn check_graders(
     evals_dir: &Path,
     results_dir: &Path,
+    psi: Option<&Path>,
     selection: &Selection,
     progress: &mut dyn FnMut(&str),
 ) -> Result<CheckReport> {
@@ -241,8 +243,8 @@ pub fn check_graders(
         let src = out.join("reference-src");
         fsutil::copy_dir(&task.dir.join("repo"), &src, &[])?;
         fsutil::copy_dir(&task.dir.join("reference"), &src, &[])?;
-        let reference = grade(task, &lib, &src, &out.join("reference"))?;
-        let blank = grade(task, &lib, &task.dir.join("repo"), &out.join("blank"))?;
+        let reference = grade(task, &lib, psi, &src, &out.join("reference"))?;
+        let blank = grade(task, &lib, psi, &task.dir.join("repo"), &out.join("blank"))?;
         let row = CheckRow {
             task: task.name.clone(),
             reference,

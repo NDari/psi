@@ -152,6 +152,8 @@ enum ExtCommand {
         #[arg(long)]
         verbose: bool,
     },
+    /// List the example extensions, or print one with its tests.
+    Example { name: Option<String> },
 }
 
 #[derive(Debug, Args)]
@@ -191,6 +193,10 @@ enum EvalCommand {
         /// quick, all, or task names separated by commas.
         #[arg(long, default_value = "all")]
         tasks: String,
+        /// The psi binary graders may run (default: this one). It must run
+        /// in the Debian image: `just eval-build` makes a static one.
+        #[arg(long, value_name = "PATH")]
+        psi_binary: Option<PathBuf>,
     },
     /// One trial of each task with an agent. A single run proves the
     /// pipeline works; it is not a measure of quality or speed. Exits
@@ -378,6 +384,17 @@ fn project_trusted(home: Option<&Path>, cwd: &Path, interactive: bool, flag: boo
 
 fn ext_command(cmd: ExtCommand) -> Result<ExitCode> {
     match cmd {
+        ExtCommand::Example { name: None } => {
+            print!("{}", psi_cli::examples::list());
+            Ok(ExitCode::SUCCESS)
+        }
+        ExtCommand::Example { name: Some(name) } => match psi_cli::examples::show(&name) {
+            Some(text) => {
+                print!("{text}");
+                Ok(ExitCode::SUCCESS)
+            }
+            None => bail!("no example named {name}\n{}", psi_cli::examples::list()),
+        },
         ExtCommand::Check { path } => {
             let report = psi_ext::check::check(&path);
             print!("{}", report.render());
@@ -582,12 +599,20 @@ fn check_evals_dir(dir: &Path) -> Result<()> {
 
 fn eval_command(cmd: EvalCommand) -> Result<ExitCode> {
     match cmd {
-        EvalCommand::Check { common, tasks } => {
+        EvalCommand::Check {
+            common,
+            tasks,
+            psi_binary,
+        } => {
             check_evals_dir(&common.evals)?;
             let results = results_dir(common.results, Some("check"))?;
+            let psi = psi_binary
+                .map(|p| std::path::absolute(&p).unwrap_or(p))
+                .or_else(|| std::env::current_exe().ok());
             let report = eval::check_graders(
                 &common.evals,
                 &results,
+                psi.as_deref(),
                 &Selection::parse(&tasks),
                 &mut progress,
             )?;

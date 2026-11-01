@@ -83,12 +83,23 @@ run-release *args:
     cargo run -q --release --manifest-path {{justfile_directory()}}/Cargo.toml -p psi-cli -- "$@"
 
 # Check every grader: the reference passes, the untouched repo fails
-eval-check *args: build
-    ./target/debug/psi eval check {{args}}
+eval-check *args: build eval-build
+    ./target/debug/psi eval check --psi-binary {{eval-binary}} {{args}}
 
 # One trial per quick-set task (needs llm-up); extra args go to psi eval run
 eval-run *args: build eval-build
     ./target/debug/psi eval run --port {{port}} --psi-binary {{eval-binary}} {{args}}
+
+# The extension-writing tasks (H-01); pick some with `just ext-tasks=ext_todo_scan eval-ext`
+ext-tasks := "ext_lockfile_guard,ext_trim_output,ext_todo_scan,ext_bookmarks"
+# Their step cap: passes took 7 to 16 steps, so 20 cuts the time failures waste (`just ext-steps=40 eval-ext`)
+ext-steps := "20"
+
+# The extension-writing eval (H-01): the ext_* tasks, with docs/extensions.md and docs/api.md in the model's context
+eval-ext *args: build eval-build
+    mkdir -p target/eval-ext-docs
+    cat docs/extensions.md docs/api.md > target/eval-ext-docs/AGENTS.md
+    ./target/debug/psi eval run --port {{port}} --psi-binary {{eval-binary}} --psi-config target/eval-ext-docs --tasks {{ext-tasks}} --steps {{ext-steps}} {{args}}
 
 # Show an eval trial or session as a timeline
 inspect path *args: build

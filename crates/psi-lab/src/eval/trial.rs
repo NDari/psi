@@ -113,6 +113,7 @@ fn trial(ctx: &TrialCtx, task: &Task, agent: Agent, dir: &Path) -> Result<TrialR
     let graded = grade(
         task,
         &ctx.evals_dir.join("code/_lib"),
+        ctx.psi_binary,
         &project,
         &dir.join("grade"),
     );

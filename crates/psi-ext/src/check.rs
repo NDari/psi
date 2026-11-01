@@ -2033,12 +2033,14 @@ fn check_manifest(v: &Value, main: &Path, info: &MainInfo, r: &mut Report) -> Op
         let v: Value = t.raw_get(*key).unwrap_or(Value::Nil);
         let w = want(key);
         if v.is_nil() {
-            r.add(
-                main,
-                ret,
-                Severity::Error,
-                format!("the manifest is missing '{key}' (a {w})"),
-            );
+            // "Manifest" alone reads as a file: a model once spent 20 steps
+            // writing manifest.json (2026-11-01, H-01).
+            let msg = if *key == "setup" {
+                "the table this file returns (the manifest) is missing 'setup', the function psi calls with the API: return { name = ..., version = ..., description = ..., setup = setup }".to_owned()
+            } else {
+                format!("the table this file returns (the manifest) is missing '{key}' (a {w})")
+            };
+            r.add(main, ret, Severity::Error, msg);
         } else if lua_type(&v) != w {
             let msg = format!("manifest field '{key}' expected {w}, got {}", lua_type(&v));
             r.add(main, at(key), Severity::Error, msg);
@@ -2513,7 +2515,7 @@ mod tests {
             &r,
             1,
             Severity::Error,
-            "the manifest is missing 'version' (a string)",
+            "the table this file returns (the manifest) is missing 'version' (a string)",
         );
         has(
             &r,
@@ -2537,7 +2539,7 @@ mod tests {
             &r,
             1,
             Severity::Error,
-            "the manifest is missing 'setup' (a function)",
+            "the table this file returns (the manifest) is missing 'setup', the function psi calls with the API: return { name = ..., version = ..., description = ..., setup = setup }",
         );
         assert_eq!(r.errors(), 4, "{}", r.render());
     }

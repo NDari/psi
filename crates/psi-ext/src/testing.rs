@@ -369,6 +369,7 @@ async fn run_file(main: &Path, test_file: &Path, report: &mut TestReport) {
         }
         if let Ok(mut sh) = state.host.shared.write() {
             sh.entries.clear();
+            sh.flags.clear();
         }
         let r = state.call::<()>(f, ()).await;
         let output = std::mem::take(&mut fake.0.borrow_mut().output);
@@ -621,6 +622,18 @@ fn install(
             Ok(())
         })?,
     )?;
+    let sh = s.host.shared.clone();
+    t.set(
+        "set_flag",
+        // test.set_flag("max_lines", "100"): as `--ext-flag max_lines=100`
+        // gives it, so the value arrives as a string.
+        lua.create_function(move |_, (name, value): (String, String)| {
+            if let Ok(mut s) = sh.write() {
+                s.flags.insert(name, value);
+            }
+            Ok(())
+        })?,
+    )?;
     // print goes to the case's output.
     let f = fake.clone();
     lua.globals().set(
@@ -644,7 +657,9 @@ fn install(
 const TEST_LUA: &str = r#"
 local function show(v, depth)
   depth = depth or 0
-  if type(v) == "string" then return string.format("%q", v) end
+  -- %q breaks lines with a backslash and a real newline; failures are
+  -- reported by their first line, so keep the value on one.
+  if type(v) == "string" then return (string.format("%q", v):gsub("\\\n", "\\n")) end
   if type(v) ~= "table" or depth > 3 then return tostring(v) end
   local keys = {}
   for k in pairs(v) do keys[#keys + 1] = k end
@@ -759,6 +774,57 @@ mod tests {
         );
         assert!(text.contains("| print: greeting ann"), "{text}");
         assert!(text.ends_with("3 passed, 1 failed\n"), "{text}");
+    }
+
+    #[test]
+    fn a_multi_line_mismatch_shows_both_values_on_one_line() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("init.lua"),
+            r#"return { name = "m", version = "1", description = "d", setup = function() end }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            d.path().join("m_test.lua"),
+            r#"test.case("lines", function() test.eq("a\nb", "a\nc") end)"#,
+        )
+        .unwrap();
+        let r = run(d.path());
+        assert_eq!(r.cases.len(), 1, "{}", r.render(true));
+        let e = r.cases[0].error.as_deref().unwrap();
+        assert!(e.ends_with(r#"expected "a\nc", got "a\nb""#), "{e}");
+    }
+
+    #[test]
+    fn flags_set_per_case() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("init.lua"),
+            r#"return { name = "f", version = "1", description = "d", setup = function(psi)
+                 psi.register_flag("n", { description = "a number", default = 3 })
+                 psi.register_command("n", { description = "show", handler = function()
+                   psi.ui.notify(tostring(psi.get_flag("n")))
+                 end })
+               end }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            d.path().join("f_test.lua"),
+            r#"
+            test.case("set", function()
+              test.set_flag("n", 7)
+              test.command("n")
+              test.eq(test.requests("notify")[1].message, "7")
+            end)
+            test.case("default again", function()
+              test.command("n")
+              test.eq(test.requests("notify")[1].message, "3")
+            end)
+            "#,
+        )
+        .unwrap();
+        let r = run(d.path());
+        assert!(r.passed(), "{}", r.render(true));
     }
 
     #[test]
