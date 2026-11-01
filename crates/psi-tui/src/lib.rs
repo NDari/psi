@@ -4,6 +4,7 @@
 //! region that is redrawn differentially at the bottom of the terminal.
 
 pub mod editor;
+pub mod highlight;
 pub mod keys;
 pub mod markdown;
 pub mod render;

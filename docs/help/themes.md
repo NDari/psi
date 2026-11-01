@@ -6,6 +6,9 @@ pi's format: { "name": "mine", "vars": { ... }, "colors": { "accent": "#ff8800",
 A color is "" (the terminal's own), 0-255, #rgb or #rrggbb, an ANSI name such as
 "brightBlue", or a var. Tokens psi draws: accent, success, error, warning, muted,
 userMessageText, bashMode, borderMuted, mdHeading, mdCode, mdCodeBlockBorder,
-toolDiffAdded, toolDiffRemoved; others are ignored.
+toolDiffAdded, toolDiffRemoved, and for code in fenced blocks tagged with a language
+syntaxComment, syntaxKeyword, syntaxFunction, syntaxVariable, syntaxString, syntaxNumber,
+syntaxType, syntaxOperator, syntaxPunctuation (pi's names, so pi themes color code the
+same way); others are ignored.
 
 Set "theme": "mine" in settings; /theme lists the themes or switches for the session.

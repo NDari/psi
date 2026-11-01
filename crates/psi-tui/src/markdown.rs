@@ -1,10 +1,12 @@
 //! Streaming markdown, committed once (psi-plan.md §11.2).
 //!
 //! [`MdStream`] splits streamed text into complete blocks (paragraphs, headings,
-//! whole fenced code blocks) and [`render_block`] turns a block into lines. This is
-//! deliberately not CommonMark: anything it does not recognize renders literally.
+//! whole fenced code blocks) and [`render_block`] turns a block into lines: prose
+//! through pulldown-cmark, fenced code verbatim and highlighted (§11.5).
 
-use crate::style::{Line, Style};
+use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
+
+use crate::style::{Line, Style, str_width};
 use crate::theme::{self, Token};
 
 /// A long block without blank lines is committed in pieces of this many lines, so
@@ -108,7 +110,10 @@ impl MdStream {
                 Kind::Text => {
                     self.scanned = next;
                     self.lines += 1;
-                    if self.lines >= PROGRESSIVE_LINES {
+                    // A table stays whole: a piece without its header
+                    // wouldn't be a table (§11.5).
+                    let table_row = line.trim_start().starts_with('|');
+                    if self.lines >= PROGRESSIVE_LINES && !table_row {
                         self.emit(next, &mut out);
                     }
                 }
@@ -151,88 +156,59 @@ impl MdStream {
     }
 }
 
-/// Lines for one block. Prose is word-wrapped to `width` with headings bold (the
-/// `#`s dim), `**bold**`, `*italic*`/`_italic_`, `` `code` `` in cyan, list bullets
-/// kept with a hanging indent, and block quotes dim. Fenced code keeps its fence
-/// lines (dim) and its code lines verbatim and unwrapped, so a copy from the
-/// terminal is the code. Table rows are not wrapped either.
+/// Lines for one block. Prose goes through a CommonMark parser (§11.5) and
+/// is word-wrapped to `width`: headings bold (the `#`s dim), emphasis, `code`
+/// in cyan, links underlined with the URL after them, list markers as
+/// written with a hanging indent, quotes dim, tables as aligned columns.
+/// Fenced code keeps its fence lines (dim) and its code lines verbatim and
+/// unwrapped, colored when tagged with a known language, so a copy from
+/// the terminal is the code.
 pub fn render_block(block: &str, width: usize) -> Vec<Line> {
     let mut out = Vec::new();
-    let mut fence = None;
+    // Prose lines waiting to be rendered together.
+    let mut prose_buf = String::new();
+    // The open fence, its language tag, and its code lines so far.
+    let mut fence: Option<((char, usize), String, Vec<&str>)> = None;
     for raw in block.split('\n') {
         let line = raw.strip_suffix('\r').unwrap_or(raw);
-        if let Some(f) = fence {
-            if fence_close(line, f) {
+        if let Some((f, tag, code)) = &mut fence {
+            if fence_close(line, *f) {
+                out.extend(code_lines(tag, code));
                 fence = None;
                 out.push(Line::styled(line, theme::style(Token::MdCodeBlockBorder)));
             } else {
-                out.push(Line::raw(line));
+                code.push(line);
             }
         } else if let Some(f) = fence_open(line) {
-            fence = Some(f);
+            out.extend(prose(&std::mem::take(&mut prose_buf), width));
+            let tag = line.trim_start()[f.1..]
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_owned();
+            fence = Some((f, tag, Vec::new()));
             out.push(Line::styled(line, theme::style(Token::MdCodeBlockBorder)));
         } else {
-            prose_line(line, width, &mut out);
+            prose_buf.push_str(line);
+            prose_buf.push('\n');
         }
+    }
+    out.extend(prose(&prose_buf, width));
+    // A fence left open (the stream ended inside it).
+    if let Some((_, tag, code)) = &fence {
+        out.extend(code_lines(tag, code));
     }
     out
 }
 
-fn prose_line(line: &str, width: usize, out: &mut Vec<Line>) {
-    let trimmed = line.trim_start();
-    let indent = &line[..line.len() - trimmed.len()];
-    if trimmed.is_empty() {
-        out.push(Line::new());
-    } else if let Some(n) = heading_level(trimmed) {
-        let marks = &trimmed[..n];
-        let rest = trimmed[n..].trim_start();
-        let first = Line::raw(indent).with(format!("{marks} "), muted());
-        wrap_prefixed(
-            first,
-            false,
-            inline(rest, theme::style(Token::MdHeading).bold()),
-            width,
-            out,
-        );
-    } else if let Some(rest) = trimmed.strip_prefix('>') {
-        let rest = rest.strip_prefix(' ').unwrap_or(rest);
-        let first = Line::raw(indent).with("> ", muted());
-        wrap_prefixed(first, true, inline(rest, muted()), width, out);
-    } else if is_rule(trimmed) {
-        out.push(Line::styled(line, muted()));
-    } else if trimmed.starts_with('|') {
-        out.push(inline(line, Style::new()));
-    } else if let Some(marker) = list_marker(trimmed) {
-        let first = Line::raw(format!("{indent}{marker}"));
-        let body = inline(&trimmed[marker.len()..], Style::new());
-        wrap_prefixed(first, false, body, width, out);
-    } else {
-        out.extend(inline(line, Style::new()).wrap(width));
-    }
-}
-
-/// Wraps `body` after `first`; later rows get `first` again (`repeat`) or spaces.
-fn wrap_prefixed(first: Line, repeat: bool, body: Line, width: usize, out: &mut Vec<Line>) {
-    let pw = first.width();
-    let cont = if repeat {
-        first.clone()
-    } else {
-        Line::raw(" ".repeat(pw))
-    };
-    for (i, row) in body
-        .wrap(width.saturating_sub(pw).max(1))
-        .into_iter()
-        .enumerate()
+/// Code as written, colored when its tag names a known language (§11.5).
+fn code_lines(tag: &str, code: &[&str]) -> Vec<Line> {
+    if !tag.is_empty()
+        && let Some(lines) = crate::highlight::highlight(tag, code)
     {
-        let mut l = if i == 0 { first.clone() } else { cont.clone() };
-        l.append(row);
-        out.push(l);
+        return lines;
     }
-}
-
-fn is_rule(t: &str) -> bool {
-    let chars: Vec<char> = t.chars().filter(|c| *c != ' ').collect();
-    chars.len() >= 3 && matches!(chars[0], '-' | '*' | '_') && chars.iter().all(|&c| c == chars[0])
+    code.iter().map(|l| Line::raw(*l)).collect()
 }
 
 /// The list marker with its trailing space (`- `, `* `, `+ `, `12. `, `3) `).
@@ -252,115 +228,394 @@ fn list_marker(t: &str) -> Option<&str> {
     (b.get(end) == Some(&b' ')).then(|| &t[..=end])
 }
 
-/// Inline markup in `base` style. Unmatched markers render literally.
-fn inline(s: &str, base: Style) -> Line {
-    let mut out = Line::new();
-    inline_into(&s.chars().collect::<Vec<_>>(), base, &mut out);
-    out
+/// Wraps `body` after `first`; later rows start with `cont`.
+fn wrap_under(first: Line, cont: &Line, body: Line, width: usize, out: &mut Vec<Line>) {
+    let pw = first.width().max(cont.width());
+    for (i, row) in body
+        .wrap(width.saturating_sub(pw).max(1))
+        .into_iter()
+        .enumerate()
+    {
+        let mut l = if i == 0 { first.clone() } else { cont.clone() };
+        l.append(row);
+        out.push(l);
+    }
 }
 
-fn run(cs: &[char], i: usize, c: char) -> usize {
-    cs[i..].iter().take_while(|&&x| x == c).count()
+/// What a paragraph's lines sit in: each adds to their prefix.
+enum Container {
+    Quote,
+    /// A list item: its marker on its first line, spaces after.
+    Item {
+        marker: String,
+        first: bool,
+    },
 }
 
-fn inline_into(cs: &[char], base: Style, out: &mut Line) {
-    let mut text = String::new();
-    let flush = |text: &mut String, out: &mut Line| {
-        out.push(std::mem::take(text), base);
+struct Table {
+    aligns: Vec<Alignment>,
+    rows: Vec<Vec<Line>>,
+    row: Vec<Line>,
+    head_rows: usize,
+}
+
+/// Renders prose (no fenced code: [`render_block`] takes that out) from
+/// pulldown-cmark's events.
+struct Prose {
+    width: usize,
+    out: Vec<Line>,
+    /// The paragraph being built: rows ended by hard breaks, and the current one.
+    rows: Vec<Line>,
+    cur: Line,
+    styles: Vec<Style>,
+    containers: Vec<Container>,
+    /// Ordered lists' next number and delimiter; `None` for bullet lists.
+    lists: Vec<Option<(u64, char)>>,
+    /// The level of the heading being built.
+    heading: Option<usize>,
+    /// Open links: the URL and where their text starts in `cur`'s plain text.
+    links: Vec<(String, usize)>,
+    table: Option<Table>,
+    /// Indented code being collected.
+    code: Option<String>,
+    saw_table: bool,
+}
+
+/// Prose lines rendered through a CommonMark parser (§11.5).
+fn prose(src: &str, width: usize) -> Vec<Line> {
+    if src.trim().is_empty() {
+        return Vec::new();
+    }
+    let mut p = Prose {
+        width,
+        out: Vec::new(),
+        rows: Vec::new(),
+        cur: Line::new(),
+        styles: vec![Style::new()],
+        containers: Vec::new(),
+        lists: Vec::new(),
+        heading: None,
+        links: Vec::new(),
+        table: None,
+        code: None,
+        saw_table: false,
     };
-    let mut i = 0;
-    while i < cs.len() {
-        let c = cs[i];
-        match c {
-            '\\' if cs.get(i + 1).is_some_and(char::is_ascii_punctuation) => {
-                text.push(cs[i + 1]);
-                i += 2;
+    let opts = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    for (ev, range) in Parser::new_ext(src, opts).into_offset_iter() {
+        match ev {
+            Event::Start(tag) => p.start(tag, &src[range.start..]),
+            Event::End(tag) => p.end(tag),
+            Event::Text(t) => match &mut p.code {
+                Some(c) => c.push_str(&t),
+                None => p.text(&t),
+            },
+            Event::Code(t) => {
+                let st = p.style().patch(code_style());
+                p.cur.push(&*t, st);
             }
-            '`' => {
-                let n = run(cs, i, '`');
-                match find_run(cs, i + n, '`', n) {
-                    Some(j) => {
-                        flush(&mut text, out);
-                        let code: String = cs[i + n..j].iter().collect();
-                        let code = match code.strip_prefix(' ').and_then(|c| c.strip_suffix(' ')) {
-                            Some(inner) if !inner.trim().is_empty() => inner.to_string(),
-                            _ => code,
-                        };
-                        out.push(code, base.patch(code_style()));
-                        i = j + n;
-                    }
-                    None => {
-                        text.extend(&cs[i..i + n]);
-                        i += n;
-                    }
+            Event::SoftBreak => p.text(" "),
+            Event::HardBreak => p.hard_break(),
+            Event::InlineHtml(t) => p.text(&t),
+            Event::Html(t) => {
+                for l in t.lines() {
+                    p.text(l);
+                    p.hard_break();
                 }
             }
-            '*' | '_' => {
-                let n = run(cs, i, c);
-                let open_ok = c == '*' || i == 0 || !cs[i - 1].is_alphanumeric();
-                let close = match n {
-                    1 | 2 if open_ok => find_close(cs, i + n, c, n),
-                    _ => None,
+            Event::Rule => {
+                p.flush();
+                let (mut first, _) = p.prefixes();
+                first.push(src[range].trim(), muted());
+                p.out.push(first);
+            }
+            Event::TaskListMarker(done) => p.text(if done { "[x] " } else { "[ ] " }),
+            Event::FootnoteReference(t) => p.text(&format!("[^{t}]")),
+            _ => {}
+        }
+    }
+    p.flush();
+    // Rows without a header and separator aren't a table to the parser:
+    // shown as written, unwrapped, like the rows of one.
+    let rows: Vec<&str> = src.lines().filter(|l| !l.trim().is_empty()).collect();
+    if !p.saw_table && rows.iter().all(|l| l.trim_start().starts_with('|')) {
+        return rows.iter().map(|l| Line::raw(*l)).collect();
+    }
+    p.out
+}
+
+impl Prose {
+    fn style(&self) -> Style {
+        self.styles.last().copied().unwrap_or_default()
+    }
+
+    fn push_style(&mut self, s: Style) {
+        let top = self.style();
+        self.styles.push(top.patch(s));
+    }
+
+    fn pop_style(&mut self) {
+        if self.styles.len() > 1 {
+            self.styles.pop();
+        }
+    }
+
+    fn text(&mut self, t: &str) {
+        let st = self.style();
+        self.cur.push(t, st);
+    }
+
+    fn hard_break(&mut self) {
+        let row = std::mem::take(&mut self.cur);
+        self.rows.push(row);
+    }
+
+    /// The prefixes for a block's first and later lines; a list item's
+    /// marker goes on its first line only.
+    fn prefixes(&mut self) -> (Line, Line) {
+        let mut first = Line::new();
+        let mut cont = Line::new();
+        for c in &mut self.containers {
+            match c {
+                Container::Quote => {
+                    first.push("> ", muted());
+                    cont.push("> ", muted());
+                }
+                Container::Item { marker, first: f } => {
+                    let pad = " ".repeat(str_width(marker));
+                    if *f {
+                        first.push(marker.as_str(), Style::new());
+                        *f = false;
+                    } else {
+                        first.push(&pad, Style::new());
+                    }
+                    cont.push(&pad, Style::new());
+                }
+            }
+        }
+        (first, cont)
+    }
+
+    /// Writes out the paragraph built so far, wrapped under its prefixes.
+    fn flush(&mut self) {
+        if self.cur.is_empty() && self.rows.is_empty() {
+            return;
+        }
+        let mut rows = std::mem::take(&mut self.rows);
+        rows.push(std::mem::take(&mut self.cur));
+        let (mut first, mut cont) = self.prefixes();
+        if let Some(n) = self.heading {
+            let marks = format!("{} ", "#".repeat(n));
+            first.push(&marks, muted());
+            cont.push(" ".repeat(marks.len()), Style::new());
+        }
+        for (i, row) in rows.into_iter().enumerate() {
+            let f = if i == 0 { first.clone() } else { cont.clone() };
+            wrap_under(f, &cont, row, self.width, &mut self.out);
+        }
+    }
+
+    /// `at` is the source from where the tag starts.
+    fn start(&mut self, tag: Tag, at: &str) {
+        match tag {
+            Tag::Heading { level, .. } => {
+                self.flush();
+                self.heading = Some(level as usize);
+                self.push_style(theme::style(Token::MdHeading).bold());
+            }
+            Tag::BlockQuote(_) => {
+                self.flush();
+                self.containers.push(Container::Quote);
+                self.push_style(muted());
+            }
+            Tag::CodeBlock(_) => {
+                self.flush();
+                self.code = Some(String::new());
+            }
+            Tag::List(start) => {
+                self.flush();
+                let delim = list_marker(at.trim_start())
+                    .and_then(|m| m.trim_end().chars().last())
+                    .unwrap_or('.');
+                self.lists.push(start.map(|n| (n, delim)));
+            }
+            Tag::Item => {
+                self.flush();
+                let marker = match self.lists.last_mut() {
+                    Some(Some((n, delim))) => {
+                        let m = format!("{n}{delim} ");
+                        *n += 1;
+                        m
+                    }
+                    _ => list_marker(at.trim_start()).unwrap_or("- ").to_owned(),
                 };
-                match close {
-                    Some(j) => {
-                        flush(&mut text, out);
-                        let style = if n == 2 { base.bold() } else { base.italic() };
-                        inline_into(&cs[i + n..j], style, out);
-                        i = j + n;
-                    }
-                    None => {
-                        text.extend(&cs[i..i + n]);
-                        i += n;
+                self.containers.push(Container::Item {
+                    marker,
+                    first: true,
+                });
+            }
+            Tag::Emphasis => self.push_style(Style::new().italic()),
+            Tag::Strong => self.push_style(Style::new().bold()),
+            Tag::Strikethrough => self.push_style(Style::new().strike()),
+            Tag::Link { dest_url, .. } => {
+                self.links
+                    .push((dest_url.to_string(), self.cur.plain().len()));
+                self.push_style(Style::new().underline());
+            }
+            Tag::Image { dest_url, .. } => {
+                self.links
+                    .push((dest_url.to_string(), self.cur.plain().len()));
+                self.push_style(Style::new());
+            }
+            Tag::Table(aligns) => {
+                self.flush();
+                self.saw_table = true;
+                self.table = Some(Table {
+                    aligns,
+                    rows: Vec::new(),
+                    row: Vec::new(),
+                    head_rows: 0,
+                });
+            }
+            Tag::TableCell => self.cur = Line::new(),
+            _ => {}
+        }
+    }
+
+    fn end(&mut self, tag: TagEnd) {
+        match tag {
+            TagEnd::Paragraph => self.flush(),
+            TagEnd::Heading(_) => {
+                self.flush();
+                self.heading = None;
+                self.pop_style();
+            }
+            TagEnd::BlockQuote(_) => {
+                self.flush();
+                self.containers.pop();
+                self.pop_style();
+            }
+            TagEnd::CodeBlock => {
+                if let Some(code) = self.code.take() {
+                    let (first, cont) = self.prefixes();
+                    for (i, l) in code.trim_end_matches('\n').split('\n').enumerate() {
+                        let mut line = if i == 0 { first.clone() } else { cont.clone() };
+                        line.push(l, Style::new());
+                        self.out.push(line);
                     }
                 }
             }
-            _ => {
-                text.push(c);
-                i += 1;
+            TagEnd::List(_) => {
+                self.flush();
+                self.lists.pop();
+            }
+            TagEnd::Item => {
+                self.flush();
+                self.containers.pop();
+            }
+            TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => self.pop_style(),
+            TagEnd::Link | TagEnd::Image => {
+                self.pop_style();
+                if let Some((url, at)) = self.links.pop() {
+                    let plain = self.cur.plain();
+                    let text = plain.get(at..).unwrap_or("");
+                    let same = url == text || url.strip_prefix("mailto:") == Some(text);
+                    if !url.is_empty() && !same {
+                        self.cur.push(format!(" ({url})"), muted());
+                    }
+                }
+            }
+            TagEnd::TableCell => {
+                let cell = std::mem::take(&mut self.cur);
+                if let Some(t) = &mut self.table {
+                    t.row.push(cell);
+                }
+            }
+            TagEnd::TableHead | TagEnd::TableRow => {
+                if let Some(t) = &mut self.table {
+                    let row = std::mem::take(&mut t.row);
+                    t.rows.push(row);
+                    if tag == TagEnd::TableHead {
+                        t.head_rows = 1;
+                    }
+                }
+            }
+            TagEnd::Table => {
+                if let Some(t) = self.table.take() {
+                    self.render_table(t);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Aligned columns with the header bold and a rule under it; when that
+    /// is wider than the terminal, the rows as `| a | b |`, unwrapped.
+    fn render_table(&mut self, t: Table) {
+        let cols = t.rows.iter().map(Vec::len).max().unwrap_or(0);
+        let widths: Vec<usize> = (0..cols)
+            .map(|c| {
+                t.rows
+                    .iter()
+                    .filter_map(|r| r.get(c))
+                    .map(Line::width)
+                    .max()
+                    .unwrap_or(0)
+            })
+            .collect();
+        let (first, cont) = self.prefixes();
+        let total = first.width() + widths.iter().sum::<usize>() + 3 * cols.saturating_sub(1);
+        let fits = total <= self.width;
+        for (ri, row) in t.rows.iter().enumerate() {
+            let mut line = if ri == 0 { first.clone() } else { cont.clone() };
+            let head = ri < t.head_rows;
+            if !fits {
+                line.push("| ", Style::new());
+            }
+            for (c, width) in widths.iter().enumerate() {
+                if c > 0 {
+                    line.push(if fits { " │ " } else { " | " }, muted());
+                }
+                let cell = row.get(c).cloned().unwrap_or_else(Line::new);
+                let cell = if head { bold(&cell) } else { cell };
+                if !fits {
+                    line.append(cell);
+                    continue;
+                }
+                let pad = width.saturating_sub(cell.width());
+                let (l, r) = match t.aligns.get(c) {
+                    Some(Alignment::Right) => (pad, 0),
+                    Some(Alignment::Center) => (pad / 2, pad - pad / 2),
+                    _ => (0, pad),
+                };
+                if l > 0 {
+                    line.push(" ".repeat(l), Style::new());
+                }
+                line.append(cell);
+                // No trailing spaces after the last column.
+                if r > 0 && c + 1 < cols {
+                    line.push(" ".repeat(r), Style::new());
+                }
+            }
+            if !fits {
+                line.push(" |", Style::new());
+            }
+            self.out.push(line);
+            if fits && ri + 1 == t.head_rows {
+                let mut rule = cont.clone();
+                let parts: Vec<String> = widths.iter().map(|w| "─".repeat(*w)).collect();
+                rule.push(parts.join("─┼─"), muted());
+                self.out.push(rule);
             }
         }
     }
-    flush(&mut text, out);
 }
 
-/// The next run of exactly `n` `c`s at or after `from`.
-fn find_run(cs: &[char], from: usize, c: char, n: usize) -> Option<usize> {
-    let mut j = from;
-    while j < cs.len() {
-        if cs[j] == c {
-            let r = run(cs, j, c);
-            if r == n {
-                return Some(j);
-            }
-            j += r;
-        } else {
-            j += 1;
-        }
+fn bold(l: &Line) -> Line {
+    let mut out = Line::new();
+    for s in &l.spans {
+        out.push(&s.text, s.style.bold());
     }
-    None
-}
-
-/// A closing emphasis run for an opener whose content starts at `from`: content is
-/// non-empty and not space-padded, and `_` does not close inside a word.
-fn find_close(cs: &[char], from: usize, c: char, n: usize) -> Option<usize> {
-    if cs.get(from).is_none_or(|x| x.is_whitespace()) {
-        return None;
-    }
-    let mut j = from + 1;
-    while j < cs.len() {
-        if cs[j] == c {
-            let r = run(cs, j, c);
-            let after_ok = c == '*' || cs.get(j + r).is_none_or(|x| !x.is_alphanumeric());
-            if r == n && !cs[j - 1].is_whitespace() && after_ok {
-                return Some(j);
-            }
-            j += r;
-        } else {
-            j += 1;
-        }
-    }
-    None
+    out
 }
 
 #[cfg(test)]
@@ -518,11 +773,17 @@ mod tests {
         let ls = render_block(&block, 20);
         assert_eq!(plain(&ls), ["```rust", long, "    indented", "```"]);
         assert!(ls[0].spans[0].style.dim && ls[3].spans[0].style.dim);
-        assert_eq!(ls[1].spans[0].style, Style::new());
+        // Tagged code is colored (`let` is a keyword), untagged code isn't.
+        assert_eq!(ls[1].spans[0].style, theme::style(Token::SyntaxKeyword));
+        let untagged = render_block("```\n**not bold**\n```", 80);
+        assert_eq!(plain(&untagged)[1], "**not bold**");
+        assert_eq!(untagged[1].spans[0].style, Style::new());
+        // An unknown tag shows the code as is; an unclosed fence is still code.
         assert_eq!(
-            plain(&render_block("```\n**not bold**\n```", 80))[1],
-            "**not bold**"
+            render_block("```nope\nx\n```", 80)[1].spans[0].style,
+            Style::new()
         );
+        assert_eq!(render_block("```py\nx = 1", 80)[1].plain(), "x = 1");
     }
 
     #[test]
@@ -533,11 +794,15 @@ mod tests {
 
     #[test]
     fn render_lists_with_hanging_indent() {
-        let ls = render_block("- alpha beta gamma\n  12. delta epsilon", 13);
+        let ls = render_block("- alpha beta gamma\n  1. delta epsilon", 13);
         assert_eq!(
             plain(&ls),
-            ["- alpha beta", "  gamma", "  12. delta", "      epsilon"]
+            ["- alpha beta", "  gamma", "  1. delta", "     epsilon"]
         );
+        // Markers as written: the bullet character, an ordered list's start
+        // and delimiter.
+        assert_eq!(plain(&render_block("* a\n* b", 80)), ["* a", "* b"]);
+        assert_eq!(plain(&render_block("3) x\n3) y", 80)), ["3) x", "4) y"]);
     }
 
     #[test]
@@ -551,5 +816,66 @@ mod tests {
     fn render_table_unwrapped() {
         let row = "| a column | another column |";
         assert_eq!(plain(&render_block(row, 10)), [row]);
+    }
+
+    #[test]
+    fn tables_line_up_and_fall_back_when_wide() {
+        let src = "| name | n |\n|------|--:|\n| **a** | 1 |\n| bb | 22 |";
+        let ls = render_block(src, 80);
+        assert_eq!(
+            plain(&ls),
+            ["name │  n", "─────┼───", "a    │  1", "bb   │ 22"]
+        );
+        assert!(
+            ls[0]
+                .spans
+                .iter()
+                .filter(|s| s.text.trim() != "│")
+                .all(|s| s.style.bold || s.text.trim().is_empty())
+        );
+        // Too wide: the rows as written, unwrapped.
+        assert_eq!(
+            plain(&render_block(src, 8)),
+            ["| name | n |", "| a | 1 |", "| bb | 22 |"]
+        );
+    }
+
+    #[test]
+    fn a_long_table_streams_whole() {
+        let mut src = "| a |\n|---|\n".to_owned();
+        for i in 0..30 {
+            src.push_str(&format!("| {i} |\n"));
+        }
+        let (blocks, _) = feed(&[&src, "\n"]);
+        assert_eq!(blocks.len(), 1);
+    }
+
+    #[test]
+    fn links_strikethrough_tasks_and_soft_breaks() {
+        let ls = render_block("see [docs](https://x.dev) and <https://y.dev>", 80);
+        assert_eq!(plain(&ls), ["see docs (https://x.dev) and https://y.dev"]);
+        assert!(
+            ls[0]
+                .spans
+                .iter()
+                .any(|s| s.text == "docs" && s.style.underline)
+        );
+        let ls = render_block("~~gone~~ kept", 80);
+        assert!(ls[0].spans[0].style.strike);
+        assert_eq!(
+            plain(&render_block("- [x] done\n- [ ] todo", 80)),
+            ["- [x] done", "- [ ] todo"]
+        );
+        // Lines of one paragraph join and wrap together, as in markdown.
+        assert_eq!(plain(&render_block("one\ntwo", 80)), ["one two"]);
+        assert_eq!(plain(&render_block("Title\n=====", 80)), ["# Title"]);
+    }
+
+    #[test]
+    fn quotes_hold_lists_and_indented_code_stays() {
+        let ls = render_block("> - a\n> - b", 80);
+        assert_eq!(plain(&ls), ["> - a", "> - b"]);
+        let ls = render_block("text\n\n    code  here", 80);
+        assert_eq!(plain(&ls), ["text", "code  here"]);
     }
 }

@@ -191,7 +191,8 @@ fn a_prompt_streams_an_answer_and_tool_calls_commit_once() {
     );
     t.wait_for("› ", SLOW);
     t.typ("make hello.txt\r");
-    t.wait_for("for you.", SLOW);
+    // The code block comes last (and loads the grammars on first use).
+    t.wait_for("cat hello.txt", SLOW);
     let all = t.all();
     assert!(all.contains("› make hello.txt"), "{all}");
     assert!(all.contains("● write  hello.txt"), "{all}");

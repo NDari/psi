@@ -32,6 +32,16 @@ pub enum Token {
     MdCodeBlockBorder,
     ToolDiffAdded,
     ToolDiffRemoved,
+    /// Code in fenced blocks (§11.5): pi's nine syntax colors.
+    SyntaxComment,
+    SyntaxKeyword,
+    SyntaxFunction,
+    SyntaxVariable,
+    SyntaxString,
+    SyntaxNumber,
+    SyntaxType,
+    SyntaxOperator,
+    SyntaxPunctuation,
 }
 
 const TOKENS: &[(Token, &str)] = &[
@@ -48,6 +58,15 @@ const TOKENS: &[(Token, &str)] = &[
     (Token::MdCodeBlockBorder, "mdCodeBlockBorder"),
     (Token::ToolDiffAdded, "toolDiffAdded"),
     (Token::ToolDiffRemoved, "toolDiffRemoved"),
+    (Token::SyntaxComment, "syntaxComment"),
+    (Token::SyntaxKeyword, "syntaxKeyword"),
+    (Token::SyntaxFunction, "syntaxFunction"),
+    (Token::SyntaxVariable, "syntaxVariable"),
+    (Token::SyntaxString, "syntaxString"),
+    (Token::SyntaxNumber, "syntaxNumber"),
+    (Token::SyntaxType, "syntaxType"),
+    (Token::SyntaxOperator, "syntaxOperator"),
+    (Token::SyntaxPunctuation, "syntaxPunctuation"),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +97,15 @@ fn default_style(t: Token) -> Style {
         Token::BashMode => Style::fg(Color::Magenta),
         Token::MdHeading => Style::new(),
         Token::MdCode => Style::fg(Color::Cyan),
+        // Code: a few of the 16 colors; operators, punctuation and names
+        // stay the terminal's own, so code isn't a wall of color.
+        Token::SyntaxComment => Style::new().dim(),
+        Token::SyntaxKeyword => Style::fg(Color::Magenta),
+        Token::SyntaxFunction => Style::fg(Color::Blue),
+        Token::SyntaxString => Style::fg(Color::Green),
+        Token::SyntaxNumber => Style::fg(Color::Yellow),
+        Token::SyntaxType => Style::fg(Color::Cyan),
+        Token::SyntaxVariable | Token::SyntaxOperator | Token::SyntaxPunctuation => Style::new(),
     }
 }
 
@@ -251,6 +279,12 @@ mod tests {
         assert_eq!(problems.len(), 1);
         assert!(problems[0].contains("warning: okhsl"), "{problems:?}");
         assert_eq!(t.style(Token::BashMode), Style::fg(Color::Magenta));
+        // pi's syntax colors apply to code.
+        assert_eq!(
+            t.style(Token::SyntaxKeyword),
+            Style::fg(Color::Rgb(0x12, 0x34, 0x56))
+        );
+        assert_eq!(t.style(Token::SyntaxString), Style::fg(Color::Green));
     }
 
     #[test]

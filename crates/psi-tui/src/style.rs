@@ -79,6 +79,7 @@ pub struct Style {
     pub italic: bool,
     pub underline: bool,
     pub reverse: bool,
+    pub strike: bool,
 }
 
 impl Style {
@@ -92,6 +93,7 @@ impl Style {
             italic: false,
             underline: false,
             reverse: false,
+            strike: false,
         }
     }
 
@@ -140,6 +142,11 @@ impl Style {
         self
     }
 
+    pub const fn strike(mut self) -> Self {
+        self.strike = true;
+        self
+    }
+
     /// `other` layered on top of `self`: its colors win when set, attributes add up.
     pub const fn patch(self, other: Style) -> Self {
         Style {
@@ -156,6 +163,7 @@ impl Style {
             italic: self.italic || other.italic,
             underline: self.underline || other.underline,
             reverse: self.reverse || other.reverse,
+            strike: self.strike || other.strike,
         }
     }
 
@@ -172,6 +180,7 @@ impl Style {
             (self.italic, 3),
             (self.underline, 4),
             (self.reverse, 7),
+            (self.strike, 9),
         ];
         for (on, code) in attrs {
             if on {
