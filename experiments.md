@@ -102,6 +102,10 @@ Flags worth sweeping: `-fa`, `-b`/`-ub`, `-ctk`/`-ctv` (KV cache type), `-t`, `-
 - The model guessing qualified symbol names is a model habit; a line in the tool description from the server can't be changed by Psi, but a skill or prompt line could say to use bare names.
 - One run each; per AGENTS.md, a difference here is a direction, not a score.
 
+**Run 2026-11-01** (`~/.psi/evals/2026-11-01-2215-h16-lsp-qwen3.6-35b`, the 35B at 64K, the quick set plus `multi_rename_callers` and `multi_shipping_bug`, variant `evals/variants/lsp`): 10 of 12 pass (8 of 10 on the quick set), no harness failures, and not one MCP call in 12 trials, though the five tools were declared on every request (about 900 tokens each time) and the server worked (checked in the image before the run; no errors in any trial). On `multi_rename_callers`, the task `rename_symbol` exists for, the model grepped, read the 8 files, made 11 edits and passed in 14 steps. So step 3 (with and without) has nothing to compare. The same pattern as sub-agents (H-15): the 35B uses an extra tool when the request points at it ("where is X called", in the hands-on tries) and not otherwise, and at 64K on these small projects grep and read are enough.
+
+**Still open:** whether one system-prompt line naming the MCP tools and what they are for changes that (pi lists MCP servers in its system prompt); model-facing text, so a separate run. Projects big enough that grep misleads (many same-named symbols) would be the case where these tools should matter.
+
 ## Done
 
 ### A faster 35B on the Mac for development (added 2026-11-01)

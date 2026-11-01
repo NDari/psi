@@ -4,6 +4,13 @@
 # server.
 FROM docker.io/library/node:22-trixie-slim AS node
 
+# The language-server bridge for the MCP variant (evals/variants/lsp, H-16),
+# built static so it doesn't depend on the image's glibc. The STRd6 fork:
+# the original (isaacphi) killed its language server at start (2026-11-01).
+FROM docker.io/library/golang:1.27.1-trixie AS go
+ARG LSP_BRIDGE_VERSION=v0.5.0
+RUN CGO_ENABLED=0 GOBIN=/out go install "github.com/STRd6/mcp-language-server@${LSP_BRIDGE_VERSION}"
+
 FROM docker.io/library/debian:trixie-slim
 
 # What the tasks and their graders use: Python 3.13 (stdlib only), bash,
@@ -20,3 +27,9 @@ ARG PI_VERSION=1.4.0
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
  && npm install -g --no-fund --no-audit "@earendil-works/pi-coding-agent@${PI_VERSION}" \
  && pi --version
+
+# The MCP variant's language server and its bridge (H-16); unused otherwise.
+ARG PYRIGHT_VERSION=1.1.414
+RUN npm install -g --no-fund --no-audit "pyright@${PYRIGHT_VERSION}" \
+ && pyright --version && command -v pyright-langserver
+COPY --from=go /out/mcp-language-server /usr/local/bin/mcp-language-server

@@ -13,7 +13,7 @@ agent or model does, and don't re-run it for more trials.
 
 | Path | |
 |---|---|
-| `Containerfile` | The trial image (`localhost/psi-eval:latest`): Debian trixie, Python 3.13, git, make, gcc, ripgrep, Node.js and pi 1.4.0 |
+| `Containerfile` | The trial image (`localhost/psi-eval:latest`): Debian trixie, Python 3.13, git, make, gcc, ripgrep, Node.js and pi 1.4.0; pyright and an MCP language-server bridge for the `lsp` variant |
 | `code/<task>/prompt.md` | The request, as a developer would write it |
 | `code/<task>/repo/` | The starting project |
 | `code/<task>/reference/` | A correct solution's files, overlaid on `repo/` |

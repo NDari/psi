@@ -738,7 +738,7 @@ Each is a claim from Heimdall (H) or general practice, with Psi's default until 
 | H-13 | 40 steps is enough; more mostly adds tokens | Heimdall | 40 | Step-cap sweep |
 | H-14 | Psi matches or beats pi on the quick set | Goal | n/a | Pi baseline in Phase 1; every phase after |
 | H-15 | A scout sub-agent keeps the parent's context smaller without losing passes | Claude Code, Codex | Off until shown | Eval variant with `subagents` on |
-| H-16 | The 35B calls MCP tools correctly (names, arguments, read-only vs asking), and language-server tools help on multi-file changes | Claude Code, Codex, pi | No servers by default | Eval variant with an MCP server in the image (`experiments.md`); not run yet |
+| H-16 | The 35B calls MCP tools correctly (names, arguments, read-only vs asking), and language-server tools help on multi-file changes | Claude Code, Codex, pi | No servers by default | Eval variant `evals/variants/lsp` (pyright through an MCP bridge, in the image). 2026-11-01: 10 of 12 pass, no MCP call in any trial though offered on every request; the model uses such tools when the request points at them (hands-on), not on its own (`experiments.md`) |
 
 **Results** (directional, one run each; 2026-11-01 unless noted). Phase 7 is scoped to the 35B-class daily driver (D-39), so questions only small models raise are closed with the evidence at hand or left to the counters:
 

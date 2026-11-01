@@ -8,3 +8,8 @@ Each directory here is copied into every psi trial's `~/.psi` with
   tests for the Python ones, `bash -n` for the shell scripts), and one
   skill about checking work. The trial records show whether the model
   calls todo, reads the skill, and what the check fed back.
+- `lsp`: an MCP server (H-16): pyright through the `mcp-language-server`
+  bridge (STRd6 fork, built into the image), offering definition,
+  references, diagnostics, hover and rename_symbol, all without asking
+  (headless trials deny calls that ask). The records show whether the
+  model calls them, with what arguments, and what came back.
