@@ -35,6 +35,10 @@ impl Fixture {
     }
 
     fn agent(&self, budgets: Budgets) -> Agent {
+        self.agent_with(budgets, core_tools(false))
+    }
+
+    fn agent_with(&self, budgets: Budgets, tools: Vec<psi_tools::Tool>) -> Agent {
         let session = SessionFile::create(&self.sessions, &self.cwd).unwrap();
         let ctx = ToolCtx::new(&self.cwd, &self.cwd.join("../tmp"), 20_000);
         let cfg = AgentConfig {
@@ -44,7 +48,7 @@ impl Fixture {
             enable_thinking: None,
             budgets,
             system_prompt: "sys".into(),
-            tools: core_tools(false),
+            tools,
             home: None,
         };
         Agent::new(Client::new(&self.server.base_url()), session, cfg, ctx)
@@ -505,4 +509,239 @@ async fn an_answer_cut_off_by_the_output_limit_continues() {
     );
     let n = a.session().entries().iter().filter(|e| matches!(&e.body, EntryBody::GuardEvent { guard, .. } if guard == "truncated_answer")).count();
     assert_eq!(n, 2);
+}
+
+/// D-36: the check runs once per turn with edits, after the last one that
+/// worked; turns without edits don't run it.
+#[tokio::test]
+async fn post_edit_check_once_per_turn_with_edits() {
+    let f = Fixture::new(vec![
+        Reply::Chat(ScriptedReply {
+            tool_calls: vec![("read".into(), json!({"path": "a"}).to_string())],
+            ..Default::default()
+        }),
+        Reply::Chat(ScriptedReply {
+            tool_calls: vec![
+                (
+                    "write".into(),
+                    json!({"path": "b", "text": "B\n"}).to_string(),
+                ),
+                (
+                    "write".into(),
+                    json!({"path": "c", "text": "C\n"}).to_string(),
+                ),
+                ("bash".into(), json!({"command": "true"}).to_string()),
+            ],
+            ..Default::default()
+        }),
+        call("write", json!({"path": "bad", "text": "x\n"})),
+        text("done"),
+    ]);
+    std::fs::write(f.cwd.join("a"), "A\n").unwrap();
+    // Counts its runs, and fails once the file "bad" exists.
+    let check = psi_agent::PostEditCheck {
+        command: "echo run >> ../checks; test ! -e bad || { echo 'bad: not allowed'; exit 1; }"
+            .into(),
+        timeout_s: 10,
+    };
+    let mut a = f
+        .agent(Budgets::default())
+        .with_post_edit_check(Some(check));
+    let out = a.run("go").await;
+    assert_eq!(out.stop, Stop::Done);
+    let r = tool_results(&a);
+    assert_eq!(r[0], ("1\tA".into(), false));
+    assert!(!r[1].0.contains("post-edit"), "{}", r[1].0);
+    assert!(
+        r[2].0.ends_with(
+            "\n\n[post-edit check passed: `echo run >> ../checks; test ! -e bad || { echo 'bad: not ...`]"
+        ),
+        "{}",
+        r[2].0
+    );
+    assert!(!r[3].0.contains("post-edit"));
+    // A failed check doesn't make the edit a failed call.
+    assert!(!r[4].1);
+    assert!(
+        r[4].0.contains("\n\n[post-edit check failed: `")
+            && r[4].0.ends_with("`]\nbad: not allowed\n[exit code 1]"),
+        "{}",
+        r[4].0
+    );
+    let runs = std::fs::read_to_string(f.cwd.join("../checks")).unwrap();
+    assert_eq!(runs.lines().count(), 2);
+    let recorded = a
+        .session()
+        .entries()
+        .iter()
+        .filter(|e| matches!(&e.body, EntryBody::Custom { custom_type, .. } if custom_type == "post_edit_check"))
+        .count();
+    assert_eq!(recorded, 2);
+}
+
+/// D-34: the todo list lives in the session and follows the branch.
+#[tokio::test]
+async fn todo_list_follows_the_branch() {
+    let f = Fixture::new(vec![
+        Reply::Chat(ScriptedReply {
+            tool_calls: vec![
+                (
+                    "todo".into(),
+                    json!({"action": "add", "text": "a"}).to_string(),
+                ),
+                (
+                    "todos".into(),
+                    json!({"action": "add", "text": "b"}).to_string(),
+                ),
+                (
+                    "todo".into(),
+                    json!({"action": "toggle", "id": "1"}).to_string(),
+                ),
+            ],
+            ..Default::default()
+        }),
+        text("planned"),
+        call("todo", json!({"action": "list"})),
+        text("listed"),
+        call("todo", json!({"action": "list"})),
+        text("empty"),
+    ]);
+    let mut tools = core_tools(false);
+    tools.push(psi_tools::Tool::Todo);
+    let mut a = f.agent_with(Budgets::default(), tools);
+    a.run("plan").await;
+    let first_prompt = a
+        .session()
+        .entries()
+        .iter()
+        .find(|e| {
+            matches!(
+                &e.body,
+                EntryBody::Message {
+                    role: psi_session::Role::User,
+                    ..
+                }
+            )
+        })
+        .and_then(|e| e.parent_id.clone())
+        .unwrap();
+    a.run("list them").await;
+    let r = tool_results(&a);
+    assert_eq!(r[0].0, "Added #1: a");
+    assert_eq!(r[1].0, "Added #2: b", "the alias resolves to todo");
+    assert_eq!(r[2].0, "#1 is done: a");
+    assert_eq!(r[3], ("[x] #1: a\n[ ] #2: b".into(), false));
+    // The todo calls didn't make checkpoints or ask.
+    assert!(
+        !a.session().entries().iter().any(
+            |e| matches!(&e.body, EntryBody::Checkpoint { trigger: Some(t), .. } if t == "tool")
+        )
+    );
+    // Back before the first prompt: no todos on that branch.
+    a.session_mut().set_leaf(&first_prompt).unwrap();
+    a.run("again").await;
+    assert_eq!(tool_results(&a).last().unwrap().0, "No todos.");
+}
+
+/// D-34: plan mode offers no write or edit, runs only read-only bash, adds
+/// its context, and takes the plan from the answer; carrying it out tracks
+/// [DONE:n] markers.
+#[tokio::test]
+async fn plan_mode_then_carry_out_the_plan() {
+    let f = Fixture::new(vec![
+        Reply::Chat(ScriptedReply {
+            tool_calls: vec![
+                (
+                    "write".into(),
+                    json!({"path": "a.txt", "text": "x"}).to_string(),
+                ),
+                ("bash".into(), json!({"command": "ls; rm -f b"}).to_string()),
+                ("bash".into(), json!({"command": "ls | sort"}).to_string()),
+            ],
+            ..Default::default()
+        }),
+        text("Looked.\n\nPlan:\n1. Create `a.txt`\n2. Check it\n"),
+        call("write", json!({"path": "a.txt", "text": "x\n"})),
+        text("Created it. [DONE:1]"),
+        text("Checked. [DONE:2]"),
+    ]);
+    std::fs::write(f.cwd.join("b"), "keep").unwrap();
+    let mut a = f.agent(Budgets::default());
+    a.set_plan_mode(true).unwrap();
+    let out = a.run("add a.txt").await;
+    assert_eq!(out.stop, Stop::Done);
+    let r = tool_results(&a);
+    assert_eq!(
+        r[0],
+        (
+            "write is off in plan mode. Put the change in your plan instead.".into(),
+            true
+        )
+    );
+    assert!(
+        r[1].1 && r[1].0.contains("rm isn't on the read-only list"),
+        "{}",
+        r[1].0
+    );
+    assert!(!r[2].1);
+    assert!(f.cwd.join("b").exists(), "the refused rm never ran");
+    let reqs = f.server.chat_requests();
+    let tools: Vec<&str> = reqs[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["function"]["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(tools, ["read", "bash"]);
+    let user = reqs[0]["messages"][1]["content"].as_str().unwrap();
+    assert!(
+        user.starts_with("add a.txt\n\n[Plan mode] Explore and plan only"),
+        "{user}"
+    );
+    let steps: Vec<&str> = a.plan().steps.iter().map(|s| s.text.as_str()).collect();
+    assert_eq!(steps, ["Create a.txt", "Check it"]);
+
+    let prompt = a.start_plan().unwrap();
+    assert!(prompt.contains("\n1. Create a.txt\n2. Check it\n"));
+    a.run(&prompt).await;
+    assert_eq!(std::fs::read_to_string(f.cwd.join("a.txt")).unwrap(), "x\n");
+    assert!(a.plan().executing);
+    assert_eq!(a.plan().done_count(), 1);
+    let reqs = f.server.chat_requests();
+    assert_eq!(
+        reqs[2]["tools"].as_array().unwrap().len(),
+        4,
+        "write and edit are back"
+    );
+    a.run("check it").await;
+    assert_eq!(a.plan().done_count(), 2);
+    assert!(!a.plan().executing, "all steps done");
+    // The state is in the session: a reopened branch has it.
+    let snapshot = a.plan().clone();
+    a.restore_plan();
+    assert_eq!(*a.plan(), snapshot);
+}
+
+/// Turning plan mode off by hand tells the model with the next prompt.
+#[tokio::test]
+async fn plan_mode_off_says_so_once() {
+    let f = Fixture::new(vec![text("p"), text("q"), text("r")]);
+    let mut a = f.agent(Budgets::default());
+    a.set_plan_mode(true).unwrap();
+    a.run("one").await;
+    a.set_plan_mode(false).unwrap();
+    a.run("two").await;
+    a.run("three").await;
+    let reqs = f.server.chat_requests();
+    let last = |i: usize| {
+        reqs[i]["messages"].as_array().unwrap().last().unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(
+        last(1),
+        "two\n\n[Plan mode is off: all tools are available again.]"
+    );
+    assert_eq!(last(2), "three");
 }

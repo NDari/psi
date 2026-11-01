@@ -594,6 +594,16 @@ fn install(
             Ok(())
         })?,
     )?;
+    // test.providers(): what psi.register_provider registered.
+    let st = s.clone();
+    t.set(
+        "providers",
+        lua.create_function(move |lua, ()| {
+            let list: Vec<_> = st.host.reg.borrow().providers.values().cloned().collect();
+            let v = serde_json::to_value(list).map_err(mlua::Error::external)?;
+            to_lua(lua, &v)
+        })?,
+    )?;
     let sh = s.host.shared.clone();
     t.set(
         "set_entries",

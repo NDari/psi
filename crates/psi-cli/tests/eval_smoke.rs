@@ -56,10 +56,21 @@ fn run(agent: &str) {
     let server = ReplayServer::start(script()).unwrap();
     server.set_n_ctx(16384);
     let results = tempfile::tempdir().unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_psi"))
+    // psi trials run with a variant (--psi-config): the post-edit check on.
+    let config = results.path().join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("settings.jsonc"),
+        r#"{ "post_edit_check": "python3 -m unittest -q" }"#,
+    )
+    .unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_psi"));
+    cmd.args(["eval", "run"]);
+    if agent == "psi" {
+        cmd.arg("--psi-config").arg(&config);
+    }
+    let out = cmd
         .args([
-            "eval",
-            "run",
             "--agent",
             agent,
             "--tasks",
@@ -98,7 +109,15 @@ fn run(agent: &str) {
     let session = results
         .path()
         .join("run/fix_invoice_rounding/trial-0/session.jsonl");
-    assert!(std::fs::metadata(session).unwrap().len() > 0, "{agent}");
+    let text = std::fs::read_to_string(session).unwrap();
+    assert!(!text.is_empty(), "{agent}");
+    if agent == "psi" {
+        assert!(
+            text.contains(r#""custom_type":"post_edit_check""#)
+                && text.contains(r#""passed":true"#),
+            "the variant's post-edit check ran in the trial"
+        );
+    }
 }
 
 #[test]

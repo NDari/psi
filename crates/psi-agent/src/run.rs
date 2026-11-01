@@ -27,6 +27,8 @@ use crate::events::AgentEvent;
 use crate::ext::{Callable, decide, invoke, schema_of, tool_runner};
 use crate::guards::{GuardAction, Guards};
 use crate::messages::{build_messages, plan_drop};
+use crate::plan::{self, PlanState};
+use crate::post_edit::{self, PostEditCheck};
 use psi_ext::{AgentRequest, ExtManager, Gate, ToolInfo};
 
 /// Limits on one run (§5). Reaching one stops a headless run.
@@ -169,6 +171,14 @@ pub struct Agent {
     active: Option<Vec<String>>,
     /// before_agent_start: text added to the system prompt for this run.
     run_system: String,
+    /// Run after a turn whose write or edit calls changed files (D-36).
+    post_edit: Option<PostEditCheck>,
+    /// Plan mode (D-34).
+    plan: PlanState,
+    /// Plan mode was turned off by hand: say so with the next prompt.
+    plan_off_note: bool,
+    /// The plan state changed before the session had its first entry.
+    plan_unrecorded: bool,
 }
 
 /// A call after the shape-fix pipeline: the tool and its arguments, or the
@@ -211,6 +221,10 @@ impl Agent {
             ext_tools: Vec::new(),
             active: None,
             run_system: String::new(),
+            post_edit: None,
+            plan: PlanState::default(),
+            plan_off_note: false,
+            plan_unrecorded: false,
         }
         .with_abort_token()
     }
@@ -265,12 +279,15 @@ impl Agent {
         self.ext.update_shared(|s| s.active_tools = names);
     }
 
-    /// The tools offered to the model, core first.
+    /// The tools offered to the model, core first. Plan mode leaves out
+    /// write and edit (pi parity).
     fn tool_names(&self) -> Vec<String> {
+        let planning = self.plan.enabled;
         let all = self
             .cfg
             .tools
             .iter()
+            .filter(|t| !(planning && matches!(t, Tool::Write | Tool::Edit)))
             .map(|t| t.name().to_owned())
             .chain(self.ext_tools.iter().map(|(t, _)| t.name.clone()));
         match &self.active {
@@ -346,9 +363,90 @@ impl Agent {
         self.session = session;
         self.safety.checkpoints = checkpoints;
         self.capture_failing = false;
+        self.restore_plan();
         if let Ok(mut f) = self.ctx.files.lock() {
             *f = psi_tools::FileTracker::default();
         }
+    }
+
+    pub fn plan(&self) -> &PlanState {
+        &self.plan
+    }
+
+    /// Turns plan mode on or off (/plan, --plan). Turning it on drops a plan
+    /// being carried out; turning it off tells the model with the next prompt.
+    pub fn set_plan_mode(&mut self, on: bool) -> Result<(), String> {
+        if self.plan.enabled == on {
+            return Ok(());
+        }
+        self.plan_off_note = !on;
+        self.plan.enabled = on;
+        if on {
+            self.plan.executing = false;
+            self.plan.steps.clear();
+        }
+        self.refresh_tool_names();
+        self.record_plan()
+    }
+
+    /// Leaves plan mode to carry out the proposed plan; returns the prompt
+    /// that starts it.
+    pub fn start_plan(&mut self) -> Result<String, String> {
+        if self.plan.steps.is_empty() {
+            return Err("there is no plan to carry out".into());
+        }
+        self.plan.enabled = false;
+        self.plan.executing = true;
+        self.plan_off_note = false;
+        for s in &mut self.plan.steps {
+            s.done = false;
+        }
+        self.refresh_tool_names();
+        self.record_plan()?;
+        Ok(plan::execute_prompt(&self.plan.steps))
+    }
+
+    /// Plan mode as the current branch last left it (/resume, -c).
+    pub fn restore_plan(&mut self) {
+        self.plan = self
+            .session
+            .branch()
+            .iter()
+            .rev()
+            .find_map(|e| match &e.body {
+                EntryBody::Custom { custom_type, data } if custom_type == "plan" => {
+                    Some(PlanState::from_json(data))
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+        self.refresh_tool_names();
+    }
+
+    fn record_plan(&mut self) -> Result<(), String> {
+        // session_info stays the first entry; the run records this after it.
+        if self.session.entries().is_empty() {
+            self.plan_unrecorded = true;
+            return Ok(());
+        }
+        self.plan_unrecorded = false;
+        let data = self.plan.to_json();
+        self.record(EntryBody::Custom {
+            custom_type: "plan".into(),
+            data,
+        })
+        .map(|_| ())
+    }
+
+    fn refresh_tool_names(&self) {
+        let names = self.tool_names();
+        self.ext.update_shared(|s| s.active_tools = names);
+    }
+
+    /// The project's check command, run after turns that edited files.
+    pub fn with_post_edit_check(mut self, check: Option<PostEditCheck>) -> Self {
+        self.post_edit = check;
+        self
     }
 
     pub fn with_safety(mut self, safety: Safety) -> Self {
@@ -452,6 +550,18 @@ impl Agent {
             Ok(s) => s,
             Err(e) => Stop::Failed(e),
         };
+        if self.plan.enabled && out.stop == Stop::Done {
+            let steps = plan::extract_steps(&out.text);
+            if !steps.is_empty() {
+                self.plan.steps = steps
+                    .into_iter()
+                    .map(|text| plan::Step { text, done: false })
+                    .collect();
+                if let Err(e) = self.record_plan() {
+                    out.stop = Stop::Failed(e);
+                }
+            }
+        }
         self.run_system.clear();
         self.ext
             .notify(
@@ -478,9 +588,18 @@ impl Agent {
                              "safety": self.safety.info}),
             })?;
         }
+        if self.plan_unrecorded {
+            self.record_plan()?;
+        }
         // At submit: this also captures the user's own edits (§7.2).
         self.capture("submit", None).await?;
+        self.restore_todos();
         self.record(Self::user_message(input))?;
+        if self.plan.enabled {
+            self.add_context("plan_mode", plan::PLAN_CONTEXT)?;
+        } else if std::mem::take(&mut self.plan_off_note) {
+            self.add_context("plan_mode", plan::PLAN_OFF)?;
+        }
         self.share_session();
         self.apply_ext_requests()?;
         let start_ev = json!({"prompt": input, "system": ""});
@@ -563,6 +682,12 @@ impl Agent {
             overflow_retries = 0;
             out.text = resp.text.clone();
             self.record_assistant(&resp)?;
+            if self.plan.executing && self.plan.mark_done(&resp.text) {
+                if self.plan.done_count() == self.plan.steps.len() {
+                    self.plan.executing = false;
+                }
+                self.record_plan()?;
+            }
             if self.ext.listens("message_end") {
                 let calls: Vec<Value> = resp
                     .tool_calls
@@ -811,6 +936,14 @@ impl Agent {
                         .filter(|c| offered.iter().any(|n| n == c.name()))
                     {
                         Some(c) => Ok((c, f.args)),
+                        None if self.plan.enabled
+                            && matches!(f.name.as_str(), "write" | "edit") =>
+                        {
+                            Err(format!(
+                                "{} is off in plan mode. Put the change in your plan instead.",
+                                f.name
+                            ))
+                        }
                         None => Err(format!("There is no tool named '{}'.", f.name)),
                     }
                 }
@@ -947,6 +1080,7 @@ impl Agent {
                 tool_call_id: Some(id),
             })?;
         }
+        self.post_edit_check(&planned, &mut outputs).await?;
 
         for ((call, p), o) in planned.iter().zip(outputs) {
             let name = match p {
@@ -968,6 +1102,40 @@ impl Agent {
         Ok((planned.len() as u32, pause))
     }
 
+    /// D-36: once per turn, after the last write or edit that worked, run the
+    /// project's check and add its summary to that call's result.
+    async fn post_edit_check(
+        &mut self,
+        planned: &[(RawToolCall, Planned)],
+        outputs: &mut [ToolOutput],
+    ) -> Result<(), String> {
+        let Some(check) = self.post_edit.clone() else {
+            return Ok(());
+        };
+        let last = planned.iter().zip(outputs.iter()).rposition(|((_, p), o)| {
+            !o.is_error && matches!(p, Ok((Callable::Core(Tool::Write | Tool::Edit), _)))
+        });
+        let Some(i) = last else { return Ok(()) };
+        if self.ctx.cancel.is_cancelled() {
+            return Ok(());
+        }
+        let args = json!({"command": check.command, "timeout": check.timeout_s});
+        let Value::Object(args) = args else {
+            return Ok(());
+        };
+        let started = Instant::now();
+        let out = psi_tools::bash::run(args, &self.ctx, false).await;
+        self.record(EntryBody::Custom {
+            custom_type: "post_edit_check".into(),
+            data: json!({"tool_call_id": planned[i].0.id, "command": check.command,
+                         "passed": !out.is_error, "ms": started.elapsed().as_millis() as u64}),
+        })?;
+        let o = &mut outputs[i];
+        o.text.push_str("\n\n");
+        o.text.push_str(&post_edit::summary(&check.command, &out));
+        Ok(())
+    }
+
     /// One call that may change something: the policy decides whether it
     /// runs, asks or is refused; a blocked bash write offers the user a
     /// rerun (D-23); a checkpoint follows.
@@ -978,6 +1146,12 @@ impl Agent {
         args: &serde_json::Map<String, Value>,
         preceding: &str,
     ) -> Result<ToolOutput, String> {
+        if self.plan.enabled
+            && let Some(why) = self.plan_refusal(callable, args)
+        {
+            self.policy(id, "refused", &why)?;
+            return Ok(ToolOutput::err(why));
+        }
         let decision = decide(
             &self.safety.policy,
             callable,
@@ -1030,6 +1204,20 @@ impl Agent {
         }
 
         let mut out = invoke(callable, args, &self.ctx, &self.ext).await;
+        if matches!(callable, Callable::Core(Tool::Todo)) {
+            // Only the list changed: keep a snapshot, no checkpoint.
+            let snap = self
+                .ctx
+                .todos
+                .lock()
+                .map(|l| l.to_json())
+                .unwrap_or_default();
+            self.record(EntryBody::Custom {
+                custom_type: "todo".into(),
+                data: snap,
+            })?;
+            return Ok(out);
+        }
         if matches!(callable, Callable::Core(Tool::Bash))
             && out.is_error
             && let Some(sb) = self.ctx.sandbox.clone()
@@ -1091,6 +1279,48 @@ impl Agent {
             self.turn_changed = true;
         }
         Ok(out)
+    }
+
+    /// Why plan mode doesn't run a call: bash that isn't read-only, or an
+    /// extension tool that may change things.
+    fn plan_refusal(
+        &self,
+        callable: &Callable,
+        args: &serde_json::Map<String, Value>,
+    ) -> Option<String> {
+        match callable {
+            Callable::Core(Tool::Bash) => {
+                let cmd = args.get("command").and_then(Value::as_str).unwrap_or("");
+                psi_safety::read_only::check(cmd).err().map(|why| {
+                    format!("Not run: plan mode allows only read-only commands, and {why}. Put the change in your plan instead.")
+                })
+            }
+            Callable::Ext(i) if !i.read_only => Some(format!(
+                "Not run: {} may change things, and plan mode allows only reading. Put it in your plan instead.",
+                i.name
+            )),
+            _ => None,
+        }
+    }
+
+    /// The todo list as the current branch last left it, so it follows
+    /// /tree, /rewind and /resume.
+    fn restore_todos(&mut self) {
+        let list = self
+            .session
+            .branch()
+            .iter()
+            .rev()
+            .find_map(|e| match &e.body {
+                EntryBody::Custom { custom_type, data } if custom_type == "todo" => {
+                    Some(psi_tools::TodoList::from_json(data))
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+        if let Ok(mut l) = self.ctx.todos.lock() {
+            *l = list;
+        }
     }
 
     /// The model's message for a denied call.

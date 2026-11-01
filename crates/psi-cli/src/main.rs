@@ -14,7 +14,7 @@ use tracing_subscriber::EnvFilter;
 
 /// A coding agent harness for local models.
 #[derive(Debug, Parser)]
-#[command(name = "psi", version)]
+#[command(name = "psi", version, disable_help_subcommand = true)]
 struct Cli {
     /// Run one prompt and print the answer ("-" reads the prompt from stdin).
     #[arg(short = 'p', long = "print", value_name = "PROMPT")]
@@ -68,6 +68,10 @@ struct Cli {
     #[arg(long)]
     trust_project: bool,
 
+    /// Start in plan mode: read-only exploration that ends with a numbered plan.
+    #[arg(long)]
+    plan: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -114,6 +118,26 @@ enum Command {
     /// Extension author tools: lint and test an extension.
     #[command(subcommand)]
     Ext(ExtCommand),
+    /// Add a package (a local directory, or git:host/user/repo[@ref]) with its extensions, skills, prompts and themes.
+    Install {
+        source: String,
+        /// In this project's .psi/settings.jsonc instead of ~/.psi.
+        #[arg(short = 'l', long)]
+        local: bool,
+    },
+    /// Remove a package; a git clone is deleted.
+    #[command(alias = "uninstall")]
+    Remove {
+        source: String,
+        #[arg(short = 'l', long)]
+        local: bool,
+    },
+    /// Fetch git packages again: pinned ones to their ref, the rest to their branch.
+    Update { source: Option<String> },
+    /// List the installed packages.
+    List,
+    /// Short answers about psi's features, for you and the model.
+    Help { topic: Option<String> },
 }
 
 #[derive(Debug, Subcommand)]
@@ -198,6 +222,10 @@ enum EvalCommand {
         /// the Debian image: `just eval-build` makes a static one.
         #[arg(long, value_name = "PATH")]
         psi_binary: Option<PathBuf>,
+        /// A directory copied into each psi trial's ~/.psi (settings.jsonc,
+        /// skills/, prompts/): a variant, like a battery turned on.
+        #[arg(long, value_name = "DIR")]
+        psi_config: Option<PathBuf>,
     },
     /// Two runs side by side, pointing to the trials that changed.
     Diff { a: PathBuf, b: PathBuf },
@@ -268,6 +296,13 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Some(Command::Replay(args)) => runtime()?.block_on(replay_command(args)),
         Some(Command::ReplayServer(args)) => replay_server_command(args),
         Some(Command::Ext(cmd)) => ext_command(cmd),
+        Some(
+            cmd @ (Command::Install { .. }
+            | Command::Remove { .. }
+            | Command::Update { .. }
+            | Command::List),
+        ) => package_command(cmd),
+        Some(Command::Help { topic }) => help_command(topic.as_deref()),
         None => {
             let cwd = std::env::current_dir().context("reading the working directory")?;
             let home = std::env::home_dir();
@@ -292,6 +327,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 extensions: cli.extensions,
                 ext_flags: cli.ext_flags,
                 project_trusted: trusted,
+                plan: cli.plan,
             };
             if interactive {
                 if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
@@ -377,6 +413,65 @@ fn ext_command(cmd: ExtCommand) -> Result<ExitCode> {
     }
 }
 
+fn package_command(cmd: Command) -> Result<ExitCode> {
+    use psi_cli::packages::{self, Paths, Scope};
+    let paths = Paths {
+        home: std::env::home_dir().context("no home directory")?,
+        cwd: std::env::current_dir().context("reading the working directory")?,
+    };
+    let scope = |local: bool| if local { Scope::Project } else { Scope::User };
+    match cmd {
+        Command::Install { source, local } => {
+            println!("{}", packages::install(&paths, scope(local), &source)?)
+        }
+        Command::Remove { source, local } => {
+            println!("{}", packages::remove(&paths, scope(local), &source)?)
+        }
+        Command::Update { source } => {
+            let done = packages::update(&paths, source.as_deref())?;
+            if done.is_empty() {
+                println!("no git packages to update");
+            }
+            for d in done {
+                println!("{d}");
+            }
+        }
+        _ => {
+            let mut any = false;
+            for (scope, title) in [(Scope::User, "user"), (Scope::Project, "project")] {
+                let list = packages::listed(&paths, scope)?;
+                if list.is_empty() {
+                    continue;
+                }
+                any = true;
+                println!("{title} packages ({}):", paths.settings(scope).display());
+                for p in list {
+                    println!("  {p}");
+                }
+            }
+            if !any {
+                println!("no packages installed");
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn help_command(topic: Option<&str>) -> Result<ExitCode> {
+    use psi_cli::help;
+    match topic {
+        None | Some("topics") => print!("{}", help::topics()),
+        Some(t) => match help::topic(t) {
+            Some(text) => print!("{text}"),
+            None => {
+                print!("no topic '{t}'. {}", help::topics());
+                return Ok(ExitCode::FAILURE);
+            }
+        },
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 fn runtime() -> Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -399,8 +494,9 @@ fn wire_path(p: &Path) -> PathBuf {
 async fn replay_command(args: ReplayArgs) -> Result<ExitCode> {
     let wire = wire_path(&args.path);
     let body = psi_lab::replay::request_at(&wire, args.at)?;
-    let profile = run_mode::pick_profile(std::env::home_dir().as_deref(), args.model.as_deref())?;
-    let client = psi_ai::Client::new(&profile.base_url);
+    let profile =
+        run_mode::pick_profile(std::env::home_dir().as_deref(), args.model.as_deref(), &[])?;
+    let client = psi_ai::Client::new(&profile.base_url).with_headers(&profile.headers);
     let (actions, dist) = psi_lab::replay::replay(&client, body, args.samples).await?;
     if args.samples <= 1 {
         println!("{}", actions.join("\n"));
@@ -517,6 +613,7 @@ fn eval_command(cmd: EvalCommand) -> Result<ExitCode> {
             max_output,
             label,
             psi_binary,
+            psi_config,
         } => {
             check_evals_dir(&common.evals)?;
             let agent = match agent {
@@ -536,6 +633,7 @@ fn eval_command(cmd: EvalCommand) -> Result<ExitCode> {
                 psi_binary: psi_binary
                     .map(|p| std::path::absolute(&p).unwrap_or(p))
                     .or_else(|| std::env::current_exe().ok()),
+                psi_config: psi_config.map(|p| std::path::absolute(&p).unwrap_or(p)),
             };
             let results = eval::run(&cfg, &mut progress)?;
             let summary = std::fs::read_to_string(cfg.results_dir.join("summary.md"))

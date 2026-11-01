@@ -366,3 +366,140 @@ fn print_mode_denies_always_ask_unless_allowed() {
         "{err}"
     );
 }
+
+/// psi.register_provider: `--model name/id` reaches the extension's
+/// endpoint with its key and the model's name.
+#[test]
+fn a_registered_provider_serves_the_model() {
+    let server = ReplayServer::start(vec![text("from the provider")]).unwrap();
+    let e = env_for(&server);
+    let ext = e.home.join("box.lua");
+    std::fs::write(
+        &ext,
+        format!(
+            r#"return {{ name = "box", version = "0.1.0", description = "a provider", setup = function(psi)
+  psi.register_provider("box", {{ base_url = "{}", api_key = "$BOX_TEST_KEY",
+    headers = {{ ["X-Team"] = "psi" }},
+    models = {{ {{ id = "big-model", context_window = 4096, max_output = 300 }} }} }})
+end }}"#,
+            server.base_url()
+        ),
+    )
+    .unwrap();
+    let ext = ext.display().to_string();
+    let missing = Command::new(env!("CARGO_BIN_EXE_psi"))
+        .args(["-p", "hi", "--extension", &ext, "--model", "box/big-model"])
+        .env("HOME", &e.home)
+        .env_remove("BOX_TEST_KEY")
+        .current_dir(&e.project)
+        .output()
+        .unwrap();
+    assert!(!missing.status.success());
+    let err = String::from_utf8_lossy(&missing.stderr);
+    assert!(
+        err.contains("provider box: $BOX_TEST_KEY is not set"),
+        "{err}"
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_psi"))
+        .args(["-p", "hi", "--extension", &ext, "--model", "big-model"])
+        .env("HOME", &e.home)
+        .env("BOX_TEST_KEY", "sekrit")
+        .current_dir(&e.project)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "from the provider"
+    );
+    let chat = server
+        .requests()
+        .into_iter()
+        .find(|r| r.path.ends_with("/chat/completions"))
+        .unwrap();
+    let h = |k: &str| {
+        chat.headers
+            .iter()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.clone())
+    };
+    assert_eq!(h("authorization").as_deref(), Some("Bearer sekrit"));
+    assert_eq!(h("x-team").as_deref(), Some("psi"));
+    let body = chat.json();
+    assert_eq!(body["model"], "big-model");
+    assert_eq!(body["max_tokens"], 300);
+}
+
+/// Packages (G-04): `psi install` lists a local package; its skills,
+/// prompts and extensions load; `psi remove` takes it out again.
+#[test]
+fn a_local_package_installs_and_loads() {
+    let server = ReplayServer::start(vec![text("one"), text("two")]).unwrap();
+    let e = env_for(&server);
+    let pkg = e.home.join("pkgs/kit");
+    std::fs::create_dir_all(pkg.join("skills/deploy")).unwrap();
+    std::fs::create_dir_all(pkg.join("prompts")).unwrap();
+    std::fs::create_dir_all(pkg.join("extensions/hello")).unwrap();
+    std::fs::write(
+        pkg.join("skills/deploy/SKILL.md"),
+        "---\ndescription: Deploys the app.\n---\nRun make deploy.",
+    )
+    .unwrap();
+    std::fs::write(pkg.join("prompts/ship.md"), "Ship $1 now.").unwrap();
+    std::fs::write(
+        pkg.join("extensions/hello/init.lua"),
+        r#"return { name = "hello", version = "1", description = "x", setup = function(psi)
+  psi.on("before_agent_start", function() return { system = "HELLO FROM THE PACKAGE" } end)
+end }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        e.home.join(".psi/settings.jsonc"),
+        "// my settings\n{ \"mode\": \"auto\" }\n",
+    )
+    .unwrap();
+    let out = psi(&e, &["install", "~/pkgs/kit"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let settings = std::fs::read_to_string(e.home.join(".psi/settings.jsonc")).unwrap();
+    assert!(settings.starts_with("// my settings"), "{settings}");
+    assert!(settings.contains(&pkg.display().to_string()), "{settings}");
+    let list = psi(&e, &["list"]);
+    assert!(String::from_utf8_lossy(&list.stdout).contains("user packages"));
+
+    let out = psi(&e, &["-p", "/ship v2"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let reqs = server.chat_requests();
+    let sys = reqs[0]["messages"][0]["content"].as_str().unwrap();
+    assert!(sys.contains("- deploy: Deploys the app."), "{sys}");
+    assert!(sys.contains("HELLO FROM THE PACKAGE"), "{sys}");
+    assert_eq!(reqs[0]["messages"][1]["content"], "Ship v2 now.");
+
+    let out = psi(&e, &["remove", "~/pkgs/kit"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(pkg.exists(), "a local package's files stay");
+    let out = psi(&e, &["-p", "hi"]);
+    assert!(out.status.success());
+    let sys = server.chat_requests()[1]["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(!sys.contains("deploy"), "{sys}");
+    let again = psi(&e, &["remove", "~/pkgs/kit"]);
+    assert!(!again.status.success());
+}

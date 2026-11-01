@@ -9,5 +9,6 @@ pub mod checkpoint;
 pub mod git;
 pub mod isolation;
 pub mod policy;
+pub mod read_only;
 
 pub use isolation::{Isolation, Sandbox, SandboxConfig};

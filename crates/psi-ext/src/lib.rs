@@ -20,7 +20,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::oneshot;
 
 pub use actor::{Actor, EventOut, Kind};
-pub use host::{Registrations, Request, Shared, ToolInfo};
+pub use host::{ProviderInfo, ProviderModel, Registrations, Request, Shared, ToolInfo};
 pub use limits::Limits;
 pub use load::{ScriptTool, Source};
 
@@ -393,6 +393,16 @@ impl ExtManager {
         });
         rx.await
             .unwrap_or_else(|_| Err(format!("the {} extension stopped", a.name)))
+    }
+
+    /// Providers from `psi.register_provider`; a later extension's wins.
+    pub fn providers(&self) -> Vec<ProviderInfo> {
+        let mut out: Vec<ProviderInfo> = Vec::new();
+        for p in self.actors().iter().flat_map(|a| a.regs.providers.clone()) {
+            out.retain(|q| q.name != p.name);
+            out.push(p);
+        }
+        out
     }
 
     pub fn shortcuts(&self) -> Vec<(String, String)> {

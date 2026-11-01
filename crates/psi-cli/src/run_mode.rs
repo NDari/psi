@@ -12,6 +12,7 @@ use psi_agent::{Agent, AgentConfig, Budgets, Stop};
 use psi_ai::profile::{ContextWindow, ModelProfile};
 use psi_ai::{AiError, Client, WireLog};
 use psi_cli::config;
+use psi_cli::resources::{Resources, Sources};
 use psi_cli::safety::{SafetySetup, SetupPaths, setup_with};
 use psi_ext::{ExtManager, Limits, Request as ExtRequest, Shared};
 use psi_session::SessionFile;
@@ -45,6 +46,8 @@ pub struct RunArgs {
     pub ext_flags: Vec<String>,
     /// The project's own .psi may load (§9.3).
     pub project_trusted: bool,
+    /// Start in plan mode (D-34).
+    pub plan: bool,
 }
 
 /// Exit codes: 0 done, 1 failed, 3 a budget stopped the run, 130 aborted.
@@ -57,14 +60,86 @@ pub fn exit_code(stop: &Stop) -> ExitCode {
     })
 }
 
-pub fn pick_profile(home: Option<&Path>, model: Option<&str>) -> Result<ModelProfile> {
+/// `$NAME` reads the environment (pi parity); anything else is literal.
+fn env_value(v: &str, what: &str) -> Result<String> {
+    match v.strip_prefix('$') {
+        Some(name) if !name.is_empty() => {
+            std::env::var(name).with_context(|| format!("{what}: ${name} is not set"))
+        }
+        _ => Ok(v.to_owned()),
+    }
+}
+
+/// The models extensions registered (`psi.register_provider`), as
+/// profiles, each with the name `provider/id`.
+fn provider_profiles(providers: &[psi_ext::ProviderInfo]) -> Vec<(String, ModelProfile)> {
+    let mut out = Vec::new();
+    for p in providers {
+        for m in &p.models {
+            let mut profile = ModelProfile::local();
+            profile.id = m.id.clone();
+            profile.base_url = p.base_url.clone();
+            if let Some(n) = m.context_window {
+                profile.context_window = ContextWindow::Tokens(n);
+            }
+            if let Some(n) = m.max_output {
+                profile.max_output = n;
+            }
+            profile.reasoning.enable_thinking = m.enable_thinking;
+            profile.provider = p.name.clone();
+            out.push((format!("{}/{}", p.name, m.id), profile));
+        }
+    }
+    out
+}
+
+/// The request headers a registered provider needs, with `$NAME` read now.
+fn provider_headers(
+    profile: &ModelProfile,
+    providers: &[psi_ext::ProviderInfo],
+) -> Result<Vec<(String, String)>> {
+    let Some(p) = providers.iter().find(|p| p.name == profile.provider) else {
+        return Ok(Vec::new());
+    };
+    let what = format!("provider {}", p.name);
+    let mut h = Vec::new();
+    if let Some(k) = &p.api_key {
+        h.push((
+            "Authorization".into(),
+            format!("Bearer {}", env_value(k, &what)?),
+        ));
+    }
+    for (k, v) in &p.headers {
+        h.push((k.clone(), env_value(v, &what)?));
+    }
+    Ok(h)
+}
+
+pub fn pick_profile(
+    home: Option<&Path>,
+    model: Option<&str>,
+    providers: &[psi_ext::ProviderInfo],
+) -> Result<ModelProfile> {
     let models = config::load_models(home)?;
     match model {
-        Some(id) => models
-            .models
-            .into_iter()
-            .find(|m| m.id == id)
-            .with_context(|| format!("no model '{id}' in ~/.psi/models.jsonc")),
+        Some(id) => {
+            let mut p = match models.models.into_iter().find(|m| m.id == id) {
+                Some(p) => p,
+                None => {
+                    let registered = provider_profiles(providers);
+                    registered
+                        .iter()
+                        .find(|(full, _)| full == id)
+                        .or_else(|| registered.iter().find(|(_, p)| p.id == id))
+                        .map(|(_, p)| p.clone())
+                        .with_context(|| {
+                            format!("no model '{id}' in ~/.psi/models.jsonc or from an extension")
+                        })?
+                }
+            };
+            p.headers = provider_headers(&p, providers)?;
+            Ok(p)
+        }
         None => Ok(models
             .models
             .into_iter()
@@ -91,6 +166,8 @@ pub struct Prepared {
     pub ext_requests: UnboundedReceiver<(String, ExtRequest)>,
     /// What `/reload` loads again.
     pub ext_sources: ExtSources,
+    /// Skills and prompt templates (D-35).
+    pub resources: Arc<Resources>,
 }
 
 /// Where extensions come from, for loading and `/reload`.
@@ -99,11 +176,23 @@ pub struct ExtSources {
     pub home: Option<PathBuf>,
     pub project: Option<PathBuf>,
     pub extra: Vec<PathBuf>,
+    /// Packages' extension directories, each holding extensions.
+    pub dirs: Vec<PathBuf>,
 }
 
 impl ExtSources {
     pub fn find(&self) -> (Vec<psi_ext::Source>, Vec<String>) {
-        psi_ext::sources(self.home.as_deref(), self.project.as_deref(), &self.extra)
+        let (mut found, mut errors) =
+            psi_ext::sources(self.home.as_deref(), self.project.as_deref(), &self.extra);
+        for d in &self.dirs {
+            for r in psi_ext::load::discover(d) {
+                match r {
+                    Ok(s) => found.push(s),
+                    Err(e) => errors.push(e),
+                }
+            }
+        }
+        (found, errors)
     }
 }
 
@@ -141,8 +230,60 @@ async fn start_extensions(
 pub async fn prepare(args: &RunArgs, approver: Arc<dyn Approver>) -> Result<Prepared> {
     let home = std::env::home_dir();
     let cwd = std::env::current_dir().context("reading the working directory")?;
-    let profile = pick_profile(home.as_deref(), args.model.as_deref())?;
-    let client = Client::new(&profile.base_url);
+    // Packages (G-04): their resources load after the user's own.
+    let mut pkg_warnings = Vec::new();
+    let pkgs = match &home {
+        Some(h) => {
+            let paths = psi_cli::packages::Paths {
+                home: h.clone(),
+                cwd: cwd.clone(),
+            };
+            let (c, w) = psi_cli::packages::installed(&paths, args.project_trusted);
+            pkg_warnings = w;
+            c
+        }
+        None => Vec::new(),
+    };
+    // Extensions start first: they may register the model's provider.
+    let mut extra = args.extensions.clone();
+    extra.extend(pkgs.iter().flat_map(|p| p.extensions.clone()));
+    let ext_sources = ExtSources {
+        home: home.clone(),
+        project: args.project_trusted.then(|| cwd.clone()),
+        extra,
+        dirs: pkgs.iter().flat_map(|p| p.extension_dirs.clone()).collect(),
+    };
+    let mut flags = std::collections::BTreeMap::new();
+    for f in &args.ext_flags {
+        let Some((k, v)) = f.split_once('=') else {
+            bail!("--ext-flag {f}: use NAME=VALUE");
+        };
+        flags.insert(k.to_owned(), v.to_owned());
+    }
+    let mode = if args.prompt.is_empty() && !args.json {
+        "interactive"
+    } else if args.json {
+        "json"
+    } else {
+        "print"
+    };
+    let shared = Shared {
+        cwd: cwd.display().to_string(),
+        mode: mode.into(),
+        has_ui: mode == "interactive",
+        flags,
+        ..Shared::default()
+    };
+    let mut ext_warnings = Vec::new();
+    let (ext, ext_requests) = start_extensions(&ext_sources, shared, &mut ext_warnings).await;
+
+    let profile = match pick_profile(home.as_deref(), args.model.as_deref(), &ext.providers()) {
+        Ok(p) => p,
+        // An extension that failed to load may be the one with the model.
+        Err(e) if !ext_warnings.is_empty() => bail!("{e:#}\n{}", ext_warnings.join("\n")),
+        Err(e) => return Err(e),
+    };
+    let client = Client::new(&profile.base_url).with_headers(&profile.headers);
 
     // D-09: the template must support tool calls; take the window from /props.
     let n_ctx = match client.props().await {
@@ -207,13 +348,32 @@ pub async fn prepare(args: &RunArgs, approver: Arc<dyn Approver>) -> Result<Prep
         },
         approver,
     )?;
-    let tools = core_tools(profile.tools.grep_find_ls);
+    let resources = Arc::new(load_resources(
+        &args.settings,
+        home.as_deref(),
+        &cwd,
+        args.project_trusted,
+        &pkgs,
+    ));
+    let mut warnings = warnings;
+    warnings.extend(pkg_warnings);
+    warnings.extend(resources.warnings.iter().cloned());
+    let mut tools = core_tools(profile.tools.grep_find_ls);
+    if args.settings["todo"].as_bool() == Some(true) {
+        tools.push(psi_tools::Tool::Todo);
+    }
     let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
     let facts = PromptFacts {
         checkpoints: safety.checkpoints.is_some(),
         sandboxed: sandbox.is_some(),
     };
-    let system = system_prompt(&names, &cwd, &project_context(&cwd, home.as_deref()), facts);
+    let system = system_prompt(
+        &names,
+        &cwd,
+        &project_context(&cwd, home.as_deref()),
+        &resources.prompt_skills(),
+        facts,
+    );
     let max_chars = (n_ctx as f64 * RESULT_SHARE * CHARS_PER_TOKEN) as usize;
     let mut ctx = ToolCtx::new(&cwd, &tmpdir, max_chars);
     ctx.sandbox = sandbox;
@@ -232,37 +392,17 @@ pub async fn prepare(args: &RunArgs, approver: Arc<dyn Approver>) -> Result<Prep
         home: home.clone(),
     };
     let info = safety.info.clone();
-    let ext_sources = ExtSources {
-        home: home.clone(),
-        project: args.project_trusted.then(|| cwd.clone()),
-        extra: args.extensions.clone(),
-    };
-    let mut flags = std::collections::BTreeMap::new();
-    for f in &args.ext_flags {
-        let Some((k, v)) = f.split_once('=') else {
-            bail!("--ext-flag {f}: use NAME=VALUE");
-        };
-        flags.insert(k.to_owned(), v.to_owned());
-    }
-    let mode = if args.prompt.is_empty() && !args.json {
-        "interactive"
-    } else if args.json {
-        "json"
-    } else {
-        "print"
-    };
-    let shared = Shared {
-        cwd: cwd.display().to_string(),
-        mode: mode.into(),
-        has_ui: mode == "interactive",
-        flags,
-        ..Shared::default()
-    };
-    let mut warnings = warnings;
-    let (ext, ext_requests) = start_extensions(&ext_sources, shared, &mut warnings).await;
-    let agent = Agent::new(client, session, cfg, ctx)
+    warnings.extend(ext_warnings);
+    let post_edit = psi_agent::PostEditCheck::from_setting(&args.settings["post_edit_check"])
+        .map_err(anyhow::Error::msg)?;
+    let mut agent = Agent::new(client, session, cfg, ctx)
         .with_safety(safety)
-        .with_extensions(ext.clone());
+        .with_extensions(ext.clone())
+        .with_post_edit_check(post_edit);
+    agent.restore_plan();
+    if args.plan {
+        agent.set_plan_mode(true).map_err(anyhow::Error::msg)?;
+    }
     let file = agent.session().path().display().to_string();
     ext.notify("session_start", serde_json::json!({"session_file": file}))
         .await;
@@ -278,7 +418,41 @@ pub async fn prepare(args: &RunArgs, approver: Arc<dyn Approver>) -> Result<Prep
         info,
         ext_requests,
         ext_sources,
+        resources,
     })
+}
+
+/// Paths from a settings list, with `~` expanded; relative ones are taken
+/// from the working directory.
+pub fn setting_paths(v: &Value, home: Option<&Path>, cwd: &Path) -> Vec<PathBuf> {
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(|p| match (p.strip_prefix("~/"), home) {
+            (Some(rest), Some(h)) => h.join(rest),
+            _ => cwd.join(p),
+        })
+        .collect()
+}
+
+/// Skills and prompt templates from the standard places and the
+/// `skills` and `prompts` settings.
+pub fn load_resources(
+    settings: &Value,
+    home: Option<&Path>,
+    cwd: &Path,
+    trusted: bool,
+    packages: &[psi_cli::packages::Contents],
+) -> Resources {
+    let mut skills = setting_paths(&settings["skills"], home, cwd);
+    let mut prompts = setting_paths(&settings["prompts"], home, cwd);
+    skills.extend(packages.iter().flat_map(|p| p.skills.clone()));
+    prompts.extend(packages.iter().flat_map(|p| p.prompts.clone()));
+    let mut src = Sources::standard(home, cwd, trusted, &skills, &prompts);
+    src.themes
+        .extend(packages.iter().flat_map(|p| p.themes.clone()));
+    Resources::load(&src)
 }
 
 /// Headless runs answer extension UI requests themselves (D-18): nothing
@@ -321,6 +495,7 @@ pub async fn run(args: RunArgs) -> Result<ExitCode> {
         tmpdir,
         warnings,
         ext_requests,
+        resources,
         ..
     } = prepare(&args, Arc::new(Headless)).await?;
     for w in &warnings {
@@ -358,6 +533,12 @@ pub async fn run(args: RunArgs) -> Result<ExitCode> {
         s
     } else {
         args.prompt.clone()
+    };
+    // `/skill:name` and prompt templates work headless too (pi parity).
+    let prompt = match resources.expand(prompt.trim()) {
+        Ok(Some(e)) => e.text,
+        Ok(None) => prompt,
+        Err(e) => bail!("{e}"),
     };
     let out = agent.run(&prompt).await;
     let session_path = agent.session().path().to_owned();

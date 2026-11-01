@@ -111,6 +111,24 @@ pub struct ToolInfo {
     pub always_ask: bool,
 }
 
+/// A provider from `psi.register_provider`: an OpenAI-compatible endpoint.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ProviderInfo {
+    pub name: String,
+    pub base_url: String,
+    pub api_key: Option<String>,
+    pub headers: Vec<(String, String)>,
+    pub models: Vec<ProviderModel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ProviderModel {
+    pub id: String,
+    pub context_window: Option<u64>,
+    pub max_output: Option<u64>,
+    pub enable_thinking: Option<bool>,
+}
+
 /// What an extension registered, sent to psi after setup.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Registrations {
@@ -121,6 +139,7 @@ pub struct Registrations {
     pub flags: Vec<(String, String)>,
     pub events: Vec<String>,
     pub renderers: Vec<String>,
+    pub providers: Vec<ProviderInfo>,
 }
 
 /// The Lua values behind the registrations.
@@ -132,6 +151,7 @@ pub struct Registry {
     pub shortcuts: BTreeMap<String, (String, Function)>,
     pub flags: BTreeMap<String, (String, Value)>,
     pub renderers: BTreeMap<String, Function>,
+    pub providers: BTreeMap<String, ProviderInfo>,
     pub bus: BTreeMap<String, Vec<Function>>,
     pub components: BTreeMap<u64, Table>,
     pub next_component: u64,
@@ -158,6 +178,7 @@ impl Registry {
                 .collect(),
             events: self.handlers.keys().cloned().collect(),
             renderers: self.renderers.keys().cloned().collect(),
+            providers: self.providers.values().cloned().collect(),
         }
     }
 }
@@ -327,6 +348,51 @@ impl<B: Backend> ExtHost for Host<B> {
             .borrow_mut()
             .shortcuts
             .insert(key.to_ascii_lowercase(), (desc, handler));
+        Ok(())
+    }
+
+    fn register_provider(&self, _: &Lua, name: String, spec: Value) -> mlua::Result<()> {
+        let what = "psi.register_provider";
+        let Value::Table(t) = spec else {
+            return Err(err(format!("{what}: expected a table")));
+        };
+        if name.trim().is_empty() || name.contains('/') {
+            return Err(err(format!(
+                "{what}: the name must be non-empty, without '/'"
+            )));
+        }
+        let base_url: String = field(&t, what, "base_url")?;
+        let api_key: Option<String> = t.get("api_key")?;
+        let mut headers = Vec::new();
+        if let Some(h) = t.get::<Option<Table>>("headers")? {
+            for pair in h.pairs::<String, String>() {
+                headers.push(pair?);
+            }
+        }
+        headers.sort();
+        let list: Table = field(&t, what, "models")?;
+        let mut models = Vec::new();
+        for m in list.sequence_values::<Table>() {
+            let m = m?;
+            let mw = format!("{what}: a model");
+            models.push(ProviderModel {
+                id: field(&m, &mw, "id")?,
+                context_window: m.get("context_window")?,
+                max_output: m.get("max_output")?,
+                enable_thinking: m.get("enable_thinking")?,
+            });
+        }
+        if models.is_empty() {
+            return Err(err(format!("{what}: 'models' lists no models")));
+        }
+        let info = ProviderInfo {
+            name: name.clone(),
+            base_url,
+            api_key,
+            headers,
+            models,
+        };
+        self.reg.borrow_mut().providers.insert(name, info);
         Ok(())
     }
 

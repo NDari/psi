@@ -27,9 +27,23 @@ pub enum Color {
     BrightMagenta,
     BrightCyan,
     BrightWhite,
+    /// A 256-color palette index, from a theme.
+    Indexed(u8),
+    /// A true color, from a theme.
+    Rgb(u8, u8, u8),
 }
 
 impl Color {
+    /// The SGR parameters for this color as foreground, or as background.
+    fn sgr(self, bg: bool) -> String {
+        let base = if bg { 48 } else { 38 };
+        match self {
+            Color::Indexed(n) => format!("{base};5;{n}"),
+            Color::Rgb(r, g, b) => format!("{base};2;{r};{g};{b}"),
+            c => (c.fg_code() + if bg { 10 } else { 0 }).to_string(),
+        }
+    }
+
     /// SGR foreground code (30-37, 90-97); background is this plus 10.
     fn fg_code(self) -> u8 {
         match self {
@@ -49,6 +63,8 @@ impl Color {
             Color::BrightMagenta => 95,
             Color::BrightCyan => 96,
             Color::BrightWhite => 97,
+            // Written by `sgr`; never reached for these.
+            Color::Indexed(_) | Color::Rgb(..) => 39,
         }
     }
 }
@@ -163,10 +179,10 @@ impl Style {
             }
         }
         if let Some(c) = self.fg {
-            write!(out, ";{}", c.fg_code())?;
+            write!(out, ";{}", c.sgr(false))?;
         }
         if let Some(c) = self.bg {
-            write!(out, ";{}", c.fg_code() + 10)?;
+            write!(out, ";{}", c.sgr(true))?;
         }
         out.write_all(b"m")
     }

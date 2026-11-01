@@ -84,6 +84,9 @@ pub struct RunMeta {
     pub server_build: String,
     /// `/props` as the server reported it at the start of the run.
     pub server_props: Value,
+    /// The directory copied into each psi trial's ~/.psi, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub psi_config: Option<String>,
 }
 
 #[cfg(test)]

@@ -21,6 +21,9 @@ pub struct ModelProfile {
     pub tokenizer: String,
     #[serde(default)]
     pub tools: ToolsConfig,
+    /// Request headers, such as `Authorization` for a registered provider.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headers: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -94,6 +97,7 @@ impl ModelProfile {
             reasoning: Reasoning::default(),
             tokenizer: default_tokenizer(),
             tools: ToolsConfig::default(),
+            headers: Vec::new(),
         }
     }
 }

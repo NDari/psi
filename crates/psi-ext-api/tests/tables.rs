@@ -15,7 +15,7 @@ fn counts_match_the_toml() {
     assert_eq!(EVENTS.len(), count("[[event]]"));
     assert_eq!(TYPES.len(), count("[[type]]"));
     // Today's API, so a parsing slip that drops items shows up.
-    assert_eq!((FUNCTIONS.len(), EVENTS.len(), TYPES.len()), (27, 18, 29));
+    assert_eq!((FUNCTIONS.len(), EVENTS.len(), TYPES.len()), (28, 18, 31));
 }
 
 #[test]

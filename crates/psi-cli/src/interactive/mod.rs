@@ -20,7 +20,8 @@ use crossterm::event::{
 };
 use crossterm::{execute, terminal};
 use psi_safety::checkpoint::Checkpoints;
-use psi_tui::{Color, Line, Style};
+use psi_tui::theme::{self, Token};
+use psi_tui::{Keymap, Line, Style};
 
 use crate::run_mode::{Prepared, RunArgs, prepare};
 use approver::TuiApprover;
@@ -49,6 +50,29 @@ fn save_history(path: &Path, h: &[String]) {
         .collect();
     if let Err(e) = std::fs::write(path, text) {
         tracing::warn!("cannot save the prompt history: {e}");
+    }
+}
+
+/// `~/.psi/keybindings.json` over the defaults (pi parity); problems are
+/// startup warnings.
+fn load_keymap(home: Option<&Path>, warnings: &mut Vec<String>) -> Keymap {
+    let Some(path) = home.map(|h| h.join(".psi/keybindings.json")) else {
+        return Keymap::default();
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(_) => return Keymap::default(),
+    };
+    match psi_cli::config::parse_jsonc(&text, &path.display().to_string()) {
+        Ok(v) => {
+            let (km, problems) = Keymap::from_json(&v);
+            warnings.extend(problems);
+            km
+        }
+        Err(e) => {
+            warnings.push(format!("{e:#}; using the default keys"));
+            Keymap::default()
+        }
     }
 }
 
@@ -84,8 +108,10 @@ pub fn run(args: RunArgs) -> Result<ExitCode> {
         info,
         mut ext_requests,
         ext_sources,
+        resources,
     } = rt.block_on(prepare(&args, approver))?;
     let ext = agent.extensions().clone();
+    let plan_on = agent.plan().enabled;
     let fwd = ui_tx.clone();
     rt.spawn(async move {
         while let Some((name, r)) = ext_requests.recv().await {
@@ -132,9 +158,19 @@ pub fn run(args: RunArgs) -> Result<ExitCode> {
         mode: info["mode"].as_str().unwrap_or("auto").into(),
         network: info["network"].as_str().unwrap_or("on").into(),
         unisolated: info["isolation"] == "unavailable",
+        plan: plan_on.then(|| "plan".to_owned()),
         ..Status::default()
     };
 
+    let mut warnings = warnings;
+    let keymap = load_keymap(home.as_deref(), &mut warnings);
+    let wanted = args.settings["theme"].as_str().unwrap_or("default");
+    match resources.theme(wanted) {
+        Some(t) => theme::set(t),
+        None => warnings.push(format!(
+            "no theme named '{wanted}' (in ~/.psi/themes); using the default"
+        )),
+    }
     let (w, h) = terminal::size().unwrap_or((80, 24));
     terminal::enable_raw_mode().context("the terminal can't go into raw mode")?;
     let mut out = std::io::stdout();
@@ -166,6 +202,8 @@ pub fn run(args: RunArgs) -> Result<ExitCode> {
         ext: ext.clone(),
         rt: rt.handle().clone(),
         ui_tx,
+        resources,
+        keymap,
     });
     let mut banner = vec![Line::styled(
         format!(
@@ -176,7 +214,7 @@ pub fn run(args: RunArgs) -> Result<ExitCode> {
         Style::default().dim(),
     )];
     for w in &warnings {
-        banner.push(Line::styled(format!("  {w}"), Style::fg(Color::Yellow)));
+        banner.push(Line::styled(format!("  {w}"), theme::style(Token::Warning)));
     }
     let result = app
         .start(banner)

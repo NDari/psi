@@ -1719,6 +1719,14 @@ impl ExtHost for RecordingHost {
         self.record(what, format!("shortcut {}", key.to_ascii_lowercase()))
     }
 
+    fn register_provider(&self, _: &Lua, name: String, spec: Value) -> mlua::Result<()> {
+        let what = "psi.register_provider";
+        let t = spec_table(what, spec)?;
+        field(&t, what, "base_url", "string", false)?;
+        field(&t, what, "models", "table", false)?;
+        self.record(what, format!("provider {name}"))
+    }
+
     fn register_flag(&self, _: &Lua, name: String, spec: Value) -> mlua::Result<()> {
         let what = "psi.register_flag";
         let t = spec_table(what, spec)?;

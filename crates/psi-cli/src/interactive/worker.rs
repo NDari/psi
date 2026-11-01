@@ -37,6 +37,10 @@ pub enum Cmd {
     Entries,
     /// Load the extensions again.
     Reload,
+    /// Turn plan mode on or off (/plan).
+    Plan,
+    /// Leave plan mode and carry out the proposed plan.
+    ExecutePlan,
 }
 
 /// Opens the checkpoints for a session file.
@@ -88,6 +92,20 @@ impl Worker {
                     Err(e) => UiMsg::Error(format!("cannot open {}: {e}", p.display())),
                 },
                 Cmd::Reload => self.reload().await,
+                Cmd::Plan => {
+                    let on = !self.agent.plan().enabled;
+                    match self.agent.set_plan_mode(on) {
+                        Ok(()) if on => UiMsg::Info(
+                            "plan mode: read-only tools; the model answers with a numbered plan (/plan again to leave)".into(),
+                        ),
+                        Ok(()) => UiMsg::Info("plan mode off: all tools are available".into()),
+                        Err(e) => UiMsg::Error(e),
+                    }
+                }
+                Cmd::ExecutePlan => match self.agent.start_plan() {
+                    Ok(p) => UiMsg::RunDone(self.agent.run(&p).await),
+                    Err(e) => UiMsg::Error(e),
+                },
                 Cmd::Entries => UiMsg::Entries {
                     entries: self.agent.session().entries().to_vec(),
                     leaf: self.agent.session().leaf().map(str::to_owned),

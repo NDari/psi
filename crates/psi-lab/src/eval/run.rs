@@ -43,6 +43,9 @@ pub struct RunConfig {
     pub max_output: u64,
     /// The psi binary for psi trials (the one running `psi eval`).
     pub psi_binary: Option<PathBuf>,
+    /// Copied into each psi trial's `~/.psi` (settings, skills, prompts):
+    /// a variant, such as a battery turned on.
+    pub psi_config: Option<PathBuf>,
 }
 
 /// Runs one trial of each selected task and writes `run.json`, the trial
@@ -86,6 +89,7 @@ pub fn run(cfg: &RunConfig, progress: &mut dyn FnMut(&str)) -> Result<Vec<TrialR
             .unwrap_or("?")
             .to_owned(),
         server_props: server.props.clone(),
+        psi_config: cfg.psi_config.as_ref().map(|p| p.display().to_string()),
     };
     fsutil::write(
         &cfg.results_dir.join("run.json"),
@@ -102,6 +106,7 @@ pub fn run(cfg: &RunConfig, progress: &mut dyn FnMut(&str)) -> Result<Vec<TrialR
         timeout_s: cfg.timeout_s,
         network,
         psi_binary: cfg.psi_binary.as_deref(),
+        psi_config: cfg.psi_config.as_deref(),
     };
     let mut results = Vec::new();
     for task in &tasks {

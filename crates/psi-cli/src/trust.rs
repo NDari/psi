@@ -13,22 +13,37 @@ fn store(home: &Path) -> PathBuf {
     home.join(".psi/trust.json")
 }
 
-/// A fingerprint of the project's `.psi/settings.jsonc` and extensions,
-/// or `None` when it has neither (nothing to trust).
+/// The project's resource directories that need trust: what they hold
+/// runs as the user or instructs the model (pi parity).
+const TRUSTED_DIRS: &[&str] = &["extensions", "skills", "prompts", "themes"];
+
+fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
+    for e in ignore::WalkBuilder::new(dir)
+        .hidden(false)
+        .build()
+        .flatten()
+    {
+        if e.file_type().is_some_and(|t| t.is_file()) {
+            out.push(e.into_path());
+        }
+    }
+}
+
+/// A fingerprint of the project's `.psi/settings.jsonc`, extensions,
+/// skills, prompts and themes, and its `.agents/skills`, or `None` when it
+/// has none of them (nothing to trust).
 pub fn fingerprint(project: &Path) -> Option<String> {
     let dir = project.join(".psi");
     let mut files: Vec<PathBuf> = Vec::new();
     if dir.join("settings.jsonc").is_file() {
         files.push(dir.join("settings.jsonc"));
     }
-    for e in ignore::WalkBuilder::new(dir.join("extensions"))
-        .hidden(false)
-        .build()
-        .flatten()
-    {
-        if e.file_type().is_some_and(|t| t.is_file()) {
-            files.push(e.into_path());
-        }
+    for d in TRUSTED_DIRS {
+        files_under(&dir.join(d), &mut files);
+    }
+    let home = std::env::home_dir();
+    for d in crate::resources::agents_dirs(project, home.as_deref()) {
+        files_under(&d, &mut files);
     }
     if files.is_empty() {
         return None;
@@ -80,7 +95,15 @@ pub fn describe(project: &Path) -> String {
     if n > 0 {
         parts.push(format!("{n} extension(s), which run as you"));
     }
-    format!("{} has {}", dir.display(), parts.join(" and "))
+    for d in ["skills", "prompts", "themes"] {
+        if dir.join(d).is_dir() {
+            parts.push(d.to_owned());
+        }
+    }
+    if parts.is_empty() {
+        return format!("{} has .agents/skills", project.display());
+    }
+    format!("{} has {}", dir.display(), parts.join(", "))
 }
 
 #[cfg(test)]
@@ -104,5 +127,23 @@ mod tests {
         assert_ne!(f, g);
         assert!(!is_trusted(&home, &p, &g), "a change asks again");
         assert!(describe(&p).contains("1 extension(s)"));
+    }
+
+    #[test]
+    fn skills_need_trust_too() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("proj");
+        std::fs::create_dir_all(p.join(".git")).unwrap();
+        std::fs::create_dir_all(p.join(".psi/skills/x")).unwrap();
+        std::fs::write(p.join(".psi/skills/x/SKILL.md"), "a").unwrap();
+        let f = fingerprint(&p).unwrap();
+        assert!(
+            describe(&p).ends_with(".psi has skills"),
+            "{}",
+            describe(&p)
+        );
+        std::fs::create_dir_all(p.join(".agents/skills/y")).unwrap();
+        std::fs::write(p.join(".agents/skills/y/SKILL.md"), "b").unwrap();
+        assert_ne!(fingerprint(&p).unwrap(), f);
     }
 }

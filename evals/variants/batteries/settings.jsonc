@@ -1,0 +1,10 @@
+// The batteries variant (evals/variants/README.md).
+{
+  "todo": true,
+  // Python tasks have tests/; shell tasks are .sh scripts in the top directory.
+  "post_edit_check": {
+    // tests/ without __init__.py needs discover -s (python3 -m unittest alone finds nothing).
+    "command": "if [ -f tests/__init__.py ]; then python3 -m unittest -q; elif [ -d tests ]; then python3 -m unittest discover -q -s tests; else rc=0; for f in *.sh; do [ -e \"$f\" ] || continue; bash -n \"$f\" || rc=1; done; exit $rc; fi",
+    "timeout": 120,
+  },
+}

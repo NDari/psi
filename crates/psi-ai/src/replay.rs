@@ -88,6 +88,8 @@ impl Reply {
 pub struct Recorded {
     pub method: String,
     pub path: String,
+    /// Header names in lowercase, with their values.
+    pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
 }
 
@@ -215,16 +217,18 @@ fn serve(mut conn: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
     let method = parts.next().unwrap_or("").to_owned();
     let path = parts.next().unwrap_or("").to_owned();
     let mut len = 0usize;
+    let mut headers = Vec::new();
     loop {
         let mut h = String::new();
         reader.read_line(&mut h)?;
         if h == "\r\n" || h == "\n" || h.is_empty() {
             break;
         }
-        if let Some((k, v)) = h.split_once(':')
-            && k.eq_ignore_ascii_case("content-length")
-        {
-            len = v.trim().parse().unwrap_or(0);
+        if let Some((k, v)) = h.split_once(':') {
+            if k.eq_ignore_ascii_case("content-length") {
+                len = v.trim().parse().unwrap_or(0);
+            }
+            headers.push((k.trim().to_ascii_lowercase(), v.trim().to_owned()));
         }
     }
     let mut body = vec![0; len];
@@ -234,6 +238,7 @@ fn serve(mut conn: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
         st.requests.push(Recorded {
             method: method.clone(),
             path: path.clone(),
+            headers,
             body: body.clone(),
         });
         match (method.as_str(), path.as_str()) {

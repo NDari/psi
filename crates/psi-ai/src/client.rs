@@ -67,6 +67,29 @@ impl Client {
         }
     }
 
+    /// Headers sent with every request (an API key from
+    /// `psi.register_provider`). Invalid names or values are skipped.
+    pub fn with_headers(mut self, headers: &[(String, String)]) -> Self {
+        let mut map = reqwest::header::HeaderMap::new();
+        for (k, v) in headers {
+            if let (Ok(k), Ok(mut v)) = (
+                reqwest::header::HeaderName::from_bytes(k.as_bytes()),
+                reqwest::header::HeaderValue::from_str(v),
+            ) {
+                v.set_sensitive(true);
+                map.insert(k, v);
+            }
+        }
+        if let Ok(http) = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .default_headers(map)
+            .build()
+        {
+            self.http = http;
+        }
+        self
+    }
+
     pub fn with_wire(mut self, wire: Arc<WireLog>) -> Self {
         self.wire = Some(wire);
         self

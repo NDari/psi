@@ -740,6 +740,24 @@ Each phase ends with its acceptance criteria passing in the local check, where a
 **Phase 6: batteries.**
 - Plan mode, todo, post-edit check, skills, prompt templates, themes, keybindings, self-knowledge, `register_provider`, local and git packages.
 - ✅ Each battery has eval coverage or a documented reason it can't.
+- **Decided 2026-11-01:** plan mode and todo follow pi (D-34); skills follow pi plus `/skill:name` (D-35); the post-edit check runs once per turn that edited files (D-36). Built against tests and fixtures and checked with one quick-set run per small reference model at the end, like Phase 3. Then a check on Qwen3.6 35B-A3B (`just llm-up qwen35b`), the model the owner expects to use day to day, to find bugs the small models don't reach (D-37).
+- Built 2026-11-01:
+  - **Plan mode** (`/plan`, Ctrl+Alt+P, `--plan`): write and edit leave the tool list; bash runs only when tree-sitter finds every simple command (pipelines, substitutions, `sh -c`) on a read-only list with no output redirect into a file (`psi-safety/src/read_only.rs`; pi tests the whole string with regexes, which misses `ls; rm x`); non-read-only extension tools are refused. A context message rides with each prompt, a note says when it was turned off by hand, and both stay in the history (append-only, so the prompt cache holds; pi filters them out). The steps after `Plan:` are kept whole (pi shortens them to 50 characters and drops leading verbs, but the model reads them back); carrying out a plan tracks `[DONE:n]`. State is a `plan` custom entry.
+  - **Todo**: a core tool behind `"todo": true` (off by default, like grep/find/ls, D-17); snapshots in `todo` custom entries, rebuilt from the branch at each run, so it follows `/tree`; `/todos`.
+  - **Post-edit check**: `post_edit_check` setting; runs inside the boundary; a pass line or the first 20 lines and the exit status, added to the last edit's result.
+  - **Skills and prompt templates**: pi's places (with `.psi` for `.pi`), layouts, frontmatter rules and argument substitution; skills listed in a compact form in the prompt (not pi's XML); `/skill:name`. Project skills, prompts and themes now need project trust too.
+  - **Themes** (pi's format, the tokens Psi draws; `#hex`, 0-255, ANSI names, vars; `okhsl`/`oklch` are refused with a warning) and **keybindings** (pi's ids for the actions Psi has, plus `app.plan.toggle`).
+  - **Self-knowledge**: `psi help topics` / `psi help <topic>` from `docs/help/*.md`, embedded; the prompt line from Appendix B is in.
+  - **`psi.register_provider`**: OpenAI-compatible endpoints only; extensions now start before the model is picked.
+  - **Packages**: `psi install|remove|update|list`, pi's source syntax for local and git, clones in `~/.psi/git` or `.psi/git`, `packages` in settings (edited without losing comments), resources from `package.json`'s `psi` key or conventional directories (pi packages' skills, prompts and themes load).
+  - **Eval variants**: `psi eval run --psi-config <dir>` copies a directory into each psi trial's `~/.psi`; `evals/variants/batteries` turns on todo, a post-edit check and one skill.
+  - **Eval coverage** (Qwen3.6 35B-A3B, one run each, correctness only; small-model runs still to do):
+    - The quick set with defaults (`~/.psi/evals/2026-11-01-0551-phase6-qwen3.6-35b`) and with `evals/variants/batteries` (`2026-11-01-0606-...-batteries`): no harness failures, no shape fixes. The new prompt line and the skills section are model-facing; both runs carry them.
+    - Post-edit check: ran in every task. The first batteries run found a bug in the variant, not in psi: `python3 -m unittest` alone finds no tests when `tests/` isn't a package, so the check said "failed" after every edit (the model ignored it and ran its own tests). Fixed in the variant; psi now cuts commands longer than 60 characters in the result line, since it repeats every turn. A two-task rerun (`2026-11-01-0623-...-batteries-fix`) shows real failures mid-change and passes once fixed.
+    - Todo: called in 3 of 10 tasks, lightly (one add, two lists of an empty list). Skills: the 35B never read the listed skill (H-03 holds for it too here); `/skill:name` is the dependable path (D-35).
+    - Plan mode: no eval, by design: a plan waits for the user to approve it. Covered by replay scenario tests and a TUI test.
+    - Prompt templates, themes, keybindings, `register_provider`, packages, `psi help`: nothing the model decides; covered by tests.
+    - With thinking on, the 35B once spent all 8192 output tokens thinking; the truncated-answer guard (§8.6) nudged it and it went on.
 
 **Phase 7: experiments and polish.**
 - Work through the hypothesis table, including H-01 (the extension-writing eval, deferred from Phase 5 on 2026-10-31); compaction tuning; RPC mode; HTML export; MCP (**[G-08]**); sub-agents (**[G-07]**); other backends (**[G-18]**); macOS isolation (**[G-20]**).
@@ -799,6 +817,10 @@ Each phase ends with its acceptance criteria passing in the local check, where a
 | D-31 | **The session JSONL plus its wire log is the only record**; no separate dump format; other agents' output (pi) is converted into session entries | Heimdall needed a dump only because it stored sessions in a database; one format means one inspection and scoring path |
 | D-32 | **Tests carry everyday checking; the eval runs sparingly.** A replay server plays back recorded transcripts so scenario tests exercise the real loop and tools; the eval runs when model-facing text changes, a model changes, at phase ends, and to refresh fixtures | The eval takes minutes per model; most harness behavior is deterministic given the model's responses. Only a real model shows how a change to what it sees affects it (2026-10-31) |
 | D-33 | **Checks run locally; no hosted CI for now.** fmt, clippy and tests (plus later the drift check, isolation tests and the eval smoke test) run on the owner's machine before each commit | Psi has one user; local runs need no runner setup and can use bubblewrap and podman directly. Hosted CI can return for a public release (2026-10-31) |
+| D-34 | **Plan mode and todo follow pi:** tools and commands the model or user choose to use, not harness-led flows | The owner's daily model will be a larger one (D-37) that uses optional tools; usage is counted in the eval rather than forced. An exception to principle 4, by the owner's choice (2026-11-01) |
+| D-35 | **Skills follow pi, plus `/skill:name`** to put a skill into the context directly | H-03: small models rarely load what they're told about; the command works regardless of the model (2026-11-01) |
+| D-36 | **Post-edit check once per turn that edited files**, with a capped summary | Running after every edit costs context and time on small windows; once per turn still feeds back before the model's next step (2026-11-01) |
+| D-37 | **Batteries are built against the small reference models, then checked on a larger one** (Qwen3.6 35B-A3B MTP, UD-Q4_K_XL, 64K context, thinking on) | The small models are the floor the harness must hold; the larger model is the expected daily driver and reaches features the small ones don't. Its first quick-set run (2026-10-31) had no harness failures and needed no shape fixes (2026-11-01) |
 
 ---
 
@@ -807,7 +829,7 @@ Each phase ends with its acceptance criteria passing in the local check, where a
 | ID | Topic | Status |
 |---|---|---|
 | G-03 | Domain-filtering network proxy | Public readiness (§13) |
-| G-04 | Package format, registry, install review | Local and git packages in Phase 6; review in public readiness |
+| G-04 | Package format, registry, install review | Local and git packages built in Phase 6 (`psi install`); a registry and install review wait for public readiness |
 | G-05 | Windows support | WSL only |
 | G-07 | Sub-agents | Phase 7; nested `psi` is on the always-ask list until then |
 | G-08 | MCP support | Phase 7 |

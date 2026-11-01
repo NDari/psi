@@ -1154,6 +1154,7 @@ name = "psi-tui"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "serde_json",
  "unicode-segmentation",
  "unicode-width",
  "vt100",

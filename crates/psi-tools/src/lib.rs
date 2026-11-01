@@ -7,6 +7,7 @@ mod files;
 mod read;
 mod search;
 mod text;
+pub mod todo;
 mod write;
 
 use std::path::{Path, PathBuf};
@@ -18,6 +19,7 @@ use serde_json::{Map, Value};
 use tokio_util::sync::CancellationToken;
 
 pub use files::FileTracker;
+pub use todo::TodoList;
 
 /// What a tool needs from the session.
 #[derive(Debug, Clone)]
@@ -32,6 +34,8 @@ pub struct ToolCtx {
     pub cancel: CancellationToken,
     /// The boundary bash runs inside; `None` runs it directly (§8.4).
     pub sandbox: Option<Arc<Sandbox>>,
+    /// The todo tool's list, rebuilt from the branch at each run.
+    pub todos: Arc<Mutex<TodoList>>,
 }
 
 impl ToolCtx {
@@ -43,6 +47,7 @@ impl ToolCtx {
             tmpdir: tmpdir.to_owned(),
             cancel: CancellationToken::new(),
             sandbox: None,
+            todos: Arc::new(Mutex::new(TodoList::default())),
         }
     }
 
@@ -87,6 +92,8 @@ pub enum Tool {
     Grep,
     Find,
     Ls,
+    /// The task list (D-34); offered when the `todo` setting is on.
+    Todo,
     // Extension and script tools are psi_agent::ext::Callable::Ext.
 }
 
@@ -109,6 +116,7 @@ impl Tool {
             Tool::Grep => "grep",
             Tool::Find => "find",
             Tool::Ls => "ls",
+            Tool::Todo => "todo",
         }
     }
 
@@ -121,6 +129,7 @@ impl Tool {
             Tool::Grep,
             Tool::Find,
             Tool::Ls,
+            Tool::Todo,
         ]
         .into_iter()
         .find(|t| t.name() == name)
@@ -135,6 +144,7 @@ impl Tool {
             Tool::Grep => search::grep_schema(),
             Tool::Find => search::find_schema(),
             Tool::Ls => search::ls_schema(),
+            Tool::Todo => todo::schema(),
         }
     }
 
@@ -164,6 +174,7 @@ impl Tool {
             Tool::Grep => search::grep,
             Tool::Find => search::find,
             Tool::Ls => search::ls,
+            Tool::Todo => todo::run,
         };
         let (args, ctx) = (args.clone(), ctx.clone());
         tokio::task::spawn_blocking(move || f(&args, &ctx))

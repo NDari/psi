@@ -8,12 +8,14 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use psi_agent::approval::{Approval, ApprovalRequest, BlockedChoice, BlockedRequest};
+use psi_agent::plan::PlanState;
 use psi_agent::recovery::Change;
 use psi_agent::{AgentEvent, Queues, RunOutcome, Stop};
 use psi_ext::{ExtManager, Request as ExtRequest};
 use psi_safety::policy::Mode;
 use psi_session::{Entry, EntryBody, Role, text_of};
-use psi_tui::{Color, Editor, EditorEvent, Line, MdStream, Renderer, Style, render_block};
+use psi_tui::theme::{self, Token};
+use psi_tui::{Action, Editor, EditorEvent, Keymap, Line, MdStream, Renderer, Style, render_block};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -108,7 +110,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/diff", "the session's changes, by source"),
     ("/show", "a tool call in full: /show <n>"),
     ("/stats", "tokens, timing, guards and asks this session"),
+    ("/todos", "the todo list on this branch"),
     ("/mode", "auto or strict: /mode strict"),
+    ("/plan", "plan mode on or off: read-only, ends with a plan"),
+    ("/theme", "list the themes, or switch: /theme <name>"),
     ("/label", "label the current point: /label <text>"),
     ("/new", "start a new session"),
     ("/resume", "continue an earlier session in this directory"),
@@ -146,7 +151,13 @@ enum Picker {
         items: Vec<PathBuf>,
         sel: usize,
     },
+    /// What to do with a proposed plan.
+    Plan {
+        sel: usize,
+    },
 }
+
+const PLAN_CHOICES: [&str; 3] = ["Carry out the plan", "Stay in plan mode", "Refine the plan"];
 
 /// What a committed tool call was, for /show.
 struct Shown {
@@ -187,6 +198,12 @@ pub struct App<W: Write> {
     ext_modal: Option<ExtModal>,
     ext_status: BTreeMap<String, String>,
     widgets: BTreeMap<String, Vec<Line>>,
+    resources: Arc<psi_cli::resources::Resources>,
+    /// Plan mode as the agent last recorded it.
+    plan: PlanState,
+    /// A plan was proposed during this run: offer it when the run ends.
+    plan_proposed: bool,
+    keymap: Keymap,
 }
 
 pub struct AppParts<W: Write> {
@@ -203,12 +220,15 @@ pub struct AppParts<W: Write> {
     pub ext: Arc<ExtManager>,
     pub rt: tokio::runtime::Handle,
     pub ui_tx: UnboundedSender<UiMsg>,
+    pub resources: Arc<psi_cli::resources::Resources>,
+    pub keymap: Keymap,
 }
 
 impl<W: Write> App<W> {
     pub fn new(p: AppParts<W>) -> Self {
         let mut editor = Editor::new();
         editor.set_history(p.history);
+        editor.set_keymap(p.keymap.clone());
         let mut completer = p.completer;
         completer.extra = p
             .ext
@@ -216,6 +236,7 @@ impl<W: Write> App<W> {
             .into_iter()
             .map(|(n, d, _)| (format!("/{n}"), d))
             .collect();
+        completer.extra.extend(p.resources.commands());
         Self {
             r: Renderer::new(p.out, p.width, p.height),
             editor,
@@ -246,6 +267,10 @@ impl<W: Write> App<W> {
             ext_modal: None,
             ext_status: BTreeMap::new(),
             widgets: BTreeMap::new(),
+            resources: p.resources,
+            plan: PlanState::default(),
+            plan_proposed: false,
+            keymap: p.keymap,
             debug: std::env::var_os("PSI_DEBUG_RENDER").is_some(),
         }
     }
@@ -277,7 +302,7 @@ impl<W: Write> App<W> {
     }
 
     fn error(&mut self, s: &str) {
-        self.commit(vec![Line::styled(s, Style::fg(Color::Red))]);
+        self.commit(vec![Line::styled(s, theme::style(Token::Error))]);
     }
 
     fn bell(&mut self) {
@@ -343,7 +368,6 @@ impl<W: Write> App<W> {
     }
 
     fn on_key(&mut self, k: KeyEvent) {
-        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         if self.card.is_some() {
             return self.card_key(k);
         }
@@ -398,16 +422,22 @@ impl<W: Write> App<W> {
         if self.picker.is_some() {
             return self.picker_key(k);
         }
-        match k.code {
-            KeyCode::Esc => {
-                if self.completer.active() {
-                    self.completer.close();
-                } else if self.running.is_some() {
-                    self.abort();
-                }
-                return;
+        if self.keymap.is(Action::PlanToggle, &k) {
+            if self.running.is_some() {
+                return self.error("/plan waits until the run ends (Esc aborts it)");
             }
-            KeyCode::Char('c') if ctrl => {
+            return self.send(Cmd::Plan);
+        }
+        if self.keymap.is(Action::Interrupt, &k) {
+            if self.completer.active() {
+                self.completer.close();
+            } else if self.running.is_some() {
+                self.abort();
+            }
+            return;
+        }
+        if self.keymap.is(Action::Clear, &k) {
+            {
                 if !self.editor.is_empty() {
                     self.editor.clear();
                     self.completer.close();
@@ -420,14 +450,26 @@ impl<W: Write> App<W> {
                     self.quit = true;
                 } else {
                     self.last_ctrl_c = Some(Instant::now());
-                    self.info("press Ctrl+C again to quit");
+                    let key = self.keymap.first(Action::Clear).unwrap_or_default();
+                    self.info(&format!("press {key} again to quit"));
                 }
                 return;
             }
-            KeyCode::Char('d') if ctrl && self.editor.is_empty() => {
-                self.quit = true;
-                return;
+        }
+        if self.keymap.is(Action::Exit, &k) && self.editor.is_empty() {
+            self.quit = true;
+            return;
+        }
+        if self.keymap.is(Action::FollowUp, &k) {
+            let text = self.editor.text();
+            if !text.trim().is_empty() {
+                self.editor.push_history(&text);
+                self.editor.clear();
+                self.submit(text, true);
             }
+            return;
+        }
+        match k.code {
             KeyCode::Up | KeyCode::Down if self.completer.active() => {
                 let n = self.completer.items().len();
                 if n > 0 {
@@ -454,15 +496,6 @@ impl<W: Write> App<W> {
                 }
                 self.completer.close();
                 self.refresh_completion();
-                return;
-            }
-            KeyCode::Enter if k.modifiers.contains(KeyModifiers::ALT) => {
-                let text = self.editor.text();
-                if !text.trim().is_empty() {
-                    self.editor.push_history(&text);
-                    self.editor.clear();
-                    self.submit(text, true);
-                }
                 return;
             }
             _ => {}
@@ -533,6 +566,7 @@ impl<W: Write> App<W> {
             Picker::Goto { items, sel, .. } => (items.len(), sel),
             Picker::Resume { items, sel } => (items.len(), sel),
             Picker::Select { items, sel, .. } => (items.len(), sel),
+            Picker::Plan { sel } => (PLAN_CHOICES.len(), sel),
         };
         match k.code {
             KeyCode::Up if n > 0 => *sel = (*sel + n - 1) % n,
@@ -561,6 +595,18 @@ impl<W: Write> App<W> {
                 }) => {
                     let _ = reply.send(items.get(sel).cloned());
                 }
+                Some(Picker::Plan { sel }) => match sel {
+                    0 => {
+                        self.commit_user("Carry out the plan");
+                        self.running = Some(Running {
+                            started: Instant::now(),
+                            tools: Vec::new(),
+                        });
+                        self.send(Cmd::ExecutePlan);
+                    }
+                    1 => self.info("  still in plan mode"),
+                    _ => self.info("  say what to change; plan mode stays on"),
+                },
                 None => {}
             },
             _ => {}
@@ -636,8 +682,24 @@ impl<W: Write> App<W> {
             return;
         }
         if let Some(cmd) = t.strip_prefix('/')
-            && !cmd.contains('/')
+            && !cmd.split_whitespace().next().unwrap_or("").contains('/')
         {
+            let name = cmd.split_whitespace().next().unwrap_or("");
+            let builtin = COMMANDS.iter().any(|(c, _)| &c[1..] == name)
+                || ["?", "exit", "q"].contains(&name)
+                || self.ext.commands().iter().any(|(n, _, _)| n == name);
+            if !builtin {
+                // Skills and prompt templates (D-35); built-ins win.
+                match self.resources.expand(&t) {
+                    Ok(Some(e)) => {
+                        let text = e.text.clone();
+                        self.info(&format!("  {}", e.note));
+                        return self.send_prompt(text, follow_up);
+                    }
+                    Ok(None) => {}
+                    Err(e) => return self.error(&e),
+                }
+            }
             return self.slash(cmd);
         }
         if let Some(c) = t.strip_prefix('!') {
@@ -647,6 +709,12 @@ impl<W: Write> App<W> {
             };
             return self.user_bash(command, to_context);
         }
+        self.send_prompt(t, follow_up);
+    }
+
+    /// Sends text to the agent: a new run, or while one runs, a steering
+    /// or follow-up message.
+    fn send_prompt(&mut self, t: String, follow_up: bool) {
         if self.running.is_some() {
             // Steering goes in before the next turn; a follow-up waits until
             // the run would stop (pi parity).
@@ -670,12 +738,13 @@ impl<W: Write> App<W> {
     }
 
     fn commit_user(&mut self, t: &str) {
+        let t = &shown_user_text(t);
         let mut lines = vec![Line::default()];
         for (i, l) in t.lines().enumerate() {
             let mut line = Line::default();
             line.push(
                 if i == 0 { "› " } else { "  " },
-                Style::fg(Color::Blue).bold(),
+                theme::style(Token::UserMessageText).bold(),
             );
             line.push(l, Style::default().bold());
             lines.push(line);
@@ -688,7 +757,7 @@ impl<W: Write> App<W> {
             return;
         }
         let mut l = Line::default();
-        l.push("! ", Style::fg(Color::Magenta).bold());
+        l.push("! ", theme::style(Token::BashMode).bold());
         l.push(&command, Style::default().bold());
         self.commit(vec![Line::default(), l]);
         // Runs as the user, outside the boundary, without approval (§6).
@@ -723,7 +792,7 @@ impl<W: Write> App<W> {
         let busy = self.running.is_some();
         let needs_idle = matches!(
             name,
-            "undo" | "rewind" | "tree" | "new" | "resume" | "mode" | "label"
+            "undo" | "rewind" | "tree" | "new" | "resume" | "mode" | "label" | "plan"
         );
         if busy && needs_idle {
             return self.error(&format!("/{name} waits until the run ends (Esc aborts it)"));
@@ -733,36 +802,33 @@ impl<W: Write> App<W> {
                 let mut lines = vec![Line::default()];
                 for (c, d) in COMMANDS {
                     let mut l = Line::default();
-                    l.push(format!("  {c:<10}"), Style::fg(Color::Cyan));
+                    l.push(format!("  {c:<10}"), theme::style(Token::Accent));
                     l.push(d, dim());
                     lines.push(l);
                 }
                 for (c, d, ext) in self.ext.commands() {
                     let mut l = Line::default();
-                    l.push(format!("  /{c:<9}"), Style::fg(Color::Cyan));
+                    l.push(format!("  /{c:<9}"), theme::style(Token::Accent));
                     l.push(format!("{d} ({ext})"), dim());
                     lines.push(l);
                 }
                 for (k, d) in self.ext.shortcuts() {
                     let mut l = Line::default();
-                    l.push(format!("  {k:<12}"), Style::fg(Color::Cyan));
+                    l.push(format!("  {k:<12}"), theme::style(Token::Accent));
                     l.push(d, dim());
                     lines.push(l);
                 }
-                for (k, d) in [
-                    ("Enter", "send; while running, steer the current run"),
-                    ("Alt+Enter", "queue a follow-up for when the run ends"),
-                    ("Shift+Enter", "new line (or end the line with \\)"),
-                    ("Esc", "abort the run"),
+                let keys = self.keymap.describe();
+                let keys = keys.iter().map(|(k, d)| (k.as_str(), d.as_str()));
+                for (k, d) in keys.chain([
                     ("@path", "add a file reference (Tab completes)"),
                     (
                         "!cmd",
                         "run a command yourself; its output goes to the model (!!cmd: it doesn't)",
                     ),
-                    ("Ctrl+C", "clear the input; twice to quit"),
-                ] {
+                ]) {
                     let mut l = Line::default();
-                    l.push(format!("  {k:<12}"), Style::fg(Color::Cyan));
+                    l.push(format!("  {k:<12}"), theme::style(Token::Accent));
                     l.push(d, dim());
                     lines.push(l);
                 }
@@ -771,11 +837,12 @@ impl<W: Write> App<W> {
             "quit" | "exit" | "q" => self.quit = true,
             "undo" => self.send(Cmd::Undo),
             "diff" => self.send(Cmd::Diff),
-            "rewind" | "tree" | "stats" | "inspect" => {
+            "rewind" | "tree" | "stats" | "inspect" | "todos" => {
                 self.pending_entries = Some(match name {
                     "rewind" => "rewind",
                     "tree" => "tree",
                     "stats" => "stats",
+                    "todos" => "todos",
                     _ => "inspect",
                 });
                 self.send(Cmd::Entries);
@@ -812,7 +879,7 @@ impl<W: Write> App<W> {
                 let args = serde_json::to_string_pretty(&s.args).unwrap_or_default();
                 lines.extend(args.lines().map(|l| Line::styled(format!("  {l}"), dim())));
                 let style = if s.is_error {
-                    Style::fg(Color::Red)
+                    theme::style(Token::Error)
                 } else {
                     Style::default()
                 };
@@ -833,6 +900,34 @@ impl<W: Write> App<W> {
             }
             "new" => self.send(Cmd::New),
             "reload" => self.send(Cmd::Reload),
+            "plan" => self.send(Cmd::Plan),
+            "theme" => {
+                if arg.is_empty() {
+                    let mut names = vec!["default".to_owned()];
+                    names.extend(self.resources.themes.iter().map(|t| t.name.clone()));
+                    let now = theme::current_name();
+                    let list: Vec<String> = names
+                        .iter()
+                        .map(|n| {
+                            if *n == now {
+                                format!("{n} (now)")
+                            } else {
+                                n.clone()
+                            }
+                        })
+                        .collect();
+                    return self.info(&format!("  themes: {}", list.join(", ")));
+                }
+                match self.resources.theme(arg) {
+                    Some(t) => {
+                        theme::set(t);
+                        self.info(&format!(
+                            "  theme {arg} for this session; set \"theme\" in settings.jsonc to keep it"
+                        ));
+                    }
+                    None => self.error(&format!("no theme named '{arg}'; /theme lists them")),
+                }
+            }
             "resume" => {
                 let mut files = psi_session::SessionFile::list(&self.sessions_dir);
                 files.reverse();
@@ -889,10 +984,11 @@ impl<W: Write> App<W> {
                     Stop::Aborted => self.info("  aborted"),
                     Stop::Budget(r) | Stop::Guard(r) => self.commit(vec![Line::styled(
                         format!("  stopped: {r}"),
-                        Style::fg(Color::Yellow),
+                        theme::style(Token::Warning),
                     )]),
                     Stop::Failed(r) => self.error(&format!("  failed: {r}")),
                 }
+                self.offer_plan();
                 self.bell();
             }
             UiMsg::Info(s) => self.info(&format!("  {s}")),
@@ -919,7 +1015,7 @@ impl<W: Write> App<W> {
                     lines.push(Line::default());
                     lines.push(Line::styled(
                         format!("▌ {}", c.source),
-                        Style::fg(Color::Magenta).bold(),
+                        theme::style(Token::Accent).bold(),
                     ));
                     lines.extend(git_diff_lines(&c.diff));
                 }
@@ -933,6 +1029,8 @@ impl<W: Write> App<W> {
             } => {
                 self.shown.clear();
                 self.info(&format!("  {what}: {}", path.display()));
+                // The agent takes plan mode from the new session; so does the screen.
+                self.set_plan(PlanState::default());
                 let _ = self.replay(&entries);
             }
             UiMsg::Ext(ext, req) => self.on_ext(ext, req),
@@ -966,8 +1064,8 @@ impl<W: Write> App<W> {
         match req {
             ExtRequest::Notify { message, level } => {
                 let style = match level.as_str() {
-                    "error" => Style::fg(Color::Red),
-                    "warning" => Style::fg(Color::Yellow),
+                    "error" => theme::style(Token::Error),
+                    "warning" => theme::style(Token::Warning),
                     _ => dim(),
                 };
                 self.commit(vec![Line::styled(format!("  [{ext}] {message}"), style)]);
@@ -1058,7 +1156,13 @@ impl<W: Write> App<W> {
     /// A resumed session: its messages, committed again.
     pub fn replay(&mut self, entries: &[Entry]) -> std::io::Result<()> {
         let leaf = entries.last().map(|e| e.id.clone());
+        let mut plan = None;
         for e in psi_session::branch(entries, leaf.as_deref()) {
+            if let EntryBody::Custom { custom_type, data } = &e.body
+                && custom_type == "plan"
+            {
+                plan = Some(PlanState::from_json(data));
+            }
             if let EntryBody::Message { role, content, .. } = &e.body {
                 let t = text_of(content);
                 match role {
@@ -1075,6 +1179,9 @@ impl<W: Write> App<W> {
                     _ => {}
                 }
             }
+        }
+        if let Some(p) = plan {
+            self.set_plan(p);
         }
         self.draw()
     }
@@ -1123,6 +1230,40 @@ impl<W: Write> App<W> {
                 if let (Some(id), Some(t)) = (leaf, self.label_text.take()) {
                     self.send(Cmd::Label { id, label: Some(t) });
                 }
+            }
+            "todos" => {
+                let list = branch
+                    .iter()
+                    .rev()
+                    .find_map(|e| match &e.body {
+                        EntryBody::Custom { custom_type, data } if custom_type == "todo" => {
+                            Some(psi_tools::TodoList::from_json(data))
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                let done = list.items.iter().filter(|t| t.done).count();
+                let mut lines = vec![Line::default()];
+                if list.items.is_empty() {
+                    lines.push(Line::styled("  no todos on this branch", dim()));
+                } else {
+                    lines.push(Line::styled(
+                        format!("  todos: {done}/{} done", list.items.len()),
+                        dim(),
+                    ));
+                    for t in &list.items {
+                        let mut l = Line::default();
+                        if t.done {
+                            l.push("  ✓ ", theme::style(Token::Success));
+                            l.push(format!("#{} {}", t.id, t.text), dim());
+                        } else {
+                            l.push("  ○ ", dim());
+                            l.push(format!("#{} {}", t.id, t.text), Style::default());
+                        }
+                        lines.push(l);
+                    }
+                }
+                self.commit(lines);
             }
             "stats" => {
                 let lines = stats(&branch);
@@ -1249,11 +1390,20 @@ impl<W: Write> App<W> {
                 self.status.ttft_ms = data["first_token_ms"].as_u64();
                 self.status.tok_s = data["timings"]["predicted_per_second"].as_f64();
             }
+            EntryBody::Custom { custom_type, data } if custom_type == "plan" => {
+                let p = PlanState::from_json(data);
+                self.plan_proposed = p.enabled && !p.steps.is_empty();
+                self.set_plan(p);
+                // The run's end and this entry come by different channels.
+                if self.running.is_none() {
+                    self.offer_plan();
+                }
+            }
             EntryBody::Checkpoint { .. } => self.status.checkpoints += 1,
             EntryBody::GuardEvent { guard, message, .. } => {
                 self.commit(vec![Line::styled(
                     format!("  ⚑ {guard}: {message}"),
-                    Style::fg(Color::Yellow),
+                    theme::style(Token::Warning),
                 )]);
             }
             EntryBody::PolicyDecision {
@@ -1263,6 +1413,57 @@ impl<W: Write> App<W> {
             }
             _ => {}
         }
+    }
+
+    /// After a run in plan mode that proposed a plan: show it and ask what next.
+    fn offer_plan(&mut self) {
+        if !std::mem::take(&mut self.plan_proposed) || !self.plan.enabled {
+            return;
+        }
+        let mut lines = vec![
+            Line::default(),
+            Line::styled(
+                format!("  plan: {} steps", self.plan.steps.len()),
+                theme::style(Token::Accent).bold(),
+            ),
+        ];
+        for (i, st) in self.plan.steps.iter().enumerate() {
+            lines.push(Line::raw(format!("  {}. {}", i + 1, st.text)));
+        }
+        self.commit(lines);
+        self.picker = Some(Picker::Plan { sel: 0 });
+    }
+
+    /// The status label and the steps widget follow the plan state.
+    fn set_plan(&mut self, p: PlanState) {
+        self.status.plan = if p.enabled {
+            Some("plan".into())
+        } else if p.executing {
+            Some(format!("plan {}/{}", p.done_count(), p.steps.len()))
+        } else {
+            None
+        };
+        if p.executing {
+            let lines = p
+                .steps
+                .iter()
+                .map(|st| {
+                    let mut l = Line::default();
+                    if st.done {
+                        l.push("  ✓ ", theme::style(Token::Success));
+                        l.push(&st.text, dim());
+                    } else {
+                        l.push("  ○ ", dim());
+                        l.push(&st.text, Style::default());
+                    }
+                    l
+                })
+                .collect();
+            self.widgets.insert("~plan".into(), lines);
+        } else {
+            self.widgets.remove("~plan");
+        }
+        self.plan = p;
     }
 
     /// The live region: streaming text, running calls, queued messages,
@@ -1314,7 +1515,10 @@ impl<W: Write> App<W> {
             status.push(format!("  {k}: {v}"), dim());
         }
         live.push(status.truncate(w));
-        live.push(Line::styled("─".repeat(w), dim()));
+        live.push(Line::styled(
+            "─".repeat(w),
+            theme::style(Token::BorderMuted),
+        ));
         let top = live.len();
         let (rows, (cr, cc)) = self.editor.render(w, "› ", Style::default());
         live.extend(rows);
@@ -1331,7 +1535,7 @@ impl<W: Write> App<W> {
             ));
             cursor = None;
         } else if let Some((req, _)) = &self.blocked {
-            let y = Style::fg(Color::Yellow);
+            let y = theme::style(Token::Warning);
             live.push(Line::styled(
                 format!(
                     "┌ blocked: bash tried to write {}, outside the workspace",
@@ -1346,12 +1550,12 @@ impl<W: Write> App<W> {
             live.push(Line::styled(format!("└ r rerun once outside the sandbox · a make {} writable for the session and rerun · n leave it", req.dir.display()), y));
             cursor = None;
         } else if let Some((reason, _)) = &self.pause {
-            let y = Style::fg(Color::Yellow);
+            let y = theme::style(Token::Warning);
             live.push(Line::styled(format!("┌ paused: {reason}"), y));
             live.push(Line::styled("└ c continue · s stop the run", y));
             cursor = None;
         } else if let Some(m) = &mut self.ext_modal {
-            let y = Style::fg(Color::Yellow);
+            let y = theme::style(Token::Warning);
             match m {
                 ExtModal::Confirm {
                     ext,
@@ -1402,6 +1606,10 @@ impl<W: Write> App<W> {
                     live.push(Line::styled(format!("  {title}"), Style::default().bold()));
                     (items.clone(), *sel)
                 }
+                Picker::Plan { sel } => {
+                    live.push(Line::styled("  what next?", Style::default().bold()));
+                    (PLAN_CHOICES.iter().map(|c| (*c).to_owned()).collect(), *sel)
+                }
             };
             live.extend(list(&items, sel, 10, w));
             live.push(Line::styled("  ↑↓ choose · Enter go · Esc cancel", dim()));
@@ -1429,6 +1637,24 @@ impl<W: Write> App<W> {
 
 /// A key as extensions name it: "ctrl+t", "alt+x", "f5", "enter", "up".
 /// A plain character is typing, not a shortcut, so it has no name here.
+/// A `/skill:name` message is long; the screen shows its name and what
+/// followed it.
+fn shown_user_text(t: &str) -> String {
+    let Some(rest) = t.strip_prefix("<skill name=\"") else {
+        return t.to_owned();
+    };
+    let Some((name, _)) = rest.split_once('"') else {
+        return t.to_owned();
+    };
+    match rest.split_once("\n</skill>") {
+        Some((_, after)) if !after.trim().is_empty() => {
+            format!("[skill {name}] {}", after.trim())
+        }
+        Some(_) => format!("[skill {name}]"),
+        None => t.to_owned(),
+    }
+}
+
 pub fn key_name(k: &KeyEvent) -> Option<String> {
     let base = match k.code {
         KeyCode::Char(c) => c.to_ascii_lowercase().to_string(),

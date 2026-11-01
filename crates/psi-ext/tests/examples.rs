@@ -20,7 +20,14 @@ fn every_example_passes_its_tests() {
         .collect();
     assert_eq!(
         names,
-        ["ask-first", "focus", "git-guard", "tidy-results", "todo"]
+        [
+            "ask-first",
+            "focus",
+            "git-guard",
+            "llama-box",
+            "tidy-results",
+            "todo"
+        ]
     );
     for (p, r) in &runs {
         assert!(r.passed(), "{}:\n{}", p.display(), r.render(true));

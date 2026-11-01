@@ -4,7 +4,8 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 
 # llama-server settings for llm-up; override like `just ctx=65536 llm-up qwen`.
 port := "9931"
-ctx := "131072"
+# "auto" is 131072, or 65536 for qwen35b (the context it was first run with).
+ctx := "auto"
 # Speculative decoding (llama-server --spec-type): "auto" is draft-mtp for
 # qwen, whose GGUF carries its own draft layers (about 1.8x faster
 # generation here), and none for gemma, which has none. `just spec=none llm-up qwen`.
@@ -15,6 +16,9 @@ state := justfile_directory() / ".llm" / port
 # The reference models (D-29) and each model card's sampling.
 qwen := "-hf bartowski/Qwen_Qwen3.5-4B-GGUF:Q4_K_M --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0 --presence-penalty 1.5 --repeat-penalty 1.0"
 gemma := "-hf google/gemma-4-12B-it-qat-q4_0-gguf:Q4_0 --temp 1.0 --top-p 0.95 --top-k 64 --min-p 0"
+# A larger model, not yet a reference model: the owner's command on the Mac,
+# with thinking on and kept in the history. Sampling is the server's default.
+qwen35b := '-hf unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL -fa on -np 1 --spec-draft-n-max 3 --chat-template-kwargs {"preserve_thinking":true}'
 
 # List the recipes
 default:
@@ -90,17 +94,20 @@ eval-run *args: build eval-build
 inspect path *args: build
     ./target/debug/psi inspect {{path}} {{args}}
 
-# Start llama-server with a reference model (qwen or gemma) in the background
+# Start llama-server with a model (qwen, gemma or qwen35b) in the background
 llm-up model="qwen":
     #!/usr/bin/env bash
     set -euo pipefail
     case "{{model}}" in
-      qwen) args="{{qwen}}"; auto_spec=draft-mtp ;;
-      gemma) args="{{gemma}}"; auto_spec=none ;;
-      *) echo "llm-up: model is qwen or gemma, not {{model}}" >&2; exit 1 ;;
+      qwen) args="{{qwen}}"; auto_spec=draft-mtp; auto_ctx=131072; reasoning=off ;;
+      gemma) args="{{gemma}}"; auto_spec=none; auto_ctx=131072; reasoning=off ;;
+      qwen35b) args='{{qwen35b}}'; auto_spec=draft-mtp; auto_ctx=65536; reasoning=auto ;;
+      *) echo "llm-up: model is qwen, gemma or qwen35b, not {{model}}" >&2; exit 1 ;;
     esac
     spec="{{spec}}"
     [[ "$spec" == auto ]] && spec=$auto_spec
+    ctx="{{ctx}}"
+    [[ "$ctx" == auto ]] && ctx=$auto_ctx
     mkdir -p "{{state}}"
     if [[ -f "{{state}}/pid" ]] && kill -0 "$(cat "{{state}}/pid")" 2>/dev/null; then
       echo "llama-server already running (pid $(cat "{{state}}/pid")); run just llm-down first" >&2
@@ -110,7 +117,7 @@ llm-up model="qwen":
       echo "something else answers on port {{port}}; stop it first" >&2
       exit 1
     fi
-    cmd="llama-server $args --no-mmproj --jinja --alias local -c {{ctx}} -ngl 99 --port {{port}} --reasoning off --seed 0 --spec-type $spec"
+    cmd="llama-server $args --no-mmproj --jinja --alias local -c $ctx -ngl 99 --port {{port}} --reasoning $reasoning --seed 0 --spec-type $spec"
     echo "$cmd" > "{{state}}/cmd"
     # setsid is util-linux's; macOS has none, and nohup alone keeps it running.
     detach="nohup"

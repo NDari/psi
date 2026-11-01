@@ -49,6 +49,14 @@ params = [
 ]
 
 [[function]]
+name = "register_provider"
+doc = "Add an OpenAI-compatible endpoint and its models; pick one with `psi --model name/id` (or the id alone). Registering a name again replaces it."
+params = [
+  { name = "name", type = "string" },
+  { name = "spec", type = "ProviderSpec" },
+]
+
+[[function]]
 name = "get_flag"
 doc = "A flag's value: the command line's, else its default."
 params = [{ name = "name", type = "string" }]
@@ -393,6 +401,24 @@ name = "CommandSpec"
 fields = [
   { name = "description", type = "string", doc = "Shown in /help and completion" },
   { name = "handler", type = "function(args: string, ctx: Context)", doc = "" },
+]
+
+[[type]]
+name = "ProviderSpec"
+fields = [
+  { name = "base_url", type = "string", doc = "The OpenAI-compatible API, like http://127.0.0.1:8080/v1" },
+  { name = "api_key", type = "string?", doc = "Sent as a bearer token; \"$NAME\" reads the environment variable NAME" },
+  { name = "headers", type = "{string: string}?", doc = "More request headers; values take \"$NAME\" too" },
+  { name = "models", type = "ProviderModel[]", doc = "The models it serves" },
+]
+
+[[type]]
+name = "ProviderModel"
+fields = [
+  { name = "id", type = "string", doc = "The model name sent in requests" },
+  { name = "context_window", type = "integer?", doc = "Tokens; default: what the server's /props says" },
+  { name = "max_output", type = "integer?", doc = "Tokens per answer (default 8192)" },
+  { name = "enable_thinking", type = "boolean?", doc = "Sent as chat_template_kwargs.enable_thinking" },
 ]
 
 [[type]]

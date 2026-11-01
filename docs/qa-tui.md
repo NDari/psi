@@ -52,3 +52,14 @@ yours.
 - [ ] `/undo`, `/diff`, `/stats`, `/mode strict` (the status line shows strict) work. (auto)
 - [ ] The status line shows model, context use, tok/s, time to first token, mode, checkpoints, and `UNISOLATED` in red when bubblewrap doesn't work.
 - [ ] After quitting, the terminal is back to normal (cursor shown, no raw mode), and psi prints the session file.
+
+## Batteries (Phase 6)
+
+- [ ] `/plan` (or Ctrl+Alt+P) shows `plan` in the status line; the model can't write or edit, and a bash command that isn't read-only is refused. (auto)
+- [ ] An answer with a `Plan:` list shows the steps and asks what next; "Carry out the plan" turns plan mode off, and the status line counts `[DONE:n]` steps with a list of them above it. (auto)
+- [ ] `/todos` shows the todo list for the current branch (with `"todo": true` in settings); after `/tree` to an earlier prompt it shows that point's list.
+- [ ] `/<template> args` and `/skill:name args` complete in the dropdown and run; a skill message shows as `[skill name]`. (auto)
+- [ ] `~/.psi/keybindings.json` rebinds keys; a bad entry is a startup warning and keeps the default; `/help` lists the keys in use. (auto)
+- [ ] `/theme` lists the themes; `/theme <name>` recolors what is drawn after it; a theme with truecolor values looks right in a truecolor terminal. (auto: a 256-color index)
+- [ ] With `post_edit_check` set, an edit's result ends with the check's pass line or its first errors.
+

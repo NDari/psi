@@ -7,6 +7,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use crate::keys::{Action, Keymap};
 use crate::style::{Line, Style, TAB_WIDTH, sanitize, str_width};
 
 /// What a key did.
@@ -33,6 +34,7 @@ pub struct Editor {
     hist_pos: Option<usize>,
     /// The unsent text, saved when history browsing starts.
     draft: String,
+    keymap: Keymap,
 }
 
 impl Default for Editor {
@@ -63,7 +65,13 @@ impl Editor {
             history: Vec::new(),
             hist_pos: None,
             draft: String::new(),
+            keymap: Keymap::default(),
         }
+    }
+
+    /// The keys the editor's actions use (keybindings.json).
+    pub fn set_keymap(&mut self, keymap: Keymap) {
+        self.keymap = keymap;
     }
 
     /// Handles one key. Alt+Enter, Tab, Esc and other unbound keys return
@@ -75,11 +83,29 @@ impl Editor {
         let m = key.modifiers;
         let ctrl = m.contains(KeyModifiers::CONTROL);
         let alt = m.contains(KeyModifiers::ALT);
-        let shift = m.contains(KeyModifiers::SHIFT);
-        let changed = match key.code {
-            KeyCode::Enter if alt || ctrl => return EditorEvent::None,
-            KeyCode::Enter if shift => self.edit(|e| e.insert_newline()),
-            KeyCode::Enter => {
+        let km = &self.keymap;
+        let action = [
+            Action::NewLine,
+            Action::Submit,
+            Action::CursorUp,
+            Action::CursorDown,
+            Action::CursorLeft,
+            Action::CursorRight,
+            Action::CursorWordLeft,
+            Action::CursorWordRight,
+            Action::CursorLineStart,
+            Action::CursorLineEnd,
+            Action::DeleteCharBackward,
+            Action::DeleteCharForward,
+            Action::DeleteWordBackward,
+            Action::DeleteToLineStart,
+            Action::DeleteToLineEnd,
+        ]
+        .into_iter()
+        .find(|a| km.is(*a, &key));
+        let changed = match action {
+            Some(Action::NewLine) => self.edit(|e| e.insert_newline()),
+            Some(Action::Submit) => {
                 if self.col > 0 && self.grapheme_before() == Some("\\") {
                     self.edit(|e| {
                         e.backspace();
@@ -92,37 +118,29 @@ impl Editor {
                     return EditorEvent::Submit(text);
                 }
             }
-            KeyCode::Char(c) if ctrl && !alt => match c {
-                'j' => self.edit(|e| e.insert_newline()),
-                'a' => self.move_to(self.row, 0),
-                'e' => self.move_to(self.row, self.line_len()),
-                'w' => self.edit(|e| e.delete_word_back()),
-                'u' => self.col > 0 && self.edit(|e| e.delete_range(0, e.col)),
-                'k' => {
-                    self.col < self.line_len() && self.edit(|e| e.delete_range(e.col, e.line_len()))
-                }
+            Some(Action::CursorUp) => self.up(),
+            Some(Action::CursorDown) => self.down(),
+            Some(Action::CursorLeft) => self.left(),
+            Some(Action::CursorRight) => self.right(),
+            Some(Action::CursorWordLeft) => self.word_left(),
+            Some(Action::CursorWordRight) => self.word_right(),
+            Some(Action::CursorLineStart) => self.move_to(self.row, 0),
+            Some(Action::CursorLineEnd) => self.move_to(self.row, self.line_len()),
+            Some(Action::DeleteCharBackward) => self.edit(|e| e.backspace()),
+            Some(Action::DeleteCharForward) => self.edit(|e| e.delete_forward()),
+            Some(Action::DeleteWordBackward) => self.edit(|e| e.delete_word_back()),
+            Some(Action::DeleteToLineStart) => {
+                self.col > 0 && self.edit(|e| e.delete_range(0, e.col))
+            }
+            Some(Action::DeleteToLineEnd) => {
+                self.col < self.line_len() && self.edit(|e| e.delete_range(e.col, e.line_len()))
+            }
+            _ => match key.code {
+                // Plain, shifted, or Ctrl+Alt (AltGr on some platforms).
+                KeyCode::Char(c) if c.is_control() || ctrl != alt => false,
+                KeyCode::Char(c) => self.edit(|e| e.insert_clean(c.encode_utf8(&mut [0; 4]))),
                 _ => false,
             },
-            KeyCode::Char(c) if alt && !ctrl => match c {
-                'b' => self.word_left(),
-                'f' => self.word_right(),
-                _ => false,
-            },
-            // Plain, shifted, or Ctrl+Alt (AltGr on some platforms).
-            KeyCode::Char(c) if c.is_control() => false,
-            KeyCode::Char(c) => self.edit(|e| e.insert_clean(c.encode_utf8(&mut [0; 4]))),
-            KeyCode::Backspace if ctrl || alt => self.edit(|e| e.delete_word_back()),
-            KeyCode::Backspace => self.edit(|e| e.backspace()),
-            KeyCode::Delete => self.edit(|e| e.delete_forward()),
-            KeyCode::Left if ctrl || alt => self.word_left(),
-            KeyCode::Right if ctrl || alt => self.word_right(),
-            KeyCode::Left => self.left(),
-            KeyCode::Right => self.right(),
-            KeyCode::Up => self.up(),
-            KeyCode::Down => self.down(),
-            KeyCode::Home => self.move_to(self.row, 0),
-            KeyCode::End => self.move_to(self.row, self.line_len()),
-            _ => false,
         };
         if changed {
             EditorEvent::Changed

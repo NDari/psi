@@ -47,6 +47,10 @@ impl ExtHost for Recorder {
         self.record(format!("register_shortcut {key}"));
         Ok(())
     }
+    fn register_provider(&self, _: &Lua, name: String, _: Value) -> mlua::Result<()> {
+        self.record(format!("register_provider {name}"));
+        Ok(())
+    }
     fn register_flag(&self, _: &Lua, name: String, _: Value) -> mlua::Result<()> {
         self.record(format!("register_flag {name}"));
         Ok(())

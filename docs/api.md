@@ -79,6 +79,19 @@ Declare a flag set on the command line with `--ext-flag name=value`.
 | `name` | `string` |  |
 | `spec` | `FlagSpec` |  |
 
+#### psi.register_provider
+
+```
+psi.register_provider(name: string, spec: ProviderSpec)
+```
+
+Add an OpenAI-compatible endpoint and its models; pick one with `psi --model name/id` (or the id alone). Registering a name again replaces it.
+
+| Param | Type | Optional |
+|---|---|---|
+| `name` | `string` |  |
+| `spec` | `ProviderSpec` |  |
+
 #### psi.get_flag
 
 ```
@@ -465,6 +478,24 @@ The second argument of every handler.
 |---|---|---|
 | `description` | `string` | Shown in /help and completion |
 | `handler` | `function(args: string, ctx: Context)` |  |
+
+### ProviderSpec
+
+| Field | Type | Description |
+|---|---|---|
+| `base_url` | `string` | The OpenAI-compatible API, like http://127.0.0.1:8080/v1 |
+| `api_key` | `string?` | Sent as a bearer token; "$NAME" reads the environment variable NAME |
+| `headers` | `{string: string}?` | More request headers; values take "$NAME" too |
+| `models` | `ProviderModel[]` | The models it serves |
+
+### ProviderModel
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | `string` | The model name sent in requests |
+| `context_window` | `integer?` | Tokens; default: what the server's /props says |
+| `max_output` | `integer?` | Tokens per answer (default 8192) |
+| `enable_thinking` | `boolean?` | Sent as chat_template_kwargs.enable_thinking |
 
 ### ShortcutSpec
 

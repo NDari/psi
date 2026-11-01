@@ -2,7 +2,8 @@
 //! committed once as a header, a summary, a few output lines and a short
 //! diff; the status line; the approval card; dropdowns.
 
-use psi_tui::{Color, Line, Style};
+use psi_tui::theme::{self, Token};
+use psi_tui::{Line, Style};
 use serde_json::Value;
 
 /// Output lines a committed tool call shows (`/show <n>` has the rest).
@@ -11,7 +12,7 @@ const OUTPUT_LINES: usize = 4;
 const DIFF_LINES: usize = 20;
 
 pub fn dim() -> Style {
-    Style::default().dim()
+    theme::style(Token::Muted)
 }
 
 fn first_line(s: &str, max: usize) -> String {
@@ -43,6 +44,17 @@ pub fn call_summary(name: &str, args: &Value) -> String {
         "write" | "edit" => s("path").to_owned(),
         "grep" => format!("{} {}", s("pattern"), s("path")).trim().to_owned(),
         "find" | "ls" => format!("{} {}", s("pattern"), s("path")).trim().to_owned(),
+        "todo" => {
+            let id = args.get("id").map(|v| {
+                format!(
+                    "#{}",
+                    v.as_str().map(str::to_owned).unwrap_or(v.to_string())
+                )
+            });
+            format!("{} {}{}", s("action"), s("text"), id.unwrap_or_default())
+                .trim()
+                .to_owned()
+        }
         _ => serde_json::to_string(args).unwrap_or_default(),
     }
 }
@@ -54,7 +66,7 @@ pub fn call_header(n: usize, name: &str, args: &Value, width: usize, running: Op
         Some(_) => "◌ ",
         None => "● ",
     };
-    l.push(mark, Style::fg(Color::Cyan));
+    l.push(mark, theme::style(Token::Accent));
     l.push(name, Style::default().bold());
     l.push("  ", Style::default());
     let summary = call_summary(name, args);
@@ -81,7 +93,7 @@ pub fn call_block(
     let mut out = vec![call_header(n, name, args, width, None)];
     let lines: Vec<&str> = result.lines().collect();
     let tail = if is_error {
-        Style::fg(Color::Red)
+        theme::style(Token::Error)
     } else {
         dim()
     };
@@ -143,8 +155,8 @@ pub fn diff_lines(old: &str, new: &str, max: usize, width: usize) -> Vec<Line> {
     let mut more = 0;
     for change in diff.iter_all_changes() {
         let (sign, style) = match change.tag() {
-            similar::ChangeTag::Delete => ("-", Style::fg(Color::Red)),
-            similar::ChangeTag::Insert => ("+", Style::fg(Color::Green)),
+            similar::ChangeTag::Delete => ("-", theme::style(Token::ToolDiffRemoved)),
+            similar::ChangeTag::Insert => ("+", theme::style(Token::ToolDiffAdded)),
             similar::ChangeTag::Equal => continue,
         };
         if out.len() >= max {
@@ -177,11 +189,11 @@ pub fn git_diff_lines(diff: &str) -> Vec<Line> {
             {
                 Style::default().bold()
             } else if l.starts_with('+') {
-                Style::fg(Color::Green)
+                theme::style(Token::ToolDiffAdded)
             } else if l.starts_with('-') {
-                Style::fg(Color::Red)
+                theme::style(Token::ToolDiffRemoved)
             } else if l.starts_with("@@") {
-                Style::fg(Color::Cyan)
+                theme::style(Token::Accent)
             } else {
                 Style::default()
             };
@@ -203,12 +215,18 @@ pub struct Status {
     pub checkpoints: usize,
     pub unisolated: bool,
     pub busy: Option<String>,
+    /// "plan", or the steps done while a plan is carried out.
+    pub plan: Option<String>,
 }
 
 pub fn status_line(s: &Status, width: usize) -> Line {
     let mut l = Line::default();
     if let Some(b) = &s.busy {
-        l.push(b, Style::fg(Color::Yellow));
+        l.push(b, theme::style(Token::Warning));
+        l.push("  ", Style::default());
+    }
+    if let Some(p) = &s.plan {
+        l.push(p, theme::style(Token::Warning).bold());
         l.push("  ", Style::default());
     }
     let mut parts = vec![s.model.clone()];
@@ -228,7 +246,7 @@ pub fn status_line(s: &Status, width: usize) -> Line {
     parts.push(format!("{} checkpoints", s.checkpoints));
     l.push(parts.join(" · "), dim());
     if s.unisolated {
-        l.push("  UNISOLATED", Style::fg(Color::Red).bold());
+        l.push("  UNISOLATED", theme::style(Token::Error).bold());
     }
     l.truncate(width)
 }
@@ -244,11 +262,14 @@ pub fn approval_card(
     width: usize,
 ) -> Vec<Line> {
     let w = width.saturating_sub(4);
-    let border = Style::fg(Color::Yellow);
+    let border = theme::style(Token::Warning);
     let mut out = Vec::new();
     let mut top = Line::default();
     top.push("┌ ", border);
-    top.push(format!("approve {tool}"), Style::fg(Color::Yellow).bold());
+    top.push(
+        format!("approve {tool}"),
+        theme::style(Token::Warning).bold(),
+    );
     out.push(top);
     let body = |out: &mut Vec<Line>, label: &str, text: &str, style: Style| {
         for (i, t) in text.lines().take(4).enumerate() {
@@ -305,7 +326,7 @@ pub fn list(items: &[String], sel: usize, max: usize, width: usize) -> Vec<Line>
         .map(|(i, it)| {
             let text = cut(it, width.saturating_sub(4));
             if i == sel {
-                Line::styled(format!("  ▸ {text}"), Style::fg(Color::Cyan).bold())
+                Line::styled(format!("  ▸ {text}"), theme::style(Token::Accent).bold())
             } else {
                 Line::styled(format!("    {text}"), dim())
             }

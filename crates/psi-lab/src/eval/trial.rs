@@ -31,6 +31,8 @@ pub(crate) struct TrialCtx<'a> {
     pub network: String,
     /// The psi binary mounted into psi trials.
     pub psi_binary: Option<&'a Path>,
+    /// Copied into the trial's ~/.psi before it starts.
+    pub psi_config: Option<&'a Path>,
 }
 
 /// The step cap extension's stderr line (evals/pi/step-cap.ts).
@@ -232,6 +234,9 @@ fn psi_run(
         .psi_binary
         .ok_or_else(|| other("no psi binary to run"))?;
     fsutil::create_dir_all(&home.join(".psi"))?;
+    if let Some(c) = ctx.psi_config {
+        fsutil::copy_dir(c, &home.join(".psi"), &["models.jsonc"])?;
+    }
     let models = json!({"models": [{"id": "local",
         "base_url": format!("http://127.0.0.1:{}/v1", ctx.port),
         "context_window": ctx.n_ctx, "max_output": ctx.max_output}]});

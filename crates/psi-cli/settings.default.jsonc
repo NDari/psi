@@ -16,4 +16,14 @@
   "always_ask": [],
   // Shipped entries to drop, by name; every layer appends, e.g. ["git clean"].
   "always_ask_remove": [],
+  // The project's check, run once after each turn whose write or edit calls
+  // changed files; the model sees a short result (D-36). A command, or
+  // {"command": "cargo check -q", "timeout": 120}. null is off.
+  "post_edit_check": null,
+  // Offer the model the todo tool, a task list for the session (D-34).
+  // Off by default: every tool costs context on every request.
+  "todo": false,
+  // The TUI's colors: "default" (the terminal's 16 colors), or the name of a
+  // theme in ~/.psi/themes/*.json (pi's format).
+  "theme": "default",
 }

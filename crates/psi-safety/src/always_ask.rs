@@ -173,9 +173,9 @@ pub fn classify(command: &str, rules: &Rules) -> Verdict {
 
 /// A command word: its unquoted value when it is a literal, and its source text.
 #[derive(Debug, Clone)]
-struct Word {
-    lit: Option<String>,
-    raw: String,
+pub(crate) struct Word {
+    pub(crate) lit: Option<String>,
+    pub(crate) raw: String,
 }
 
 impl Word {
@@ -239,7 +239,7 @@ impl Scan<'_> {
 }
 
 /// The line of the first ERROR or MISSING node, if any.
-fn error_line(node: Node) -> Option<usize> {
+pub(crate) fn error_line(node: Node) -> Option<usize> {
     if node.is_missing() {
         return Some(node.start_position().row + 1);
     }
@@ -264,7 +264,7 @@ fn error_line(node: Node) -> Option<usize> {
 
 /// Every simple command in the tree, in source order. Walking every node
 /// reaches lists, pipelines, groups, bodies and substitutions alike.
-fn collect(node: Node, src: &str, out: &mut Vec<Vec<Word>>) {
+pub(crate) fn collect(node: Node, src: &str, out: &mut Vec<Vec<Word>>) {
     if node.kind() == "command"
         && let Some(name) = node.child_by_field_name("name")
     {
@@ -328,18 +328,18 @@ fn unescape(s: &str, quoted: bool) -> String {
     out
 }
 
-fn basename(path: &str) -> &str {
+pub(crate) fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
 /// What a wrapper or runner runs.
-enum Inner {
+pub(crate) enum Inner {
     Command(Vec<Word>),
     Script(String),
 }
 
 /// The commands or scripts `prog args` runs: `timeout 5 git push` runs `git push`.
-fn runs(prog: &str, args: &[Word]) -> Vec<Inner> {
+pub(crate) fn runs(prog: &str, args: &[Word]) -> Vec<Inner> {
     let rest = |i: usize| args.get(i..).unwrap_or_default();
     let cmd = |words: &[Word]| match words {
         [] => vec![],
@@ -422,7 +422,11 @@ fn runs(prog: &str, args: &[Word]) -> Vec<Inner> {
 /// Skip leading options (`-x`, clusters like `-lc`, `+o`, `--long`, `--long=v`, up to `--`).
 /// `short` and `long` list the options that take a value. Returns the index of the
 /// first operand and each option seen with its value.
-fn options(args: &[Word], short: &str, long: &[&str]) -> (usize, Vec<(String, Option<String>)>) {
+pub(crate) fn options(
+    args: &[Word],
+    short: &str,
+    long: &[&str],
+) -> (usize, Vec<(String, Option<String>)>) {
     let mut seen = Vec::new();
     let mut i = 0;
     while let Some(arg) = args.get(i).and_then(|w| w.lit.as_deref()) {

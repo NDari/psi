@@ -58,6 +58,18 @@
 ---@field description string Shown in /help and completion
 ---@field handler fun(args: string, ctx: Context)
 
+---@class ProviderSpec
+---@field base_url string The OpenAI-compatible API, like http://127.0.0.1:8080/v1
+---@field api_key? string Sent as a bearer token; "$NAME" reads the environment variable NAME
+---@field headers? table<string, string> More request headers; values take "$NAME" too
+---@field models ProviderModel[] The models it serves
+
+---@class ProviderModel
+---@field id string The model name sent in requests
+---@field context_window? integer Tokens; default: what the server's /props says
+---@field max_output? integer Tokens per answer (default 8192)
+---@field enable_thinking? boolean Sent as chat_template_kwargs.enable_thinking
+
 ---@class ShortcutSpec
 ---@field description string
 ---@field handler fun(ctx: Context)
@@ -199,6 +211,11 @@ function psi.register_shortcut(key, spec) end
 ---@param name string
 ---@param spec FlagSpec
 function psi.register_flag(name, spec) end
+
+--- Add an OpenAI-compatible endpoint and its models; pick one with `psi --model name/id` (or the id alone). Registering a name again replaces it.
+---@param name string
+---@param spec ProviderSpec
+function psi.register_provider(name, spec) end
 
 --- A flag's value: the command line's, else its default.
 ---@param name string

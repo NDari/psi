@@ -4,14 +4,20 @@
 //! whole fenced code blocks) and [`render_block`] turns a block into lines. This is
 //! deliberately not CommonMark: anything it does not recognize renders literally.
 
-use crate::style::{Color, Line, Style};
+use crate::style::{Line, Style};
+use crate::theme::{self, Token};
 
 /// A long block without blank lines is committed in pieces of this many lines, so
 /// a streaming list appears progressively.
 pub const PROGRESSIVE_LINES: usize = 20;
 
-const DIM: Style = Style::new().dim();
-const CODE: Style = Style::fg(Color::Cyan);
+fn muted() -> Style {
+    theme::style(Token::Muted)
+}
+
+fn code_style() -> Style {
+    theme::style(Token::MdCode)
+}
 
 /// An opening fence: its char and length.
 fn fence_open(line: &str) -> Option<(char, usize)> {
@@ -158,13 +164,13 @@ pub fn render_block(block: &str, width: usize) -> Vec<Line> {
         if let Some(f) = fence {
             if fence_close(line, f) {
                 fence = None;
-                out.push(Line::styled(line, DIM));
+                out.push(Line::styled(line, theme::style(Token::MdCodeBlockBorder)));
             } else {
                 out.push(Line::raw(line));
             }
         } else if let Some(f) = fence_open(line) {
             fence = Some(f);
-            out.push(Line::styled(line, DIM));
+            out.push(Line::styled(line, theme::style(Token::MdCodeBlockBorder)));
         } else {
             prose_line(line, width, &mut out);
         }
@@ -180,14 +186,20 @@ fn prose_line(line: &str, width: usize, out: &mut Vec<Line>) {
     } else if let Some(n) = heading_level(trimmed) {
         let marks = &trimmed[..n];
         let rest = trimmed[n..].trim_start();
-        let first = Line::raw(indent).with(format!("{marks} "), DIM);
-        wrap_prefixed(first, false, inline(rest, Style::new().bold()), width, out);
+        let first = Line::raw(indent).with(format!("{marks} "), muted());
+        wrap_prefixed(
+            first,
+            false,
+            inline(rest, theme::style(Token::MdHeading).bold()),
+            width,
+            out,
+        );
     } else if let Some(rest) = trimmed.strip_prefix('>') {
         let rest = rest.strip_prefix(' ').unwrap_or(rest);
-        let first = Line::raw(indent).with("> ", DIM);
-        wrap_prefixed(first, true, inline(rest, DIM), width, out);
+        let first = Line::raw(indent).with("> ", muted());
+        wrap_prefixed(first, true, inline(rest, muted()), width, out);
     } else if is_rule(trimmed) {
-        out.push(Line::styled(line, DIM));
+        out.push(Line::styled(line, muted()));
     } else if trimmed.starts_with('|') {
         out.push(inline(line, Style::new()));
     } else if let Some(marker) = list_marker(trimmed) {
@@ -274,7 +286,7 @@ fn inline_into(cs: &[char], base: Style, out: &mut Line) {
                             Some(inner) if !inner.trim().is_empty() => inner.to_string(),
                             _ => code,
                         };
-                        out.push(code, base.patch(CODE));
+                        out.push(code, base.patch(code_style()));
                         i = j + n;
                     }
                     None => {
@@ -469,7 +481,7 @@ mod tests {
     fn render_heading() {
         let ls = render_block("## Big **deal**", 80);
         assert_eq!(plain(&ls), ["## Big deal"]);
-        assert_eq!(ls[0].spans[0], crate::style::Span::new("## ", DIM));
+        assert_eq!(ls[0].spans[0], crate::style::Span::new("## ", muted()));
         assert!(ls[0].spans[1..].iter().all(|s| s.style.bold));
     }
 
@@ -482,7 +494,7 @@ mod tests {
         assert_eq!(find("b"), Some(Style::new().bold()));
         assert_eq!(find("c"), Some(Style::new().italic()));
         assert_eq!(find("d"), Some(Style::new().italic()));
-        assert_eq!(find("e"), Some(CODE));
+        assert_eq!(find("e"), Some(code_style()));
     }
 
     #[test]

@@ -499,3 +499,146 @@ fn a_runaway_extension_doesnt_freeze_the_ui() {
     t.send(b"\x15");
     t.quit();
 }
+
+#[test]
+fn prompt_templates_and_skill_commands() {
+    let (mut t, s) = Tui::start(vec![text("hello Bob"), text("read it")], |p| {
+        let home = p.parent().unwrap().join("home/.psi");
+        std::fs::create_dir_all(home.join("prompts")).unwrap();
+        std::fs::create_dir_all(home.join("skills/pdf")).unwrap();
+        std::fs::write(
+            home.join("prompts/greet.md"),
+            "---\ndescription: greet someone\n---\nSay hello to $1.",
+        )
+        .unwrap();
+        std::fs::write(
+            home.join("skills/pdf/SKILL.md"),
+            "---\ndescription: Read PDF files.\n---\nUse pdftotext.",
+        )
+        .unwrap();
+    });
+    t.wait_for("› ", SLOW);
+    t.typ("/gr");
+    t.wait_for("greet someone", SLOW);
+    t.send(b"\x15");
+    t.typ("/greet Bob\r");
+    t.wait_for("hello Bob", SLOW);
+    t.typ("/skill:pdf the report\r");
+    t.wait_for("read it", SLOW);
+    let all = t.all();
+    assert!(all.contains("prompt /greet"), "{all}");
+    assert!(all.contains("› [skill pdf] the report"), "{all}");
+    assert!(
+        !all.contains("Use pdftotext"),
+        "the skill body isn't shown:\n{all}"
+    );
+    let reqs = s.chat_requests();
+    let first = reqs[0]["messages"].as_array().unwrap();
+    assert!(
+        first[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("- pdf: Read PDF files. ("),
+        "skills are listed in the system prompt"
+    );
+    assert_eq!(first[1]["content"], "Say hello to Bob.");
+    let second = reqs[1]["messages"].as_array().unwrap();
+    let skill = second.last().unwrap()["content"].as_str().unwrap();
+    assert!(
+        skill.starts_with("<skill name=\"pdf\"") && skill.ends_with("</skill>\n\nthe report"),
+        "{skill}"
+    );
+    t.quit();
+}
+
+#[test]
+fn plan_mode_proposes_and_carries_out_a_plan() {
+    let (mut t, s) = Tui::start(
+        vec![
+            text("Plan:\n1. Create notes.txt\n2. Fill it in"),
+            call("write", json!({"path": "notes.txt", "text": "n\n"})),
+            text("Made the file. [DONE:1]"),
+        ],
+        |_| {},
+    );
+    t.wait_for("› ", SLOW);
+    t.typ("/plan\r");
+    t.wait_for("plan mode: read-only", SLOW);
+    t.typ("write notes\r");
+    t.wait_for("what next?", SLOW);
+    let screen = t.contents();
+    assert!(screen.contains("plan: 2 steps"), "{screen}");
+    assert!(screen.contains("Carry out the plan"), "{screen}");
+    t.send(b"\r");
+    t.wait_for("Made the file.", SLOW);
+    t.wait_for("plan 1/2", SLOW);
+    let screen = t.contents();
+    assert!(screen.contains("✓ Create notes.txt"), "{screen}");
+    assert!(screen.contains("○ Fill it in"), "{screen}");
+    assert!(t.project.join("notes.txt").exists());
+    let reqs = s.chat_requests();
+    assert_eq!(
+        reqs[0]["tools"].as_array().unwrap().len(),
+        2,
+        "read and bash only"
+    );
+    let exec = reqs[1]["messages"].as_array().unwrap().last().unwrap()["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(exec.starts_with("Carry out the plan."), "{exec}");
+    t.quit();
+}
+
+#[test]
+fn keybindings_file_rebinds_actions() {
+    let (mut t, _s) = Tui::start(vec![], |p| {
+        let home = p.parent().unwrap().join("home/.psi");
+        std::fs::write(
+            home.join("keybindings.json"),
+            r#"{ "app.plan.toggle": "ctrl+g", "tui.editor.cursorLineStart": [], "bogus": "x" }"#,
+        )
+        .unwrap();
+    });
+    t.wait_for("unknown action 'bogus'", SLOW);
+    t.send(b"\x07"); // Ctrl+G
+    t.wait_for("plan mode: read-only", SLOW);
+    t.typ("/help\r");
+    t.wait_for("plan mode on or off", SLOW);
+    let all = t.all();
+    assert!(all.contains("Ctrl+g"), "{all}");
+    t.quit();
+}
+
+#[test]
+fn themes_color_the_screen() {
+    let (mut t, _s) = Tui::start(vec![text("ok")], |p| {
+        let home = p.parent().unwrap().join("home/.psi");
+        std::fs::create_dir_all(home.join("themes")).unwrap();
+        std::fs::write(
+            home.join("themes/mine.json"),
+            r##"{"name": "mine", "colors": {"userMessageText": 196, "accent": "#00ff00", "syntaxKeyword": "#123456"}}"##,
+        )
+        .unwrap();
+        std::fs::write(home.join("settings.jsonc"), r#"{"theme": "mine"}"#).unwrap();
+    });
+    t.wait_for("› ", SLOW);
+    t.typ("hi\r");
+    t.wait_for("ok", SLOW);
+    {
+        let tall = t.tall.lock().unwrap();
+        let screen = tall.screen();
+        let row = (0..200)
+            .find(|r| screen.contents_between(*r, 0, *r, 10).starts_with("› hi"))
+            .expect("the prompt line");
+        assert_eq!(
+            screen.cell(row, 0).unwrap().fgcolor(),
+            vt100::Color::Idx(196)
+        );
+    }
+    t.typ("/theme\r");
+    t.wait_for("themes: default, mine (now)", SLOW);
+    t.typ("/theme nope\r");
+    t.wait_for("no theme named 'nope'", SLOW);
+    t.quit();
+}
