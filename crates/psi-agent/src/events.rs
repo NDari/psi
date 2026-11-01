@@ -44,6 +44,11 @@ pub enum AgentEvent {
     Compacting {
         tokens: u64,
     },
+    /// Something the user should know that isn't part of the conversation,
+    /// such as an MCP server that failed to connect (§10.2).
+    Notice {
+        text: String,
+    },
     RunEnd {
         stop: String,
         #[serde(skip_serializing_if = "Option::is_none")]

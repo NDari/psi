@@ -83,6 +83,25 @@ Flags worth sweeping: `-fa`, `-b`/`-ub`, `-ctk`/`-ctv` (KV cache type), `-t`, `-
 - Line ranges overlap loosely (the model picks different offsets each pass), so "the same lines" needs a tolerant match.
 - Splitting a file without reading it all is hard for a model; this may only move the failure.
 
+### MCP in the eval, and language-server tools (added 2026-11-01)
+
+**Question:** does the 35B use MCP tools correctly in real runs, and do language-server tools (definition, references, diagnostics, rename) help on multi-file changes? This is H-16 in `psi-plan.md`; no eval run has used an MCP server yet, so this is the first MCP eval to do.
+
+**Context:** two hands-on tries in the Psi repo (rust-analyzer, the 35B, "where is fit_context called" and "what breaks if plan_clear changes"):
+- `isaacphi/mcp-language-server` v0.1.1 killed its own rust-analyzer half a second after starting (it sent a malformed message), so every call failed with "broken pipe" while the server stayed connected. That led to showing failed calls and stderr in `/mcp` and `psi mcp list`.
+- The STRd6 fork (`go install github.com/STRd6/mcp-language-server@latest`, 19 tools, trimmed to definition, references, diagnostics, hover and rename_symbol: about 900 tokens) worked. The model called `references` first on its own both times. Rough spots: it guessed qualified names (`Agent::fit_context`, `Agent.plan_clear`) three times before the bare name worked; one `references` answer missed the production caller (`fit.rs:157`), probably rust-analyzer still indexing; results are positions only, so it read the files after; for callers of callers it went back to grep. On "where is X used" grep is already good, so the gain was small; diagnostics after an edit and cross-file renames are where it should matter more.
+
+**How:**
+1. Put a server in the eval image: pyright (`npm i -g pyright`) and the bridge binary built into the Containerfile, since the tasks are mostly Python and the container has no network. The `--psi-config` directory then holds an `mcp.json` (the bridge with `--lsp pyright-langserver -- --stdio`, `tools` trimmed, `approval: never` for the reading tools).
+2. One quick-set run with it, read the transcripts: are the tools called, with correct names and arguments, and do failures stay readable? This is the correctness check for MCP itself.
+3. Then the multi-file tasks (`multi_rename_callers`, `multi_config_object`, `multi_split_package`, `multi_shipping_bug`) with and without the server, one run each, directional only: steps, reads, and whether `rename_symbol` or `diagnostics` replace grep and test runs.
+
+**Open:**
+- The bridge is a third-party binary in the eval image; pin its version.
+- The cold index may make the first calls incomplete; a warm-up (the first prompt waits up to 10 seconds for servers) may not cover indexing.
+- The model guessing qualified symbol names is a model habit; a line in the tool description from the server can't be changed by Psi, but a skill or prompt line could say to use bare names.
+- One run each; per AGENTS.md, a difference here is a direction, not a score.
+
 ## Done
 
 ### A faster 35B on the Mac for development (added 2026-11-01)

@@ -430,7 +430,8 @@ fn coerce(
                 args.remove(p.name);
                 continue;
             }
-            (ParamKind::String, Value::String(_))
+            (ParamKind::Any, _)
+            | (ParamKind::String, Value::String(_))
             | (ParamKind::Boolean, Value::Bool(_))
             | (ParamKind::Number, Value::Number(_))
             | (ParamKind::Array, Value::Array(_))
@@ -468,6 +469,7 @@ fn coerce(
                 ParamKind::Number => "a number",
                 ParamKind::Array => "a list",
                 ParamKind::Object => "an object",
+                ParamKind::Any => "a value",
             };
             return Err(format!(
                 "{}: '{}' must be {want}. {}",

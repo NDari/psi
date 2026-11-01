@@ -9,6 +9,7 @@ publish.workspace = true
 futures-util.workspace = true
 psi-ai = { path = "../psi-ai" }
 psi-ext = { path = "../psi-ext" }
+psi-mcp = { path = "../psi-mcp" }
 psi-safety = { path = "../psi-safety" }
 psi-session = { path = "../psi-session" }
 psi-tools = { path = "../psi-tools" }
@@ -20,6 +21,7 @@ tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+psi-mcp = { path = "../psi-mcp", features = ["testing"] }
 tempfile.workspace = true
 
 [lints]

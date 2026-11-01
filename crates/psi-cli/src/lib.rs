@@ -3,6 +3,7 @@
 pub mod config;
 pub mod examples;
 pub mod help;
+pub mod mcp;
 pub mod packages;
 pub mod resources;
 pub mod safety;

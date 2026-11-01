@@ -6,6 +6,7 @@ use std::sync::{Arc, Weak};
 
 use psi_ai::{Param, ParamKind, ToolSchema};
 use psi_ext::{ExtManager, ToolInfo};
+use psi_mcp::{Approval as McpApproval, McpManager, McpTool};
 use psi_safety::checkpoint::Checkpoints;
 use psi_safety::policy::{Decision, FileFacts, Policy};
 use psi_tools::{Tool, ToolCtx, ToolOutput};
@@ -13,12 +14,20 @@ use serde_json::{Map, Value, json};
 
 use crate::approval::{Approval, ApprovalRequest, Approver};
 
-/// What a call runs: a core tool, an extension's, or a sub-agent (§10.1).
-#[derive(Debug, Clone)]
+/// What a call runs: a core tool, an extension's, a sub-agent (§10.1) or
+/// an MCP server's tool (§10.2).
+#[derive(Clone)]
 pub enum Callable {
     Core(Tool),
     Ext(ToolInfo),
     Agent,
+    Mcp(Arc<McpTool>, Arc<McpManager>),
+}
+
+impl std::fmt::Debug for Callable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Callable({})", self.name())
+    }
 }
 
 impl Callable {
@@ -27,6 +36,7 @@ impl Callable {
             Callable::Core(t) => t.name(),
             Callable::Ext(i) => &i.name,
             Callable::Agent => crate::subagent::TOOL,
+            Callable::Mcp(t, _) => &t.name,
         }
     }
 
@@ -37,6 +47,7 @@ impl Callable {
             Callable::Core(t) => t.read_only(),
             Callable::Ext(i) => i.read_only,
             Callable::Agent => false,
+            Callable::Mcp(t, _) => t.read_only,
         }
     }
 }
@@ -60,7 +71,7 @@ pub fn schema_of(info: &ToolInfo) -> ToolSchema {
                     ParamKind::Boolean => json!(true),
                     ParamKind::Array => json!([]),
                     ParamKind::Object => json!({}),
-                    ParamKind::String => json!("..."),
+                    ParamKind::String | ParamKind::Any => json!("..."),
                 };
                 example.insert(name.clone(), v);
             }
@@ -87,6 +98,18 @@ pub async fn invoke(
         Callable::Core(t) => t.run(args, ctx).await,
         // The agent runs sub-agents itself (run_one); never reached.
         Callable::Agent => ToolOutput::err("A sub-agent can't run here."),
+        Callable::Mcp(t, m) => {
+            let (text, is_error) = m
+                .call(
+                    t,
+                    args.clone(),
+                    &ctx.cancel,
+                    ctx.max_result_chars,
+                    &ctx.tmpdir,
+                )
+                .await;
+            ToolOutput { text, is_error }
+        }
         Callable::Ext(info) => {
             if ctx.cancel.is_cancelled() {
                 return ToolOutput::err("Aborted before it ran.");
@@ -141,6 +164,14 @@ pub async fn decide(
         Callable::Ext(info) => {
             let script = ext.script(&info.name).is_some();
             policy.ext_tool(&info.name, info.read_only, info.always_ask, script)
+        }
+        Callable::Mcp(t, _) => {
+            let asks = match t.approval {
+                McpApproval::Never => false,
+                McpApproval::Ask => true,
+                McpApproval::Auto => !t.read_only,
+            };
+            policy.mcp_tool(&t.name, t.read_only, asks)
         }
     }
 }

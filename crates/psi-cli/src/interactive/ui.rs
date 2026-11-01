@@ -134,6 +134,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "a new session from before an earlier prompt, to edit and resend it",
     ),
     ("/inspect", "the session as an inspection timeline"),
+    ("/mcp", "the MCP servers: state, tools and their size"),
     ("/reload", "load the extensions again"),
     ("/quit", "leave psi"),
 ];
@@ -319,7 +320,7 @@ impl<W: Write> App<W> {
     }
 
     fn info(&mut self, s: &str) {
-        self.commit(vec![Line::styled(s, dim())]);
+        self.commit(s.lines().map(|l| Line::styled(l, dim())).collect());
     }
 
     fn error(&mut self, s: &str) {
@@ -894,6 +895,7 @@ impl<W: Write> App<W> {
             "undo" => self.send(Cmd::Undo),
             "compact" => self.send(Cmd::Compact(arg.to_owned())),
             "diff" => self.send(Cmd::Diff),
+            "mcp" => self.send(Cmd::Mcp),
             "rewind" | "tree" | "fork" | "stats" | "inspect" | "todos" => {
                 self.pending_entries = Some(match name {
                     "rewind" => "rewind",
@@ -1428,6 +1430,12 @@ impl<W: Write> App<W> {
                     format!("  summarizing the earlier conversation (about {tokens} tokens)..."),
                     dim(),
                 )]);
+            }
+            AgentEvent::Notice { text } => {
+                self.flush_text();
+                let w = self.width();
+                let line = Line::styled(format!("  {text}"), theme::style(Token::Warning));
+                self.commit(line.wrap(w));
             }
             _ => {}
         }

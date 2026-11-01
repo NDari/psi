@@ -177,6 +177,25 @@ impl Policy {
         }
         ask_if(reasons, keys)
     }
+
+    /// A call to an MCP server's tool (§10.2): it acts outside the project,
+    /// beyond checkpoints. `asks` comes from the tool's read-only hint and
+    /// the server's `approval`; strict mode asks before any tool not marked
+    /// read-only.
+    pub fn mcp_tool(&self, name: &str, read_only: bool, asks: bool) -> Decision {
+        let mut reasons = Vec::new();
+        let mut keys = Vec::new();
+        if asks {
+            reasons.push(format!(
+                "{name} is an MCP tool and may act outside the project"
+            ));
+            keys.push(format!("tool:{name}"));
+        } else if self.mode == Mode::Strict && !read_only {
+            reasons.push("strict mode asks before every change".into());
+            keys.push(format!("strict:{name}"));
+        }
+        ask_if(reasons, keys)
+    }
 }
 
 fn ask_if(reasons: Vec<String>, keys: Vec<String>) -> Decision {

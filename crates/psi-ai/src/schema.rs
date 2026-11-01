@@ -12,6 +12,9 @@ pub enum ParamKind {
     Number,
     Array,
     Object,
+    /// MCP tools: a schema with no single type (`anyOf`, a type list);
+    /// the shape fixes leave its value alone.
+    Any,
 }
 
 impl ParamKind {
@@ -36,6 +39,9 @@ pub struct Param {
     pub description: &'static str,
     /// A file path: `~` is expanded and doubled working directories refused.
     pub is_path: bool,
+    /// The property's whole JSON schema, sent instead of the type and
+    /// description (MCP tools, whose schemas nest).
+    pub schema: Option<&'static Value>,
 }
 
 impl Param {
@@ -46,6 +52,7 @@ impl Param {
             required: true,
             description,
             is_path: false,
+            schema: None,
         }
     }
 
@@ -56,6 +63,11 @@ impl Param {
 
     pub const fn path(mut self) -> Self {
         self.is_path = true;
+        self
+    }
+
+    pub const fn with_schema(mut self, schema: &'static Value) -> Self {
+        self.schema = Some(schema);
         self
     }
 }
@@ -74,6 +86,10 @@ impl ToolSchema {
     pub fn to_openai(&self) -> Value {
         let mut props = Map::new();
         for p in &self.params {
+            if let Some(s) = p.schema {
+                props.insert(p.name.into(), s.clone());
+                continue;
+            }
             let ty = match p.kind {
                 ParamKind::String => "string",
                 ParamKind::Integer => "integer",
@@ -81,6 +97,10 @@ impl ToolSchema {
                 ParamKind::Number => "number",
                 ParamKind::Array => "array",
                 ParamKind::Object => "object",
+                ParamKind::Any => {
+                    props.insert(p.name.into(), json!({"description": p.description}));
+                    continue;
+                }
             };
             props.insert(
                 p.name.into(),

@@ -118,6 +118,9 @@ enum Command {
     /// Extension author tools: lint and test an extension.
     #[command(subcommand)]
     Ext(ExtCommand),
+    /// MCP servers from ~/.psi/mcp.json and .psi/mcp.json.
+    #[command(subcommand)]
+    Mcp(McpCommand),
     /// Add a package (a local directory, or git:host/user/repo[@ref]) with its extensions, skills, prompts and themes.
     Install {
         source: String,
@@ -138,6 +141,13 @@ enum Command {
     List,
     /// Short answers about psi's features, for you and the model.
     Help { topic: Option<String> },
+}
+
+#[derive(Debug, Subcommand)]
+enum McpCommand {
+    /// Connect to every enabled server and show its state, tools and their
+    /// size in tokens; exits 1 when one failed or an entry is invalid.
+    List,
 }
 
 #[derive(Debug, Subcommand)]
@@ -302,6 +312,19 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Some(Command::Replay(args)) => runtime()?.block_on(replay_command(args)),
         Some(Command::ReplayServer(args)) => replay_server_command(args),
         Some(Command::Ext(cmd)) => ext_command(cmd),
+        Some(Command::Mcp(McpCommand::List)) => {
+            let cwd = std::env::current_dir().context("reading the working directory")?;
+            let home = std::env::home_dir();
+            let trusted = project_trusted(home.as_deref(), &cwd, false, false)?;
+            let (text, ok) =
+                runtime()?.block_on(psi_cli::mcp::list(home.as_deref(), &cwd, trusted));
+            println!("{text}");
+            Ok(if ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            })
+        }
         Some(
             cmd @ (Command::Install { .. }
             | Command::Remove { .. }

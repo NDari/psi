@@ -31,6 +31,7 @@ use crate::plan::{self, PlanState};
 use crate::post_edit::{self, PostEditCheck};
 use crate::subagent::{self, AgentDef};
 use psi_ext::{AgentRequest, ExtManager, Gate, ToolInfo};
+use psi_mcp::{McpManager, McpTool};
 
 mod fit;
 mod sub;
@@ -196,6 +197,12 @@ pub struct Agent {
     /// The context size when summarizing last failed: no new try until it
     /// grows by a tenth of the window.
     compact_failed_at: Option<u64>,
+    /// MCP servers (§10.2), and their tools as taken at the start of the
+    /// run: the list never changes inside a run (D-42).
+    mcp: Arc<McpManager>,
+    mcp_tools: Vec<Arc<McpTool>>,
+    /// The first run waited for the servers to connect.
+    mcp_waited: bool,
 }
 
 /// A call after the shape-fix pipeline: the tool and its arguments, or the
@@ -223,6 +230,9 @@ const SUB_EVENTS: [&str; 5] = [
     "policy_decision",
     "guard_event",
 ];
+
+/// How long the first run waits for MCP servers still connecting.
+const MCP_WAIT: Duration = Duration::from_secs(10);
 
 /// The pause before the one retry of a request that may pass.
 const RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -256,6 +266,9 @@ impl Agent {
             reads_only: false,
             last_request: None,
             compact_failed_at: None,
+            mcp: McpManager::empty(),
+            mcp_tools: Vec::new(),
+            mcp_waited: false,
         }
         .with_abort_token()
     }
@@ -325,7 +338,8 @@ impl Agent {
             .filter(|t| !(planning && matches!(t, Tool::Write | Tool::Edit)))
             .map(|t| t.name().to_owned())
             .chain(self.ext_tools.iter().map(|(t, _)| t.name.clone()))
-            .chain(self.offers_agents().then(|| subagent::TOOL.to_owned()));
+            .chain(self.offers_agents().then(|| subagent::TOOL.to_owned()))
+            .chain(self.mcp_tools.iter().map(|t| t.name.clone()));
         match &self.active {
             Some(a) => all.filter(|n| a.contains(n)).collect(),
             None => all.collect(),
@@ -339,12 +353,50 @@ impl Agent {
         if self.offers_agents() {
             v.push(subagent::schema(&self.subagents));
         }
+        v.extend(self.mcp_tools.iter().map(|t| t.schema.clone()));
         v
     }
 
     /// The `agent` tool: sub-agents are set, and this isn't one (D-41).
     fn offers_agents(&self) -> bool {
         !self.subagents.is_empty() && self.sub.is_none()
+    }
+
+    /// MCP servers (§10.2): their tools join from the next run.
+    pub fn with_mcp(mut self, mcp: Arc<McpManager>) -> Self {
+        self.mcp = mcp;
+        self.mcp_waited = false;
+        self
+    }
+
+    pub fn mcp(&self) -> &Arc<McpManager> {
+        &self.mcp
+    }
+
+    /// The MCP tools for this run: the first run waits up to
+    /// [`MCP_WAIT`] for servers still connecting; a server that connects
+    /// later joins at the next run.
+    async fn refresh_mcp(&mut self) {
+        if self.mcp.is_empty() {
+            return;
+        }
+        let first = !self.mcp_waited;
+        if first {
+            self.mcp_waited = true;
+            self.mcp.wait(MCP_WAIT).await;
+        }
+        let core: Vec<&str> = self.cfg.tools.iter().map(|t| t.name()).collect();
+        let mut taken: Vec<&str> = core;
+        taken.extend(self.ext_tools.iter().map(|(t, _)| t.name.as_str()));
+        taken.push(subagent::TOOL);
+        self.mcp_tools = self.mcp.tools(&taken);
+        self.refresh_tool_names();
+        // Once, and only from the main agent.
+        if first && self.sub.is_none() {
+            for text in psi_mcp::notices(&self.mcp.status(&taken), self.cfg.n_ctx) {
+                self.emit(AgentEvent::Notice { text });
+            }
+        }
     }
 
     /// Sub-agents for the `agent` tool (§10.1).
@@ -686,6 +738,7 @@ impl Agent {
     }
 
     async fn run_inner(&mut self, input: &str, out: &mut RunOutcome) -> Result<Stop, String> {
+        self.refresh_mcp().await;
         if self.session.entries().is_empty() {
             self.record(EntryBody::Custom {
                 custom_type: "session_info".into(),
@@ -1066,9 +1119,16 @@ impl Agent {
                         (f.name == subagent::TOOL && self.offers_agents())
                             .then_some(Callable::Agent)
                     };
+                    let mcp = || {
+                        self.mcp_tools
+                            .iter()
+                            .find(|t| t.name == f.name)
+                            .map(|t| Callable::Mcp(t.clone(), self.mcp.clone()))
+                    };
                     match core
                         .or_else(ext)
                         .or_else(agent)
+                        .or_else(mcp)
                         .filter(|c| offered.iter().any(|n| n == c.name()))
                     {
                         Some(c) => Ok((c, f.args)),
@@ -1454,6 +1514,10 @@ impl Agent {
             Callable::Ext(i) if !i.read_only => Some(format!(
                 "Not run: {} may change things, and {who}. {instead}",
                 i.name
+            )),
+            Callable::Mcp(t, _) if !t.read_only => Some(format!(
+                "Not run: {} may change things (its server doesn't mark it read-only), and {who}. {instead}",
+                t.name
             )),
             Callable::Agent => {
                 let name = args.get("agent").and_then(Value::as_str).unwrap_or("");

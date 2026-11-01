@@ -26,6 +26,8 @@ pub enum Cmd {
         files: bool,
     },
     Diff,
+    /// /mcp: the MCP servers and their tools.
+    Mcp,
     Mode(Mode),
     Label {
         id: String,
@@ -76,6 +78,11 @@ impl Worker {
                 Cmd::Undo => self.undo(),
                 Cmd::Goto { id, files } => self.goto(&id, files),
                 Cmd::Diff => self.diff(),
+                Cmd::Mcp => {
+                    let r = psi_cli::mcp::report(self.agent.mcp());
+                    // The UI indents the first line.
+                    UiMsg::Info(r.replace('\n', "\n  "))
+                }
                 Cmd::Mode(m) => {
                     self.agent.safety_mut().policy.mode = m;
                     UiMsg::Info(format!("mode: {}", m.as_str()))

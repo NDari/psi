@@ -15,6 +15,7 @@ pub const TOPICS: &[(&str, &str)] = &[
         "keybindings",
         include_str!("../../../docs/help/keybindings.md"),
     ),
+    ("mcp", include_str!("../../../docs/help/mcp.md")),
     ("models", include_str!("../../../docs/help/models.md")),
     ("packages", include_str!("../../../docs/help/packages.md")),
     ("plan", include_str!("../../../docs/help/plan.md")),

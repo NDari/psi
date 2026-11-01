@@ -100,7 +100,10 @@ impl Agent {
         // Set before the extensions, so it leaves their shared state alone.
         child.sub = Some(name.clone());
         child.reads_only = read_only;
-        let mut child = child.with_safety(safety).with_extensions(self.ext.clone());
+        let mut child = child
+            .with_safety(safety)
+            .with_extensions(self.ext.clone())
+            .with_mcp(self.mcp.clone());
         if def.tools.is_some() {
             let allowed = child
                 .tool_names()
