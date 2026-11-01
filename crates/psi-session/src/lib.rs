@@ -10,7 +10,7 @@ pub mod store;
 pub mod time;
 
 pub use entry::{Block, Entry, EntryBody, IdGen, Role, StopReason, Usage, text_of};
-pub use jsonl::{SessionError, read_entries, write_entries};
+pub use jsonl::{SessionError, read_entries, read_entries_lossy, write_entries};
 pub use store::{SessionFile, branch, cwd_slug};
 
 // TODO(phase-7): /fork and /export (HTML) alongside the export work.

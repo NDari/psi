@@ -34,6 +34,26 @@ pub fn read_entries(r: impl BufRead) -> Result<Vec<Entry>, SessionError> {
     Ok(out)
 }
 
+/// Reads the entries that can be read, and says which lines couldn't: a
+/// line cut by a crash while saving, or an entry type from a newer psi.
+/// One bad line no longer makes a whole session unreadable.
+pub fn read_entries_lossy(r: impl BufRead) -> Result<(Vec<Entry>, Vec<String>), SessionError> {
+    let mut out = Vec::new();
+    let mut skipped = Vec::new();
+    for (i, line) in r.split(b'\n').enumerate() {
+        let line = line?;
+        let line = String::from_utf8_lossy(&line);
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str(&line) {
+            Ok(e) => out.push(e),
+            Err(e) => skipped.push(format!("line {}: {e}", i + 1)),
+        }
+    }
+    Ok((out, skipped))
+}
+
 /// Writes entries, one JSON object per line.
 pub fn write_entries<'a>(
     mut w: impl Write,

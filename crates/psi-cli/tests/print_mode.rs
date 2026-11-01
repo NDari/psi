@@ -145,6 +145,44 @@ fn continue_picks_up_the_last_session() {
 }
 
 #[test]
+fn continue_survives_a_session_cut_by_a_crash() {
+    let server = ReplayServer::start(vec![text("one"), text("two"), text("three")]).unwrap();
+    let e = env_for(&server);
+    assert!(psi(&e, &["-p", "first"]).status.success());
+    // A crash while saving: half an entry, no newline.
+    let file = sessions(&e).pop().unwrap();
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&file)
+        .unwrap();
+    std::io::Write::write_all(&mut f, br#"{"type":"message","id":"zz","parent_id":"#).unwrap();
+    drop(f);
+    let out = psi(&e, &["-c", "-p", "second"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("1 line(s) couldn't be read"), "{err}");
+    // The history before the cut reached the model.
+    let m = server.chat_requests()[1]["messages"].clone();
+    assert_eq!(m[1]["content"], "first");
+    assert_eq!(m.as_array().unwrap().last().unwrap()["content"], "second");
+    // The new entries landed on lines of their own: a third run reads them.
+    assert!(psi(&e, &["-c", "-p", "third"]).status.success());
+    let m = server.chat_requests()[2]["messages"].clone();
+    let users: Vec<&str> = m
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|x| x["role"] == "user")
+        .map(|x| x["content"].as_str().unwrap())
+        .collect();
+    assert_eq!(users, ["first", "second", "third"]);
+}
+
+#[test]
 fn budget_and_failures_have_exit_codes() {
     let server = ReplayServer::start(vec![Reply::Chat(ScriptedReply::call(
         "bash",

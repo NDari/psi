@@ -101,7 +101,13 @@ impl Worker {
                     Err(e) => UiMsg::Error(format!("cannot create a session: {e}")),
                 },
                 Cmd::Resume(p) => match SessionFile::open(&p) {
-                    Ok(s) => self.switch(s, "resumed"),
+                    Ok(s) => {
+                        let what = match crate::run_mode::skipped_note(&s) {
+                            Some(note) => format!("resumed; {note}"),
+                            None => "resumed".to_owned(),
+                        };
+                        self.switch(s, &what)
+                    }
                     Err(e) => UiMsg::Error(format!("cannot open {}: {e}", p.display())),
                 },
                 Cmd::Fork(id) => self.fork(&id),

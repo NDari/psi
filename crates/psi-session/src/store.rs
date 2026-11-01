@@ -7,7 +7,7 @@ use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use crate::time::{now_ms, utc_stamp};
-use crate::{Entry, EntryBody, IdGen, SessionError, read_entries};
+use crate::{Entry, EntryBody, IdGen, SessionError, read_entries_lossy};
 
 #[derive(Debug)]
 pub struct SessionFile {
@@ -17,6 +17,8 @@ pub struct SessionFile {
     ids: IdGen,
     /// The entry new ones attach to.
     leaf: Option<String>,
+    /// Lines that couldn't be read when the file was opened.
+    skipped: Vec<String>,
 }
 
 /// The directory name for a working directory: its path with `/` as `-`.
@@ -52,6 +54,7 @@ impl SessionFile {
             entries: Vec::new(),
             ids: IdGen::random_after(None),
             leaf: None,
+            skipped: Vec::new(),
         })
     }
 
@@ -71,10 +74,18 @@ impl SessionFile {
         Ok(s)
     }
 
-    /// An existing session; new entries continue from its last one.
+    /// An existing session; new entries continue from its last one. Lines
+    /// that can't be read (a crash while saving) are left out and listed in
+    /// [`Self::skipped`]; a last line cut short gets its newline first, so
+    /// the next entry starts on a line of its own.
     pub fn open(path: &Path) -> Result<Self, SessionError> {
-        let entries = read_entries(BufReader::new(File::open(path)?))?;
-        let file = OpenOptions::new().append(true).open(path)?;
+        let (entries, skipped) = read_entries_lossy(BufReader::new(File::open(path)?))?;
+        let mut file = OpenOptions::new().append(true).open(path)?;
+        let ends_cut = std::fs::read(path)?.last().is_some_and(|b| *b != b'\n');
+        if ends_cut {
+            file.write_all(b"\n")?;
+            file.flush()?;
+        }
         let leaf = entries.last().map(|e| e.id.clone());
         Ok(Self {
             path: path.to_owned(),
@@ -82,7 +93,13 @@ impl SessionFile {
             ids: IdGen::random_after(leaf.clone()),
             entries,
             leaf,
+            skipped,
         })
+    }
+
+    /// Lines that couldn't be read when the session was opened.
+    pub fn skipped(&self) -> &[String] {
+        &self.skipped
     }
 
     /// The session files in one directory (`<root>/<cwd-slug>`), oldest first.
@@ -202,6 +219,36 @@ mod tests {
         assert_eq!(ids.len(), 3);
         assert_eq!(ids[0], a);
         assert_eq!(ids[0].len(), 8);
+    }
+
+    #[test]
+    fn a_line_cut_by_a_crash_is_skipped_and_the_next_one_is_whole() {
+        let root = tempfile::tempdir().unwrap();
+        let mut s = SessionFile::create(root.path(), Path::new("/p")).unwrap();
+        s.append(cp("a")).unwrap();
+        s.append(cp("b")).unwrap();
+        let path = s.path().to_owned();
+        drop(s);
+        // A crash mid-append, and an entry type this version doesn't know.
+        let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(b"{\"type\":\"from_the_future\",\"id\":\"x\"}\n{\"type\":\"checkp")
+            .unwrap();
+        drop(f);
+        let mut again = SessionFile::open(&path).unwrap();
+        assert_eq!(again.entries().len(), 2);
+        assert_eq!(again.skipped().len(), 2, "{:?}", again.skipped());
+        assert!(
+            again.skipped()[1].starts_with("line 4:"),
+            "{:?}",
+            again.skipped()
+        );
+        let c = again.append(cp("c")).unwrap().clone();
+        assert_eq!(c.parent_id.as_deref(), Some(again.entries()[1].id.as_str()));
+        drop(again);
+        let third = SessionFile::open(&path).unwrap();
+        assert_eq!(third.entries().len(), 3);
+        assert_eq!(third.branch().len(), 3);
+        assert_eq!(third.skipped().len(), 2);
     }
 
     #[test]

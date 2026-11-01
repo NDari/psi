@@ -6,7 +6,7 @@
 use std::fmt::Write;
 use std::path::Path;
 
-use psi_session::{Block, Entry, EntryBody, Role, StopReason, Usage, read_entries, text_of};
+use psi_session::{Block, Entry, EntryBody, Role, StopReason, Usage, read_entries_lossy, text_of};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -29,8 +29,11 @@ pub fn load(path: &Path) -> Result<Record> {
         (path.to_owned(), None)
     };
     let file = std::fs::File::open(&session).ctx(|| format!("opening {}", session.display()))?;
-    let entries = read_entries(std::io::BufReader::new(file))
+    let (entries, skipped) = read_entries_lossy(std::io::BufReader::new(file))
         .map_err(|e| other(format!("{}: {e}", session.display())))?;
+    for s in &skipped {
+        tracing::warn!("{}: {s} (left out)", session.display());
+    }
     let result = match result_path {
         Some(p) if p.is_file() => {
             let text = fsutil::read_to_string(&p)?;

@@ -320,6 +320,7 @@ pub async fn prepare(args: &RunArgs, approver: Arc<dyn Approver>) -> Result<Prep
             SessionFile::create(&sessions, &cwd).context("creating the session file")?
         }
     };
+    let unreadable = skipped_note(&session);
     let wire = WireLog::open(&session.wire_path()).context("opening the wire log")?;
     let client = client.with_wire(Arc::new(wire));
     let stem = session
@@ -356,6 +357,7 @@ pub async fn prepare(args: &RunArgs, approver: Arc<dyn Approver>) -> Result<Prep
         &pkgs,
     ));
     let mut warnings = warnings;
+    warnings.extend(unreadable);
     warnings.extend(pkg_warnings);
     warnings.extend(resources.warnings.iter().cloned());
     let mut tools = core_tools(profile.tools.grep_find_ls);
@@ -426,6 +428,17 @@ pub async fn prepare(args: &RunArgs, approver: Arc<dyn Approver>) -> Result<Prep
         ext_requests,
         ext_sources,
         resources,
+    })
+}
+
+/// A warning when opening the session skipped lines it couldn't read.
+pub fn skipped_note(s: &SessionFile) -> Option<String> {
+    let n = s.skipped().len();
+    (n > 0).then(|| {
+        format!(
+            "{}: {n} line(s) couldn't be read (a crash while saving?) and were left out; the rest of the session is here",
+            s.path().display()
+        )
     })
 }
 

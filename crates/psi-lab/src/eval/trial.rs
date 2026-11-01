@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
-use psi_session::{Entry, EntryBody, IdGen, read_entries, write_entries};
+use psi_session::{Entry, EntryBody, IdGen, read_entries_lossy, write_entries};
 use serde_json::{Value, json};
 
 use super::grade::{Grade, grade};
@@ -317,7 +317,10 @@ fn psi_run(
                     .ctx(|| "copying the wire log".into())?;
             }
             let f = std::fs::File::open(p).ctx(|| format!("opening {}", p.display()))?;
-            read_entries(BufReader::new(f)).map_err(|e| other(format!("{}: {e}", p.display())))?
+            // A trial stopped at its time limit may cut the last line.
+            read_entries_lossy(BufReader::new(f))
+                .map_err(|e| other(format!("{}: {e}", p.display())))?
+                .0
         }
         None => Vec::new(),
     };
