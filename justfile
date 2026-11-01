@@ -17,7 +17,8 @@ state := justfile_directory() / ".llm" / port
 qwen := "-hf bartowski/Qwen_Qwen3.5-4B-GGUF:Q4_K_M --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0 --presence-penalty 1.5 --repeat-penalty 1.0"
 gemma := "-hf google/gemma-4-12B-it-qat-q4_0-gguf:Q4_0 --temp 1.0 --top-p 0.95 --top-k 64 --min-p 0"
 # A larger model, not yet a reference model: the owner's command on the Mac,
-# with thinking on and kept in the history. Sampling is the server's default.
+# with thinking off since H-09 (as well on the quick set, a third less output).
+# Sampling is the server's default.
 qwen35b := '-hf unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL -fa on -np 1 --spec-draft-n-max 3 --chat-template-kwargs {"preserve_thinking":true}'
 
 # List the recipes
@@ -112,7 +113,7 @@ llm-up model="qwen":
     case "{{model}}" in
       qwen) args="{{qwen}}"; auto_spec=draft-mtp; auto_ctx=131072; reasoning=off ;;
       gemma) args="{{gemma}}"; auto_spec=none; auto_ctx=131072; reasoning=off ;;
-      qwen35b) args='{{qwen35b}}'; auto_spec=draft-mtp; auto_ctx=65536; reasoning=auto ;;
+      qwen35b) args='{{qwen35b}}'; auto_spec=draft-mtp; auto_ctx=65536; reasoning=off ;;
       *) echo "llm-up: model is qwen, gemma or qwen35b, not {{model}}" >&2; exit 1 ;;
     esac
     spec="{{spec}}"
