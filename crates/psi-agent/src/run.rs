@@ -23,10 +23,11 @@ use tokio_util::sync::CancellationToken;
 use crate::approval::{
     Approval, ApprovalRequest, Approver, BlockedChoice, BlockedRequest, Headless,
 };
+use crate::compact::{estimate_tokens, plan_clear, trigger};
 use crate::events::AgentEvent;
 use crate::ext::{Callable, decide, invoke, schema_of, tool_runner};
 use crate::guards::{GuardAction, Guards};
-use crate::messages::{build_messages, plan_drop};
+use crate::messages::{build_messages, build_with_sources, plan_drop};
 use crate::plan::{self, PlanState};
 use crate::post_edit::{self, PostEditCheck};
 use psi_ext::{AgentRequest, ExtManager, Gate, ToolInfo};
@@ -642,6 +643,7 @@ impl Agent {
             self.emit(AgentEvent::TurnStart { turn });
             self.ext.notify("turn_start", json!({"turn": turn})).await;
 
+            self.clear_old_results()?;
             let resp = match self.request().await {
                 Ok(r) => r,
                 Err(AiError::ContextOverflow {
@@ -770,13 +772,17 @@ impl Agent {
         }
     }
 
-    async fn request(&mut self) -> Result<Response, AiError> {
-        let system = if self.run_system.is_empty() {
+    fn system_prompt(&self) -> String {
+        if self.run_system.is_empty() {
             self.cfg.system_prompt.clone()
         } else {
             format!("{}\n\n{}", self.cfg.system_prompt, self.run_system)
-        };
-        let messages = build_messages(&system, &self.session.branch());
+        }
+    }
+
+    /// The next request, from the session branch.
+    fn build_request(&self) -> ChatRequest {
+        let messages = build_messages(&self.system_prompt(), &self.session.branch());
         let offered = self.tool_names();
         let tools = self
             .all_schemas()
@@ -784,13 +790,47 @@ impl Agent {
             .filter(|s| offered.iter().any(|n| n == s.name))
             .map(ToolSchema::to_openai)
             .collect();
-        let req = ChatRequest {
+        ChatRequest {
             model: self.cfg.model.clone(),
             messages,
             tools,
             max_tokens: self.cfg.max_output,
             enable_thinking: self.cfg.enable_thinking,
+        }
+    }
+
+    /// Past the trigger (§7.4), old tool results are sent as a one-line
+    /// note from now on, in one batch, enough to get well below it.
+    fn clear_old_results(&mut self) -> Result<(), String> {
+        let n_ctx = self.cfg.n_ctx;
+        let result_tokens = (self.ctx.max_result_chars as u64) / crate::compact::CHARS_PER_TOKEN;
+        let at = trigger(n_ctx, self.cfg.max_output, result_tokens);
+        let branch = self.session.branch();
+        let (messages, sources) = build_with_sources(&self.system_prompt(), &branch);
+        let tools_chars: usize = self
+            .all_schemas()
+            .iter()
+            .map(|s| s.to_openai().to_string().len())
+            .sum();
+        let tokens = estimate_tokens(&branch, &messages, tools_chars);
+        if tokens < at {
+            return Ok(());
+        }
+        let need = tokens - at.saturating_sub(n_ctx / 5);
+        let Some((ids, freed)) = plan_clear(&messages, &sources, need, n_ctx / 10) else {
+            // TODO(phase-7): summarize when clearing can't free enough (§7.4).
+            return Ok(());
         };
+        self.record(EntryBody::ClearedResults {
+            entry_ids: ids,
+            tokens_before: tokens,
+            tokens_freed: freed,
+        })?;
+        Ok(())
+    }
+
+    async fn request(&mut self) -> Result<Response, AiError> {
+        let req = self.build_request();
         if self.ext.listens("context") {
             let m: Vec<Value> = req.messages.iter().map(|m| m.to_json()).collect();
             self.ext.notify("context", json!({"messages": m})).await;

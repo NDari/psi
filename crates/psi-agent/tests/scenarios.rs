@@ -358,6 +358,55 @@ async fn context_overflow_drops_old_turns_and_retries() {
     ));
 }
 
+#[tokio::test]
+async fn old_tool_results_are_cleared_past_the_trigger() {
+    // An 8K window: past a quarter of it, old reads become a note.
+    let mut replies: Vec<Reply> = (0..5)
+        .map(|i| call("read", json!({"path": format!("f{i}.txt")})))
+        .collect();
+    replies.push(text("done"));
+    let f = Fixture::new(replies);
+    for i in 0..5 {
+        let body: String = (0..200)
+            .map(|n| format!("file {i} line {n:03}\n"))
+            .collect();
+        std::fs::write(f.cwd.join(format!("f{i}.txt")), body).unwrap();
+    }
+    let (out, a) = f.run("read the files").await;
+    assert_eq!(out.stop, Stop::Done, "{:?}", out.stop);
+    let freed: Vec<u64> = a
+        .session()
+        .entries()
+        .iter()
+        .filter_map(|e| match &e.body {
+            EntryBody::ClearedResults { tokens_freed, .. } => Some(*tokens_freed),
+            _ => None,
+        })
+        .collect();
+    // Each clearing frees at least a tenth of the window: never a trickle
+    // of small ones, each breaking the prompt cache.
+    assert!(!freed.is_empty());
+    assert!(freed.iter().all(|&t| t >= 8192 / 10), "{freed:?}");
+    let reqs = f.server.chat_requests();
+    let last = reqs.last().unwrap()["messages"].as_array().unwrap();
+    let results: Vec<&str> = last
+        .iter()
+        .filter(|m| m["role"] == "tool")
+        .map(|m| m["content"].as_str().unwrap())
+        .collect();
+    assert_eq!(results.len(), 5);
+    assert_eq!(
+        results[0],
+        "(Result cleared to save context: read f0.txt, 200 lines. Run it again if you need it.)"
+    );
+    // The last three are always sent whole.
+    for r in &results[2..] {
+        assert!(r.contains("line 199"), "{r}");
+    }
+    // The session keeps the results themselves.
+    assert!(tool_results(&a).iter().all(|(t, _)| t.contains("line 199")));
+}
+
 fn psi_agent_note() -> &'static str {
     "(Earlier turns of this conversation were removed to fit the context window.)"
 }

@@ -175,6 +175,17 @@ pub fn timeline(rec: &Record) -> Timeline {
                 guard: guard.clone(),
                 message: message.clone(),
             }),
+            EntryBody::ClearedResults {
+                entry_ids,
+                tokens_before,
+                tokens_freed,
+            } => events.push(Event::Guard {
+                guard: "cleared_results".into(),
+                message: format!(
+                    "{} old tool results cleared at about {tokens_before} tokens, freeing about {tokens_freed}",
+                    entry_ids.len()
+                ),
+            }),
             EntryBody::PolicyDecision {
                 tool_call_id,
                 decision,

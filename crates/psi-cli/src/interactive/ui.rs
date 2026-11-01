@@ -1489,6 +1489,19 @@ impl<W: Write> App<W> {
                     theme::style(Token::Warning),
                 )]);
             }
+            EntryBody::ClearedResults {
+                entry_ids,
+                tokens_freed,
+                ..
+            } => {
+                self.commit(vec![Line::styled(
+                    format!(
+                        "  cleared {} old tool results to save context (about {tokens_freed} tokens)",
+                        entry_ids.len()
+                    ),
+                    dim(),
+                )]);
+            }
             EntryBody::PolicyDecision {
                 decision, reason, ..
             } if decision == "refused" || decision == "granted" => {

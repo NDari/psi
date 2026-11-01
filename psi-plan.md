@@ -269,7 +269,7 @@ In `strict` mode, every write, edit and bash call asks (§8.1).
 - Entry types:
   - Conversation: `message`, `tool_result`.
   - Extension data: `custom` (not sent to the model), `custom_message` (sent to the model).
-  - Maintenance: `compaction`, `label`.
+  - Maintenance: `compaction`, `cleared_results`, `label`.
   - Psi-specific: `checkpoint`, `policy_decision`, `guard_event`.
 - Commands: `/new`, `/resume`, `/tree`, `/fork`, `/label`, `/export` (HTML later).
 - **The session file plus its wire log (§4.6) is the full record** of a session. Evals keep both, inspection reads them, and adapters for other agents (pi) convert into session entries. There is no separate dump format (D-31).
@@ -314,7 +314,7 @@ Fuller hardening, needed only if read-only git is ever auto-allowed outside the 
 
 - **Trigger:** when the remaining room would fall below `max(max_output, 4096) + max_tool_result_size`, or when usage passes 70%, whichever comes first. Check that the trigger can actually fire before overflow for small windows.
 - **Keep a verbatim tail** of the larger of ~20% of the window and 20K tokens (pi's `keepRecentTokens`; 2026-11-01: a bigger tail mattered more than a bigger window in the one long field study, and 20% of the 35B's 64K is only 13K). If the tail splits a turn, restate the user's request verbatim after the summary. (H-07: Heimdall saw this cut overflow endings sharply; the size is tested at small windows.)
-- **Clear old tool results first (2026-11-01).** Before any summary, replace old tool results with a one-line placeholder that says what they were and how to get them back ("read src/a.py, 240 lines: read it again if needed"), keeping the most recent few. No model call; the harness acts (principle 4). Clear in batches, never one at a time: each clearing breaks the prompt cache from that point. Summarize only when clearing doesn't free enough (OpenCode prunes first; Anthropic's tool result clearing keeps the last 3).
+- **Clear old tool results first (2026-11-01).** Before any summary, replace old tool results with a one-line placeholder that says what they were and how to get them back ("read src/a.py, 240 lines: read it again if needed"), keeping the most recent few. No model call; the harness acts (principle 4). Clear in batches, never one at a time: each clearing breaks the prompt cache from that point. Summarize only when clearing doesn't free enough (OpenCode prunes first; Anthropic's tool result clearing keeps the last 3). Built 2026-11-01: past the trigger, the oldest results over 800 characters are cleared (the last 3 always stay) until the estimate is 20% of the window below the trigger; a batch that would free less than 10% of the window is skipped. A `cleared_results` entry lists the cleared tool-result entries, so the session keeps the results and a fork before it sees them whole.
 - **Summary format:** start with a structured template (goal, constraints, decisions, current state, open problems, next step) and compare it with free-form instructions (H-11).
 - **The harness carries state, not the summary (2026-11-01).** Files read and modified come from the tool calls and checkpoints, not from the model, and carry across compactions (pi tracks them the same way). The todo list and the plan's steps are session entries, so they are put back into the context after a compaction instead of trusting the summary to keep them.
 - **Summary request reuses the server's prefix cache (D-38):** send the last real request unchanged (system prompt, tools, messages, sampling and thinking settings) with the summary instruction appended as one more user message, so llama-server only prefills the instruction instead of the whole history. Check before sending that the request is a byte-for-byte extension of the last one. If the model calls a tool, the answer is cut off, or the request fails, fall back to a plain summary request built pi's way (the history flattened to text, each tool result cut to about 2,000 characters), which also serves when the context is too full to extend the last request. A warm-up of the new context and summarizing in the background (before the trigger) wait for evidence that the wait matters. Technique from `pi-prefix-cache-compaction` (npm, 0.6.0); its numbers are its author's, not a baseline.
@@ -781,7 +781,7 @@ Each phase ends with its acceptance criteria passing in the local check, where a
 
 **Phase 7: experiments and polish.**
 - Re-scoped 2026-11-01 for the 35B-class daily driver (D-39). In this order:
-  1. Compaction (§7.4, D-38), with runs at a small window (16K to 24K) for H-07 and H-11: no eval run so far went past 48% of its window, so the default setup never compacts.
+  1. Compaction (§7.4, D-38), with runs at a small window (16K to 24K) for H-07 and H-11: no eval run so far went past 48% of its window, so the default setup never compacts. Stage 1, clearing old tool results, built 2026-11-01 (replay scenario test, no model run yet); next the trigger, tail and summary chain.
   2. H-09, thinking on vs off, on the 35B (it runs with thinking on, and once spent all 8192 output tokens thinking).
   3. Harder quick-set tasks (G-19): the 35B passes 9 of 10, too few failures to find harness problems.
   4. Sub-agents (G-07) and MCP (G-08): more useful with a model that can delegate and handle many tools.

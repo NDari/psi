@@ -3,6 +3,7 @@
 //! budget stops it.
 
 pub mod approval;
+mod compact;
 mod events;
 pub mod ext;
 pub mod guards;

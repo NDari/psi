@@ -1,10 +1,12 @@
 //! The session branch as chat messages, and dropping old turns when the
 //! server says the request is too large (psi-plan.md §4.2).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use psi_ai::{ChatMessage, RawToolCall};
 use psi_session::{Block, Entry, EntryBody, Role, text_of};
+
+use crate::compact::cleared_note;
 
 /// Sent in place of turns dropped to fit the context window.
 pub const DROPPED_NOTE: &str =
@@ -12,15 +14,35 @@ pub const DROPPED_NOTE: &str =
 
 /// Builds the request messages: the system prompt, then the branch. Turns
 /// before the latest compaction's `first_kept_id` are left out, except the
-/// first user message (the task). Consecutive user messages are merged, and
-/// a tool call without a result gets one, so every chat template accepts
-/// the conversation.
+/// first user message (the task). Cleared tool results are sent as a note
+/// (§7.4). Consecutive user messages are merged, and a tool call without a
+/// result gets one, so every chat template accepts the conversation.
 pub fn build_messages(system: &str, branch: &[&Entry]) -> Vec<ChatMessage> {
+    build_with_sources(system, branch).0
+}
+
+/// `build_messages`, plus for each message the id of the tool result entry
+/// it was built from, if it was.
+pub(crate) fn build_with_sources(
+    system: &str,
+    branch: &[&Entry],
+) -> (Vec<ChatMessage>, Vec<Option<String>>) {
     let mut out = vec![ChatMessage::System(system.to_owned())];
+    let mut sources: Vec<Option<String>> = Vec::new();
     let keep_from = branch.iter().rev().find_map(|e| match &e.body {
         EntryBody::Compaction { first_kept_id, .. } => Some(first_kept_id.as_str()),
         _ => None,
     });
+    let cleared: HashSet<&str> = branch
+        .iter()
+        .filter_map(|e| match &e.body {
+            EntryBody::ClearedResults { entry_ids, .. } => Some(entry_ids),
+            _ => None,
+        })
+        .flatten()
+        .map(String::as_str)
+        .collect();
+    let mut calls: HashMap<String, (String, String)> = HashMap::new();
     let mut skipping = false;
     let mut seen_task = false;
     let mut pending: Vec<String> = Vec::new();
@@ -64,7 +86,7 @@ pub fn build_messages(system: &str, branch: &[&Entry]) -> Vec<ChatMessage> {
                 }
                 close_calls(&mut out, &mut pending, &answered);
                 let mut text = String::new();
-                let mut calls = Vec::new();
+                let mut tool_calls = Vec::new();
                 for b in content {
                     match b {
                         Block::Text { text: t } => text.push_str(t),
@@ -75,20 +97,19 @@ pub fn build_messages(system: &str, branch: &[&Entry]) -> Vec<ChatMessage> {
                             raw,
                         } => {
                             pending.push(id.clone());
-                            calls.push(RawToolCall {
+                            let arguments = history_arguments(raw.as_deref(), arguments);
+                            calls.insert(id.clone(), (name.clone(), arguments.clone()));
+                            tool_calls.push(RawToolCall {
                                 id: id.clone(),
                                 name: name.clone(),
-                                arguments: history_arguments(raw.as_deref(), arguments),
+                                arguments,
                             });
                         }
                         // Thinking is never sent back (strip_from_history).
                         Block::Thinking { .. } => {}
                     }
                 }
-                out.push(ChatMessage::Assistant {
-                    text,
-                    tool_calls: calls,
-                });
+                out.push(ChatMessage::Assistant { text, tool_calls });
             }
             EntryBody::ToolResult {
                 tool_call_id,
@@ -96,16 +117,26 @@ pub fn build_messages(system: &str, branch: &[&Entry]) -> Vec<ChatMessage> {
                 ..
             } if !skipping => {
                 answered.insert(tool_call_id);
+                let mut content = text_of(content);
+                if cleared.contains(e.id.as_str()) {
+                    let (name, args) = calls
+                        .get(tool_call_id)
+                        .map_or(("tool", "{}"), |(n, a)| (n.as_str(), a.as_str()));
+                    content = cleared_note(name, args, &content);
+                }
+                sources.resize(out.len(), None);
+                sources.push(Some(e.id.clone()));
                 out.push(ChatMessage::Tool {
                     call_id: tool_call_id.clone(),
-                    content: text_of(content),
+                    content,
                 });
             }
             _ => {}
         }
     }
     close_calls(&mut out, &mut pending, &answered);
-    out
+    sources.resize(out.len(), None);
+    (out, sources)
 }
 
 /// The arguments to send back for a past call: as the model wrote them, so

@@ -57,6 +57,15 @@ pub enum EntryBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tokens_before: Option<u64>,
     },
+    /// Old tool results (by entry id) sent as a one-line note from here
+    /// on, to save context (§7.4). Token counts are estimates.
+    ClearedResults {
+        entry_ids: Vec<String>,
+        #[serde(default)]
+        tokens_before: u64,
+        #[serde(default)]
+        tokens_freed: u64,
+    },
     /// A user label on an entry; `None` clears it.
     Label {
         target_id: String,
@@ -344,6 +353,11 @@ mod tests {
                 summary: "s".into(),
                 first_kept_id: "00000001".into(),
                 tokens_before: Some(9),
+            },
+            EntryBody::ClearedResults {
+                entry_ids: vec!["00000002".into()],
+                tokens_before: 9000,
+                tokens_freed: 3000,
             },
             EntryBody::Label {
                 target_id: "00000001".into(),
