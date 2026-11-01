@@ -197,3 +197,25 @@ async fn gemma_repeating_a_failing_command() {
         "{r:#?}"
     );
 }
+
+/// Gemma 4 12B, `sh_changelog` (2026-10-31, steps 9 and 31): `rm -rf .git`
+/// to start the repository over, which checkpoints can't undo. Both now
+/// ask (headless: denied), and the history is still there.
+#[tokio::test]
+async fn gemma_removing_the_repository() {
+    let fx = Fx::new();
+    fx.repo();
+    let head = fx.git(&["rev-parse", "HEAD"]);
+    let mut replies = recorded("gemma-rm-git");
+    replies.push(text("done"));
+    let (out, a, _s) = fx.run(replies, "Write changelog.sh").await;
+    assert_eq!(out.stop, Stop::Done, "{:?}", out.stop);
+    let r = results(&a);
+    assert_eq!(r.len(), 2, "{r:#?}");
+    assert!(
+        r.iter()
+            .all(|(t, e)| *e && t.contains("`rm .git` is on the always-ask list")),
+        "{r:#?}"
+    );
+    assert_eq!(fx.git(&["rev-parse", "HEAD"]), head);
+}

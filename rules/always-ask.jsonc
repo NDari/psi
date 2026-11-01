@@ -30,5 +30,10 @@
     "psi -p",
     "psi --print",
     "psi --json"
+
+    // Built in, not listed here: "rm .git", removing or moving the
+    // repository's .git in any shape (rm, rmdir, mv, find -delete, a path
+    // inside it, a dot-glob such as .*). Checkpoints can't undo it. Drop it
+    // with "remove": ["rm .git"].
   ]
 }

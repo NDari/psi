@@ -64,6 +64,70 @@ fn word_matches(want: &str, got: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rules {
     rules: Vec<Rule>,
+    /// The built-in [`GIT_DIR_RULE`]; off only when settings remove it.
+    git_dir: bool,
+}
+
+/// The built-in entry: removing or moving the repository's `.git` in any
+/// shape (`rm -rf .git`, `./.git/`, an absolute or quoted path, a path
+/// inside it, a dot-glob like `.*`, `find ... -delete`, `mv .git`).
+/// Checkpoints leave `.git` alone, so nothing could undo it; Gemma 12B
+/// rebuilt a task's repository with `rm -rf .git` again and again
+/// (2026-10-31). Exact-word rules can't express it.
+pub const GIT_DIR_RULE: &str = "rm .git";
+
+/// `.git` as a path component of `s`: alone, as the last component, or
+/// with more after it (`.git/objects`); not `.gitignore` or `.github`.
+fn touches_git_dir(s: &str) -> bool {
+    let b = s.as_bytes();
+    let mut from = 0;
+    while let Some(i) = s[from..].find(".git") {
+        let i = from + i;
+        let before = i == 0 || matches!(b[i - 1], b'/' | b'"' | b'\'' | b'=' | b' ');
+        let after = b
+            .get(i + 4)
+            .is_none_or(|c| matches!(c, b'/' | b'"' | b'\'' | b'*' | b' '));
+        if before && after {
+            return true;
+        }
+        from = i + 4;
+    }
+    false
+}
+
+/// A glob over dot names (`.*`, `.g?t`) that could match `.git`.
+fn dot_glob(s: &str) -> bool {
+    let last = s.trim_end_matches('/').rsplit('/').next().unwrap_or(s);
+    last.starts_with('.') && last.contains(['*', '?', '['])
+}
+
+/// Whether one simple command removes or moves `.git`.
+fn removes_git_dir(argv: &[Word]) -> bool {
+    let Some((prog, args)) = argv.split_first() else {
+        return false;
+    };
+    let Some(name) = prog.lit.as_deref().map(basename) else {
+        return false;
+    };
+    let hits = |w: &Word| {
+        touches_git_dir(&w.raw)
+            || w.lit
+                .as_deref()
+                .is_some_and(|l| touches_git_dir(l) || dot_glob(l))
+    };
+    match name {
+        "rm" | "rmdir" | "unlink" | "shred" | "srm" | "trash" | "trash-put" | "gio" | "mv" => {
+            args.iter().any(hits)
+        }
+        "find" => {
+            let acts = args
+                .iter()
+                .filter_map(|w| w.lit.as_deref())
+                .any(|a| matches!(a, "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir"));
+            acts && args.iter().any(hits)
+        }
+        _ => false,
+    }
 }
 
 #[derive(Deserialize)]
@@ -84,7 +148,10 @@ impl Rules {
     pub fn from_jsonc(text: &str) -> Result<Self, RuleError> {
         let file: RulesFile = jsonc_parser::parse_to_serde_value(text, &Default::default())
             .map_err(|e| RuleError::File(e.to_string()))?;
-        let mut rules = Self { rules: Vec::new() };
+        let mut rules = Self {
+            rules: Vec::new(),
+            git_dir: true,
+        };
         for entry in &file.always_ask {
             rules.push(Self::parse_entry(entry)?);
         }
@@ -112,6 +179,9 @@ impl Rules {
         rules
             .rules
             .retain(|rule| !remove.iter().any(|r| Self::names(&rule.id, r)));
+        if remove.iter().any(|r| Self::names(GIT_DIR_RULE, r)) {
+            rules.git_dir = false;
+        }
         for entry in add {
             rules.push(Self::parse_entry(entry)?);
         }
@@ -125,7 +195,10 @@ impl Rules {
     }
 
     pub fn ids(&self) -> impl Iterator<Item = &str> {
-        self.rules.iter().map(|r| r.id.as_str())
+        self.rules
+            .iter()
+            .map(|r| r.id.as_str())
+            .chain(self.git_dir.then_some(GIT_DIR_RULE))
     }
 
     /// Does a user flag like "git-push" or "git push" name this rule id? (hyphens and spaces equivalent)
@@ -214,6 +287,9 @@ impl Scan<'_> {
     /// Check one simple command, then whatever it runs.
     fn command(&mut self, argv: &[Word], depth: usize) -> Result<(), String> {
         let rules = self.rules;
+        if rules.git_dir && removes_git_dir(argv) && !self.hits.iter().any(|h| h == GIT_DIR_RULE) {
+            self.hits.push(GIT_DIR_RULE.to_owned());
+        }
         for rule in &rules.rules {
             if rule.matches(argv) && !self.hits.contains(&rule.id) {
                 self.hits.push(rule.id.clone());
@@ -552,6 +628,7 @@ mod tests {
                 "psi -p",
                 "psi --print",
                 "psi --json",
+                "rm .git",
             ]
         );
     }
@@ -878,5 +955,51 @@ mod tests {
         assert!(!word_matches("-D", "--Delete"));
         assert!(word_matches("--print", "--print=x"));
         assert!(!word_matches("--print", "--printer"));
+    }
+
+    #[test]
+    fn removing_git_asks_in_every_shape() {
+        let rules = Rules::shipped();
+        for c in [
+            "rm -rf .git",
+            "rm -rf ./.git/",
+            "rm -r /home/u/proj/.git",
+            "rm -rf \".git\"",
+            "rm -rf '.git'",
+            "rm -rf .git/objects",
+            "rm -rf .git/*",
+            "rm -rf .*",
+            "rm -rf \"$(pwd)/.git\"",
+            "cd sub && rm -rf ../.git",
+            "rmdir .git",
+            "unlink .git/index",
+            "mv .git /tmp/old-git",
+            "find . -name .git -exec rm -rf {} +",
+            "find . -path ./.git -delete",
+            "sh -c 'rm -rf .git'",
+            "git init; rm -rf .git; git init",
+            "trash .git",
+            "gio trash .git",
+        ] {
+            assert_eq!(classify(c, &rules), ask(&[GIT_DIR_RULE]), "{c}");
+        }
+        for c in [
+            "rm -rf build",
+            "rm .gitignore",
+            "rm -r .github/workflows",
+            "rm .gitmodules",
+            "rm -rf node_modules/*",
+            "find . -name .git",
+            "ls .git",
+            "cat .git/HEAD",
+            "git status",
+            "mv a.txt b.txt",
+        ] {
+            assert_eq!(classify(c, &rules), Verdict::Clear, "{c}");
+        }
+        // Settings can remove it like any shipped entry.
+        let off = Rules::layered(&[], &["rm .git".into()]).unwrap();
+        assert_eq!(classify("rm -rf .git", &off), Verdict::Clear);
+        assert!(Rules::shipped().ids().any(|i| i == GIT_DIR_RULE));
     }
 }
