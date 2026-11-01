@@ -1,0 +1,434 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)] // Test code.
+//! Esc at every stage of a run (unhappy paths, batch 2): while the answer
+//! streams, while a tool runs, while summarizing, inside a sub-agent,
+//! during a retry's pause, while an approval waits, during an MCP call.
+//! Each run must stop promptly with `Stop::Aborted`, leave a session that
+//! opens, and the next run must work as if nothing happened.
+
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
+
+use futures_util::future::BoxFuture;
+use psi_agent::approval::{Approval, ApprovalRequest, Approver, BlockedChoice, BlockedRequest};
+use psi_agent::subagent::built_in;
+use psi_agent::{Agent, AgentConfig, AgentEvent, Budgets, RunOutcome, Safety, Stop};
+use psi_ai::Client;
+use psi_ai::replay::{ReplayServer, Reply, ScriptedReply};
+use psi_ext::{ExtManager, Limits, Shared, Source};
+use psi_mcp::testing::{config, fake_manager};
+use psi_safety::always_ask::Rules;
+use psi_safety::policy::{Mode, Policy};
+use psi_session::{EntryBody, SessionFile, StopReason, text_of};
+use psi_tools::{ToolCtx, core_tools};
+use serde_json::{Map, Value, json};
+use tempfile::TempDir;
+
+/// Waits for an answer that never comes (a user who hasn't decided).
+struct Undecided;
+
+impl Approver for Undecided {
+    fn approve(&self, _: ApprovalRequest) -> BoxFuture<'static, Approval> {
+        Box::pin(futures_util::future::pending())
+    }
+    fn blocked(&self, _: BlockedRequest) -> BoxFuture<'static, BlockedChoice> {
+        Box::pin(futures_util::future::pending())
+    }
+    fn pause(&self, _: String) -> BoxFuture<'static, bool> {
+        Box::pin(futures_util::future::pending())
+    }
+    fn interactive(&self) -> bool {
+        true
+    }
+}
+
+struct Fx {
+    _tmp: TempDir,
+    cwd: PathBuf,
+    home: PathBuf,
+    server: ReplayServer,
+}
+
+impl Fx {
+    fn new(replies: Vec<Reply>) -> Self {
+        // Not under /tmp: kept next to the other test files.
+        let t = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        let tmp = tempfile::tempdir_in(t).unwrap();
+        let cwd = tmp.path().join("project");
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(home.join(".psi")).unwrap();
+        Self {
+            server: ReplayServer::start(replies).unwrap(),
+            cwd,
+            home,
+            _tmp: tmp,
+        }
+    }
+
+    fn agent(&self, n_ctx: u64, max_result: usize) -> Agent {
+        let session = SessionFile::create(&self.home.join(".psi/sessions"), &self.cwd).unwrap();
+        let cfg = AgentConfig {
+            model: "local".into(),
+            max_output: 512,
+            n_ctx,
+            enable_thinking: None,
+            budgets: Budgets::default(),
+            system_prompt: "sys".into(),
+            tools: core_tools(false),
+            home: Some(self.home.clone()),
+        };
+        let ctx = ToolCtx::new(&self.cwd, &self.home.join("tmp"), max_result);
+        Agent::new(Client::new(&self.server.base_url()), session, cfg, ctx)
+    }
+
+    fn safety(&self, approver: Arc<dyn Approver>) -> Safety {
+        Safety {
+            policy: Policy::new(
+                Mode::Auto,
+                Rules::shipped(),
+                &self.cwd,
+                Some(&self.home),
+                &self.home.join("tmp"),
+            ),
+            checkpoints: None,
+            approver,
+            grants: HashSet::new(),
+            info: Value::Null,
+        }
+    }
+}
+
+/// Runs `prompt` and presses Esc when `when` sees the first matching event.
+/// Returns the outcome, how long the run took after Esc, and the agent.
+async fn esc_on(
+    a: Agent,
+    prompt: &str,
+    when: impl Fn(&AgentEvent) -> bool + Send + 'static,
+) -> (RunOutcome, Duration, Agent) {
+    esc_after(a, prompt, when, || true).await
+}
+
+/// As [`esc_on`], pressing Esc only once `ready` also holds (polled).
+async fn esc_after(
+    a: Agent,
+    prompt: &str,
+    when: impl Fn(&AgentEvent) -> bool + Send + 'static,
+    ready: impl Fn() -> bool + Send + 'static,
+) -> (RunOutcome, Duration, Agent) {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut a = a.with_events(tx);
+    let handle = a.abort_handle();
+    let pressed: Arc<std::sync::Mutex<Option<Instant>>> = Arc::default();
+    let at = pressed.clone();
+    tokio::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            if at.lock().unwrap().is_none() && when(&ev) {
+                while !ready() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                *at.lock().unwrap() = Some(Instant::now());
+                handle.lock().unwrap().cancel();
+            }
+        }
+    });
+    let out = tokio::time::timeout(Duration::from_secs(20), a.run(prompt))
+        .await
+        .expect("the run didn't stop");
+    let after = pressed
+        .lock()
+        .unwrap()
+        .expect("Esc was never pressed")
+        .elapsed();
+    (out, after, a)
+}
+
+/// The aborted run stopped promptly and its session opens.
+fn stopped(out: &RunOutcome, after: Duration, a: &Agent) {
+    assert_eq!(out.stop, Stop::Aborted, "{:?}", out.stop);
+    assert!(after < Duration::from_secs(3), "took {after:?} after Esc");
+    let s = SessionFile::open(a.session().path()).expect("the session opens");
+    assert_eq!(s.entries().len(), a.session().entries().len());
+}
+
+fn call(name: &str, args: Value) -> Reply {
+    Reply::Chat(ScriptedReply::call(name, args))
+}
+
+fn text(t: &str) -> Reply {
+    Reply::Chat(ScriptedReply::text(t))
+}
+
+fn results(a: &Agent) -> Vec<(String, bool)> {
+    a.session()
+        .entries()
+        .iter()
+        .filter_map(|e| match &e.body {
+            EntryBody::ToolResult {
+                content, is_error, ..
+            } => Some((text_of(content), *is_error)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A process with this id is gone (killed, not left running).
+fn gone(pid: &str) -> bool {
+    for _ in 0..50 {
+        if !Path::new(&format!("/proc/{}", pid.trim())).exists() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
+
+#[tokio::test]
+async fn esc_while_the_answer_streams() {
+    let fx = Fx::new(vec![Reply::hang("Thinking about"), text("hi")]);
+    let a = fx.agent(32_768, 20_000);
+    let (out, after, a) = esc_on(a, "go", |e| matches!(e, AgentEvent::TextDelta { .. })).await;
+    stopped(&out, after, &a);
+    let aborted = a
+        .session()
+        .entries()
+        .iter()
+        .rev()
+        .find_map(|e| match &e.body {
+            EntryBody::Message { stop_reason, .. } => *stop_reason,
+            _ => None,
+        });
+    assert_eq!(aborted, Some(StopReason::Aborted));
+    // The next run works and sends a well-formed history.
+    let mut a = a;
+    let out = a.run("again").await;
+    assert_eq!(out.stop, Stop::Done, "{:?}", out.stop);
+    assert_eq!(out.text, "hi");
+    let reqs = fx.server.chat_requests();
+    // The earlier prompt stays, merged with the new one (the roles must
+    // alternate, and the aborted answer had nothing to send).
+    let users: Vec<&str> = reqs[1]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == "user")
+        .map(|m| m["content"].as_str().unwrap())
+        .collect();
+    assert_eq!(users, ["go\n\nagain"]);
+}
+
+#[tokio::test]
+async fn esc_while_a_tool_runs_kills_it() {
+    let fx = Fx::new(vec![
+        call("bash", json!({"command": "echo $$ > pid; exec sleep 30"})),
+        text("ok"),
+    ]);
+    let a = fx.agent(32_768, 20_000);
+    let (out, after, mut a) = esc_on(a, "go", |e| matches!(e, AgentEvent::ToolStart { .. })).await;
+    stopped(&out, after, &a);
+    // Esc may land before bash wrote its pid; then nothing ran.
+    if let Ok(pid) = std::fs::read_to_string(fx.cwd.join("pid")) {
+        assert!(gone(&pid), "the command was left running");
+    }
+    assert!(results(&a)[0].1, "{:?}", results(&a));
+    assert_eq!(a.run("again").await.stop, Stop::Done);
+}
+
+#[tokio::test]
+async fn esc_while_summarizing_keeps_the_history() {
+    let summary = "## Goal\nPort the parser.";
+    let fx = Fx::new(vec![
+        Reply::Chat(ScriptedReply {
+            prompt_tokens: 9500,
+            ..ScriptedReply::call("read", json!({"path": "f.txt"}))
+        }),
+        Reply::hang("## Goal"),
+        // The next run summarizes again, then answers.
+        text(summary),
+        text("ok"),
+    ]);
+    std::fs::write(fx.cwd.join("f.txt"), "line\n".repeat(200)).unwrap();
+    let mut a = fx.agent(16_384, 7372);
+    for i in 0..30 {
+        let id = format!("old{i}");
+        let s = a.session_mut();
+        s.append(EntryBody::Message {
+            role: psi_session::Role::Assistant,
+            content: vec![psi_session::Block::ToolCall {
+                id: id.clone(),
+                name: "read".into(),
+                arguments: json!({"path": format!("old{i}.txt")}),
+                raw: None,
+            }],
+            usage: None,
+            stop_reason: None,
+            error: None,
+            model: None,
+        })
+        .unwrap();
+        s.append(EntryBody::ToolResult {
+            tool_call_id: id,
+            tool_name: "read".into(),
+            content: vec![psi_session::Block::Text {
+                text: format!("old {i} ").repeat(80),
+            }],
+            is_error: false,
+        })
+        .unwrap();
+    }
+    // Esc once the summary request is waiting on the server.
+    let requests = fx.server.chat_counter();
+    let (out, after, mut a) = esc_after(
+        a,
+        "go on",
+        |e| matches!(e, AgentEvent::Compacting { .. }),
+        move || requests() >= 2,
+    )
+    .await;
+    stopped(&out, after, &a);
+    assert_eq!(fx.server.chat_requests().len(), 2);
+    let compactions = |a: &Agent| {
+        a.session()
+            .entries()
+            .iter()
+            .filter(|e| matches!(e.body, EntryBody::Compaction { .. }))
+            .count()
+    };
+    assert_eq!(compactions(&a), 0, "a cut summary isn't recorded");
+    let out = a.run("continue").await;
+    assert_eq!(out.stop, Stop::Done, "{:?}", out.stop);
+    assert_eq!(compactions(&a), 1);
+}
+
+#[tokio::test]
+async fn esc_inside_a_sub_agent_stops_both() {
+    let fx = Fx::new(vec![
+        call("agent", json!({"agent": "worker", "task": "Wait."})),
+        call("bash", json!({"command": "echo $$ > pid; exec sleep 30"})),
+        text("ok"),
+    ]);
+    let a = fx
+        .agent(32_768, 20_000)
+        .with_safety(fx.safety(Arc::new(Undecided)))
+        .with_subagents(built_in());
+    let (out, after, mut a) = esc_on(a, "go", |e| {
+        matches!(e, AgentEvent::Subagent { event, .. } if matches!(**event, AgentEvent::ToolStart { .. }))
+    })
+    .await;
+    stopped(&out, after, &a);
+    let r = results(&a);
+    assert!(r[0].1 && r[0].0.contains("stopped by the user"), "{r:?}");
+    if let Ok(pid) = std::fs::read_to_string(fx.cwd.join("pid")) {
+        assert!(gone(&pid), "the sub-agent's command was left running");
+    }
+    // No parent request after the abort; the next run works.
+    assert_eq!(fx.server.chat_requests().len(), 2);
+    assert_eq!(a.run("again").await.stop, Stop::Done);
+}
+
+#[tokio::test]
+async fn esc_during_a_retrys_pause() {
+    let fx = Fx::new(vec![
+        Reply::Error {
+            status: 503,
+            body: json!({"error": {"code": 503, "message": "Loading model"}}),
+        },
+        text("ok"),
+    ]);
+    let a = fx.agent(32_768, 20_000);
+    let (out, after, mut a) = esc_on(a, "go", |e| matches!(e, AgentEvent::Retrying { .. })).await;
+    stopped(&out, after, &a);
+    assert_eq!(fx.server.chat_requests().len(), 1, "no retry after Esc");
+    assert_eq!(a.run("again").await.stop, Stop::Done);
+}
+
+#[tokio::test]
+async fn esc_while_an_approval_waits() {
+    let fx = Fx::new(vec![
+        call("bash", json!({"command": "git push"})),
+        text("ok"),
+    ]);
+    let a = fx
+        .agent(32_768, 20_000)
+        .with_safety(fx.safety(Arc::new(Undecided)));
+    let (out, after, mut a) = esc_on(a, "go", |e| matches!(e, AgentEvent::ToolStart { .. })).await;
+    stopped(&out, after, &a);
+    let r = results(&a);
+    assert_eq!(
+        r[0],
+        (
+            "Not run: the user stopped the run before answering whether to run it.".into(),
+            true
+        )
+    );
+    assert_eq!(a.run("again").await.stop, Stop::Done);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn esc_during_an_mcp_call() {
+    let fx = Fx::new(vec![call("mcp__slow__wait", json!({})), text("ok")]);
+    let tools = json!([{"name": "wait", "annotations": {"readOnlyHint": true},
+        "inputSchema": {"type": "object", "properties": {}}}]);
+    let mcp = fake_manager(
+        config("slow"),
+        tools,
+        Arc::new(|_: &str, _: &Map<String, Value>| {
+            std::thread::sleep(Duration::from_secs(2));
+            json!({"content": [{"type": "text", "text": "late"}]})
+        }),
+    )
+    .await;
+    let a = fx.agent(32_768, 20_000).with_mcp(mcp);
+    let (out, after, mut a) = esc_on(a, "go", |e| matches!(e, AgentEvent::ToolStart { .. })).await;
+    stopped(&out, after, &a);
+    assert!(after < Duration::from_secs(1), "{after:?}");
+    assert_eq!(results(&a)[0], ("[aborted]".into(), true));
+    assert_eq!(a.run("again").await.stop, Stop::Done);
+}
+
+/// An extension tool that runs bash through `ctx.execute_tool`.
+const EXT: &str = r#"
+return {
+  name = "runner", version = "1", description = "runs bash",
+  setup = function(psi)
+    psi.register_tool{
+      name = "echo_hi", description = "Say hi through bash", params = {},
+      execute = function(args, ctx)
+        local r = ctx.execute_tool("bash", { command = "echo hi" })
+        return r.text
+      end,
+    }
+  end,
+}
+"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn extension_tools_run_bash_after_an_abort() {
+    let fx = Fx::new(vec![
+        Reply::hang("x"),
+        call("echo_hi", json!({})),
+        text("ok"),
+    ]);
+    let exts = fx.home.join("exts");
+    std::fs::create_dir_all(&exts).unwrap();
+    std::fs::write(exts.join("runner.lua"), EXT).unwrap();
+    let shared = Arc::new(RwLock::new(Shared {
+        cwd: fx.cwd.display().to_string(),
+        mode: "test".into(),
+        ..Shared::default()
+    }));
+    let (ui, _ui_rx) = tokio::sync::mpsc::unbounded_channel();
+    let sources = vec![Source::Lua(exts.join("runner.lua"))];
+    let (ext, errors) = tokio::task::spawn_blocking(move || {
+        ExtManager::start(&sources, shared, Limits::default(), ui)
+    })
+    .await
+    .unwrap();
+    assert!(errors.is_empty(), "{errors:?}");
+    let a = fx.agent(32_768, 20_000).with_extensions(ext);
+    let (out, after, mut a) = esc_on(a, "go", |e| matches!(e, AgentEvent::TextDelta { .. })).await;
+    stopped(&out, after, &a);
+    assert_eq!(a.run("again").await.stop, Stop::Done);
+    assert_eq!(results(&a)[0], ("hi".into(), false), "{:?}", results(&a));
+}

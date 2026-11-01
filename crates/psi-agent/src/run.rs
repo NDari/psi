@@ -316,6 +316,18 @@ impl Agent {
         if self.sub.is_some() {
             return;
         }
+        self.set_tool_runner();
+        let names = self.tool_names();
+        self.ext.update_shared(|s| s.active_tools = names);
+    }
+
+    /// `psi.execute_tool` runs with this agent's current cancel token and
+    /// policy: set again at each run, after an abort renewed the token or
+    /// `/mode` changed the policy.
+    fn set_tool_runner(&self) {
+        if self.sub.is_some() {
+            return;
+        }
         self.ext.set_tool_runner(tool_runner(
             self.ctx.clone(),
             self.safety.policy.clone(),
@@ -323,8 +335,6 @@ impl Agent {
             self.cfg.tools.clone(),
             Arc::downgrade(&self.ext),
         ));
-        let names = self.tool_names();
-        self.ext.update_shared(|s| s.active_tools = names);
     }
 
     /// The tools offered to the model, core first. Plan mode leaves out
@@ -696,6 +706,7 @@ impl Agent {
     /// Runs the agent on one user input.
     pub async fn run(&mut self, input: &str) -> RunOutcome {
         self.renew_cancel();
+        self.set_tool_runner();
         self.emit(AgentEvent::RunStart {
             session: self.session.path().display().to_string(),
         });
@@ -1400,7 +1411,14 @@ impl Agent {
                     };
                     let answer = tokio::select! {
                         a = self.safety.approver.approve(req) => a,
-                        () = self.ctx.cancel.cancelled() => Approval::Deny,
+                        () = self.ctx.cancel.cancelled() => {
+                            // Esc while the card was up: stopped, not denied,
+                            // so the model isn't told the user said no.
+                            self.policy(id, "aborted", &reason)?;
+                            return Ok(ToolOutput::err(
+                                "Not run: the user stopped the run before answering whether to run it.",
+                            ));
+                        }
                     };
                     match answer {
                         Approval::Once => self.policy(id, "approved", &reason)?,

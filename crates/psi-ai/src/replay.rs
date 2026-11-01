@@ -28,28 +28,25 @@ pub enum Reply {
     Chat(ScriptedReply),
     /// An error response.
     Error { status: u16, body: Value },
+    /// A stream that starts with `text` and then sends nothing more for
+    /// half a minute (a stalled server; tests abort it).
+    Hang { text: String },
 }
 
 impl Reply {
     /// A 200 stream with `body` as its SSE events, closed after them.
     fn stream(body: &str) -> Self {
-        let mut bytes = b"HTTP/1.1 200 OK\r\nServer: llama.cpp\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n".to_vec();
-        bytes.extend_from_slice(body.as_bytes());
-        Reply::Raw { bytes }
+        Reply::Raw {
+            bytes: stream_bytes(body),
+        }
     }
 
     /// An answer that starts with `text` and stops: no finish reason, no
     /// `[DONE]` (a server that died or a dropped connection).
     pub fn cut(text: &str) -> Self {
-        let chunk = |delta: Value| {
-            json!({"choices": [{"finish_reason": null, "index": 0, "delta": delta}],
-                   "object": "chat.completion.chunk"})
-        };
-        Reply::stream(&format!(
-            "data: {}\n\ndata: {}\n\n",
-            chunk(json!({"role": "assistant", "content": null})),
-            chunk(json!({"content": text}))
-        ))
+        Reply::Raw {
+            bytes: cut_bytes(text),
+        }
     }
 
     /// A stream that sends `{"error": ...}` after a little text.
@@ -59,6 +56,10 @@ impl Reply {
             json!({"choices": [{"finish_reason": null, "index": 0, "delta": {"content": "Let me"}}]}),
             json!({"error": {"code": 500, "message": message, "type": "server_error"}})
         ))
+    }
+
+    pub fn hang(text: &str) -> Self {
+        Reply::Hang { text: text.into() }
     }
 
     /// A stream whose data isn't JSON.
@@ -231,6 +232,19 @@ impl ReplayServer {
     pub fn remaining(&self) -> usize {
         lock(&self.state).replies.len()
     }
+
+    /// Counts the chat requests received so far, from any thread (a test
+    /// waiting for a request to be in flight).
+    pub fn chat_counter(&self) -> impl Fn() -> usize + Send + Sync + 'static {
+        let state = self.state.clone();
+        move || {
+            lock(&state)
+                .requests
+                .iter()
+                .filter(|r| r.path.ends_with("/chat/completions"))
+                .count()
+        }
+    }
 }
 
 impl Drop for ReplayServer {
@@ -297,6 +311,13 @@ fn serve(mut conn: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
                 Some(Reply::Error { status, body }) => {
                     http(status, "application/json", body.to_string().as_bytes())
                 }
+                Some(Reply::Hang { text }) => {
+                    drop(st);
+                    conn.write_all(&cut_bytes(&text))?;
+                    conn.flush()?;
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                    return Ok(());
+                }
                 None => http(
                     500,
                     "application/json",
@@ -322,6 +343,24 @@ fn history_parses(body: &[u8]) -> bool {
                 .is_none_or(|a| serde_json::from_str::<Value>(a).is_ok())
         })
     })
+}
+
+fn stream_bytes(body: &str) -> Vec<u8> {
+    let mut bytes = b"HTTP/1.1 200 OK\r\nServer: llama.cpp\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n".to_vec();
+    bytes.extend_from_slice(body.as_bytes());
+    bytes
+}
+
+fn cut_bytes(text: &str) -> Vec<u8> {
+    let chunk = |delta: Value| {
+        json!({"choices": [{"finish_reason": null, "index": 0, "delta": delta}],
+               "object": "chat.completion.chunk"})
+    };
+    stream_bytes(&format!(
+        "data: {}\n\ndata: {}\n\n",
+        chunk(json!({"role": "assistant", "content": null})),
+        chunk(json!({"content": text}))
+    ))
 }
 
 fn http(status: u16, content_type: &str, body: &[u8]) -> Vec<u8> {
