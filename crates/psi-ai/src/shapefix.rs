@@ -179,6 +179,20 @@ pub fn fix_call(
         .filter(|p| p.required && !args.contains_key(p.name))
         .map(|p| p.name)
         .collect();
+    // An edit with new_text and no old_text is usually a whole-file rewrite
+    // (Gemma sent 15 in a row, 2026-11-01). The text may be a fragment, so
+    // don't turn it into a write; say which tool does that.
+    if missing == ["old_text"]
+        && args.contains_key("new_text")
+        && tools.iter().any(|t| t.name == "write")
+    {
+        let path = args.get("path").and_then(Value::as_str).unwrap_or("app.py");
+        let write = serde_json::json!({"path": path, "text": "..."});
+        return Err(format!(
+            "{} is missing 'old_text', the exact text to replace. To replace the whole file, use write {write}. To change part of it: {} {}",
+            tool.name, tool.name, tool.example
+        ));
+    }
     if !missing.is_empty() {
         let list = missing
             .iter()
@@ -645,6 +659,37 @@ mod tests {
         let err = fix("read", "{path: a}").unwrap_err();
         assert!(
             err.starts_with("The arguments for read are not valid JSON"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn edit_without_old_text_points_at_write() {
+        // The shape Gemma 4 12B sent 15 times (2026-11-01, feat_logstats_jsonl).
+        let mut ts = tools();
+        ts.push(ToolSchema {
+            name: "write",
+            description: String::new(),
+            params: vec![
+                Param::new("path", ParamKind::String, "").path(),
+                Param::new("text", ParamKind::String, ""),
+            ],
+            example: json!({"path": "notes.md", "text": "x"}),
+        });
+        let call = RawToolCall {
+            id: "c".into(),
+            name: "edit".into(),
+            arguments: r#"{"intent":"add json","new_text":"import re\nimport json\n","path":"logstats/parse.py"}"#.into(),
+        };
+        let err = fix_call(&call, false, &ts, Path::new("/nonexistent"), None).unwrap_err();
+        assert_eq!(
+            err,
+            r#"edit is missing 'old_text', the exact text to replace. To replace the whole file, use write {"path":"logstats/parse.py","text":"..."}. To change part of it: edit {"path":"app.py","old_text":"x = 1","new_text":"x = 2"}"#
+        );
+        // Without a write tool, the usual refusal.
+        let err = fix("edit", r#"{"path":"a.py","new_text":"y"}"#).unwrap_err();
+        assert!(
+            err.starts_with("edit is missing 'old_text'. Example:"),
             "{err}"
         );
     }

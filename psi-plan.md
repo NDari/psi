@@ -315,6 +315,7 @@ Fuller hardening, needed only if read-only git is ever auto-allowed outside the 
 - **Trigger:** when the remaining room would fall below `max(max_output, 4096) + max_tool_result_size`, or when usage passes 70%, whichever comes first. Check that the trigger can actually fire before overflow for small windows.
 - **Keep a verbatim tail** of the last ~20% of the window. If the tail splits a turn, restate the user's request verbatim after the summary. (H-07: Heimdall saw this cut overflow endings sharply.)
 - **Summary format:** start with a structured template (goal, constraints, decisions, files touched, current state, open problems, next step) and compare it with free-form instructions (H-11).
+- **Summary request reuses the server's prefix cache (D-38):** send the last real request unchanged (system prompt, tools, messages, sampling and thinking settings) with the summary instruction appended as one more user message, so llama-server only prefills the instruction instead of the whole history. Check before sending that the request is a byte-for-byte extension of the last one. If the model calls a tool, the answer is cut off, or the request fails, fall back to a plain summary request. A warm-up of the new context and summarizing in the background (before the trigger) wait for evidence that the wait matters. Technique from `pi-prefix-cache-compaction` (npm, 0.6.0); its numbers are its author's, not a baseline.
 - **On overflow from the server**, use the recovery in §4.2.
 - An optional `compaction_model` can be configured. Extensions can override via `session_before_compact`.
 
@@ -751,7 +752,8 @@ Each phase ends with its acceptance criteria passing in the local check, where a
   - **`psi.register_provider`**: OpenAI-compatible endpoints only; extensions now start before the model is picked.
   - **Packages**: `psi install|remove|update|list`, pi's source syntax for local and git, clones in `~/.psi/git` or `.psi/git`, `packages` in settings (edited without losing comments), resources from `package.json`'s `psi` key or conventional directories (pi packages' skills, prompts and themes load).
   - **Eval variants**: `psi eval run --psi-config <dir>` copies a directory into each psi trial's `~/.psi`; `evals/variants/batteries` turns on todo, a post-edit check and one skill.
-  - **Eval coverage** (Qwen3.6 35B-A3B, one run each, correctness only; small-model runs still to do):
+  - **Small models** (quick set with defaults, on this Linux machine's RTX 4070 Ti SUPER, one run each, correctness only): Qwen3.5 4B `~/.psi/evals/2026-11-01-1046-phase6-local-qwen3.5-4b` and Gemma 4 12B `2026-11-01-1054-phase6-local-gemma4-12b`, no harness failures and no shape fixes in either. Gemma once sent 15 `edit` calls with `path` and the whole file as `new_text` but no `old_text`, and the refusal only showed an edit example. The refusal now names `write` for replacing a whole file (not turned into a write: the text may be a fragment). Replaying that request against Gemma: the old refusal led to a `read`, the new one to a `write` (one sample each). A rerun of the task (`2026-11-01-1153-...-edit-hint`) passed without hitting it.
+  - **Eval coverage** (Qwen3.6 35B-A3B, one run each, correctness only):
     - The quick set with defaults (`~/.psi/evals/2026-11-01-0551-phase6-qwen3.6-35b`) and with `evals/variants/batteries` (`2026-11-01-0606-...-batteries`): no harness failures, no shape fixes. The new prompt line and the skills section are model-facing; both runs carry them.
     - Post-edit check: ran in every task. The first batteries run found a bug in the variant, not in psi: `python3 -m unittest` alone finds no tests when `tests/` isn't a package, so the check said "failed" after every edit (the model ignored it and ran its own tests). Fixed in the variant; psi now cuts commands longer than 60 characters in the result line, since it repeats every turn. A two-task rerun (`2026-11-01-0623-...-batteries-fix`) shows real failures mid-change and passes once fixed.
     - Todo: called in 3 of 10 tasks, lightly (one add, two lists of an empty list). Skills: the 35B never read the listed skill (H-03 holds for it too here); `/skill:name` is the dependable path (D-35).
@@ -760,7 +762,7 @@ Each phase ends with its acceptance criteria passing in the local check, where a
     - With thinking on, the 35B once spent all 8192 output tokens thinking; the truncated-answer guard (§8.6) nudged it and it went on.
 
 **Phase 7: experiments and polish.**
-- Work through the hypothesis table, including H-01 (the extension-writing eval, deferred from Phase 5 on 2026-10-31); compaction tuning; RPC mode; HTML export; MCP (**[G-08]**); sub-agents (**[G-07]**); other backends (**[G-18]**); macOS isolation (**[G-20]**).
+- Work through the hypothesis table, including H-01 (the extension-writing eval, deferred from Phase 5 on 2026-10-31); compaction with the summary from the prefix cache (D-38) and its tuning; RPC mode; HTML export; MCP (**[G-08]**); sub-agents (**[G-07]**); other backends (**[G-18]**); macOS isolation (**[G-20]**).
 - ✅ Every hypothesis has a recorded result.
 
 **Phase 8 (optional): stricter safety and public readiness.** §13.
@@ -821,6 +823,7 @@ Each phase ends with its acceptance criteria passing in the local check, where a
 | D-35 | **Skills follow pi, plus `/skill:name`** to put a skill into the context directly | H-03: small models rarely load what they're told about; the command works regardless of the model (2026-11-01) |
 | D-36 | **Post-edit check once per turn that edited files**, with a capped summary | Running after every edit costs context and time on small windows; once per turn still feeds back before the model's next step (2026-11-01) |
 | D-37 | **Batteries are built against the small reference models, then checked on a larger one** (Qwen3.6 35B-A3B MTP, UD-Q4_K_XL, 64K context, thinking on) | The small models are the floor the harness must hold; the larger model is the expected daily driver and reaches features the small ones don't. Its first quick-set run (2026-10-31) had no harness failures and needed no shape fixes (2026-11-01) |
+| D-38 | **Compaction asks for the summary by extending the last request** (§7.4), not with a new prompt | A new prompt makes the server re-read the whole history: minutes on a local GPU at 100K tokens. Extending the last request hits the prefix cache. Built in core, not as an extension: the extension API can't see or send raw requests, and Psi has one wire format, so most of pi's version (formats, credentials, per-family thinking switches) isn't needed. Open: Psi strips thinking from history, which may break the prefix match when the server keeps thinking (`preserve_thinking`) (2026-11-01) |
 
 ---
 
