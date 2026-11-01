@@ -5,6 +5,10 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 # llama-server settings for llm-up; override like `just ctx=65536 llm-up qwen`.
 port := "9931"
 ctx := "131072"
+# Speculative decoding (llama-server --spec-type): "auto" is draft-mtp for
+# qwen, whose GGUF carries its own draft layers (about 1.8x faster
+# generation here), and none for gemma, which has none. `just spec=none llm-up qwen`.
+spec := "auto"
 # One state directory per port, so two servers can run side by side.
 state := justfile_directory() / ".llm" / port
 
@@ -37,10 +41,11 @@ eval-smoke: eval-build
 api-docs:
     env PSI_BLESS=1 cargo test -q -p psi-ext-api --test drift
 
-# Lint an extension, or run its *_test.lua files
+# Lint an extension
 ext-check path:
     cargo run -q -- ext check {{path}}
 
+# Run an extension's *_test.lua files (default: every example)
 ext-test path="examples/extensions":
     cargo run -q -- ext test {{path}}
 
@@ -51,6 +56,27 @@ fmt:
 # Build the psi binary
 build:
     cargo build
+
+# Build an optimized psi (target/release/psi)
+release:
+    cargo build --release
+
+# Build an optimized psi and install it as ~/.local/bin/psi
+install: release
+    install -Dm755 target/release/psi "$HOME/.local/bin/psi"
+    @echo "installed $HOME/.local/bin/psi ($("$HOME/.local/bin/psi" --version))"
+
+# Run psi in the directory you call this from, e.g. `just run -p "hi"`
+[no-cd]
+[positional-arguments]
+run *args:
+    cargo run -q --manifest-path {{justfile_directory()}}/Cargo.toml -p psi-cli -- "$@"
+
+# The same with the optimized build
+[no-cd]
+[positional-arguments]
+run-release *args:
+    cargo run -q --release --manifest-path {{justfile_directory()}}/Cargo.toml -p psi-cli -- "$@"
 
 # Check every grader: the reference passes, the untouched repo fails
 eval-check *args: build
@@ -69,10 +95,12 @@ llm-up model="qwen":
     #!/usr/bin/env bash
     set -euo pipefail
     case "{{model}}" in
-      qwen) args="{{qwen}}" ;;
-      gemma) args="{{gemma}}" ;;
+      qwen) args="{{qwen}}"; auto_spec=draft-mtp ;;
+      gemma) args="{{gemma}}"; auto_spec=none ;;
       *) echo "llm-up: model is qwen or gemma, not {{model}}" >&2; exit 1 ;;
     esac
+    spec="{{spec}}"
+    [[ "$spec" == auto ]] && spec=$auto_spec
     mkdir -p "{{state}}"
     if [[ -f "{{state}}/pid" ]] && kill -0 "$(cat "{{state}}/pid")" 2>/dev/null; then
       echo "llama-server already running (pid $(cat "{{state}}/pid")); run just llm-down first" >&2
@@ -82,7 +110,7 @@ llm-up model="qwen":
       echo "something else answers on port {{port}}; stop it first" >&2
       exit 1
     fi
-    cmd="llama-server $args --no-mmproj --jinja --alias local -c {{ctx}} -ngl 99 --port {{port}} --reasoning off --seed 0"
+    cmd="llama-server $args --no-mmproj --jinja --alias local -c {{ctx}} -ngl 99 --port {{port}} --reasoning off --seed 0 --spec-type $spec"
     echo "$cmd" > "{{state}}/cmd"
     # setsid is util-linux's; macOS has none, and nohup alone keeps it running.
     detach="nohup"
