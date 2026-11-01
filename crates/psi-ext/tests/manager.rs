@@ -201,6 +201,67 @@ async fn a_runaway_handler_is_stopped_and_the_gate_fails_closed() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn one_extensions_error_keeps_anothers_change() {
+    // A redacts tool results; B's handler fails. The model must still get
+    // A's redaction, and an input A consumed must stay consumed.
+    let d = tempfile::tempdir().unwrap();
+    let a = write(
+        d.path(),
+        "a.lua",
+        r#"return { name = "a", version = "1", description = "redacts",
+          setup = function(psi)
+            psi.on("tool_result", function(ev) return { text = "[redacted]" } end)
+            psi.on("input", function(ev) return { handled = true } end)
+          end }"#,
+    );
+    let b = write(
+        d.path(),
+        "b.lua",
+        r#"return { name = "b", version = "1", description = "fails",
+          setup = function(psi)
+            psi.on("tool_result", function(ev) error("boom") end)
+            psi.on("input", function(ev) error("boom") end)
+          end }"#,
+    );
+    let (m, errors, _ui) = start(vec![Source::Lua(a), Source::Lua(b)], Limits::default()).await;
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = m
+        .chain(
+            "tool_result",
+            json!({"id": "c", "name": "read", "text": "secret", "is_error": false}),
+        )
+        .await;
+    assert_eq!(out["text"], "[redacted]");
+    let out = m
+        .chain("input", json!({"text": "hi", "source": "interactive"}))
+        .await;
+    assert_eq!(out["handled"], true);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_gate_whose_extension_stopped_blocks() {
+    let d = tempfile::tempdir().unwrap();
+    let p = write(
+        d.path(),
+        "gate.lua",
+        r#"return { name = "gate", version = "1", description = "allows",
+          setup = function(psi) psi.on("tool_call", function(ev) end) end }"#,
+    );
+    let (m, errors, _ui) = start(vec![Source::Lua(p)], Limits::default()).await;
+    assert!(errors.is_empty(), "{errors:?}");
+    let call = json!({"id": "c", "name": "bash", "args": {"command": "ls"}});
+    assert!(matches!(
+        m.gate("tool_call", call.clone()).await,
+        Gate::Allow(_)
+    ));
+    m.shutdown();
+    let Gate::Block(reason) = m.gate("tool_call", call).await else {
+        panic!("a stopped gate let the call through");
+    };
+    assert!(reason.contains("the gate extension failed"), "{reason}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn load_errors_name_the_file_and_the_problem() {
     let d = tempfile::tempdir().unwrap();
     let a = write(d.path(), "a.lua", "return 42");

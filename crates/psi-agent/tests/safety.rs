@@ -299,6 +299,41 @@ async fn file_tools_refuse_psi_config_and_ask_for_unrecoverable_paths() {
 }
 
 #[tokio::test]
+async fn a_symlink_and_dotdot_cannot_reach_psi_config() {
+    // Bash in the sandbox may create a symlink to anywhere; a write through
+    // it with `..` lands where the OS resolves it (2026-11-01 audit).
+    let fx = Fx::new();
+    std::fs::create_dir_all(fx.home.join(".cache")).unwrap();
+    std::fs::write(fx.home.join(".psi/settings.jsonc"), "orig").unwrap();
+    let link = format!(
+        "mkdir -p x && ln -s {} x/cfg",
+        fx.home.join(".cache").display()
+    );
+    let server = ReplayServer::start(vec![
+        call("bash", json!({"command": link})),
+        call(
+            "write",
+            json!({"path": "x/cfg/../.psi/settings.jsonc", "text": "{}"}),
+        ),
+        text("ok"),
+    ])
+    .unwrap();
+    let session = fx.session();
+    let mut a = fx.agent(&server, session, fx.safety(Arc::new(Headless), None), true);
+    a.run("go").await;
+    let r = results(&a);
+    assert!(!r[0].1, "{r:?}");
+    assert!(
+        r[1].1 && r[1].0.contains("psi's own configuration"),
+        "{r:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fx.home.join(".psi/settings.jsonc")).unwrap(),
+        "orig"
+    );
+}
+
+#[tokio::test]
 async fn a_failing_checkpoint_makes_writes_ask() {
     let fx = Fx::new();
     let server = ReplayServer::start(vec![

@@ -224,7 +224,11 @@ impl ExtManager {
 
     /// Runs an event through every extension that handles it, in load
     /// order: notify ignores results; chain and gate pass the payload on.
-    /// A gate handler that fails blocks (fails closed).
+    /// A gate fails closed: a handler that fails, takes too long, or whose
+    /// extension has stopped blocks. For other events a failing handler is
+    /// skipped (the extension reports its error) and the payload goes on as
+    /// the earlier handlers left it, so one extension's error doesn't undo
+    /// another's change.
     pub async fn emit(&self, event: &str, payload: Json) -> Result<EventOut, (String, String)> {
         let kind = kind_of(event);
         let mut out = EventOut {
@@ -242,7 +246,11 @@ impl ExtManager {
                 payload: out.payload.clone(),
                 reply: tx,
             };
+            let gate = kind == Kind::Gate;
             if a.tx.send(msg).is_err() {
+                if gate {
+                    return Err((a.name.clone(), "it has stopped".into()));
+                }
                 continue;
             }
             match tokio::time::timeout(EVENT_TIMEOUT, rx).await {
@@ -254,9 +262,13 @@ impl ExtManager {
                         return Ok(out);
                     }
                 }
-                Ok(Ok(Err(e))) => return Err((a.name.clone(), e)),
+                Ok(Ok(Err(e))) if gate => return Err((a.name.clone(), e)),
+                Ok(Ok(Err(_))) => {}
+                Ok(Err(_)) if gate => {
+                    return Err((a.name.clone(), "it stopped without answering".into()));
+                }
                 Ok(Err(_)) => {}
-                Err(_) if kind == Kind::Gate => {
+                Err(_) if gate => {
                     return Err((
                         a.name.clone(),
                         format!("no answer in {}s", EVENT_TIMEOUT.as_secs()),

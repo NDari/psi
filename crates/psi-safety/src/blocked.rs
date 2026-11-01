@@ -50,9 +50,62 @@ fn last_abs_path(line: &str) -> Option<PathBuf> {
         .next_back()
 }
 
-/// Lexically normalizes `p`, then resolves symlinks in its longest
-/// existing prefix.
+/// Where a write to `p` lands, resolved the way the OS resolves it:
+/// symlinks before `..`, so `link/../x` climbs from the link's target, not
+/// from `link`'s directory (a lexical `..` let a write through a symlink
+/// past the policy, 2026-11-01). The longest existing prefix is resolved by
+/// the OS; a dangling symlink is followed to its target; the rest, which
+/// doesn't exist yet, is normalized as text.
 pub fn resolve_path(p: &Path) -> PathBuf {
+    resolve_depth(p, 0)
+}
+
+/// Symlinks followed before giving up (Linux's own limit).
+const MAX_LINKS: usize = 40;
+
+fn resolve_depth(p: &Path, depth: usize) -> PathBuf {
+    let mut existing = p.to_path_buf();
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    let base = loop {
+        if let Ok(real) = existing.canonicalize() {
+            break real;
+        }
+        // A dangling symlink: the write creates its target.
+        if depth < MAX_LINKS
+            && existing
+                .symlink_metadata()
+                .is_ok_and(|m| m.file_type().is_symlink())
+            && let Ok(target) = std::fs::read_link(&existing)
+        {
+            let parent = existing.parent().map(Path::to_path_buf).unwrap_or_default();
+            break resolve_depth(&parent.join(target), depth + 1);
+        }
+        match existing.components().next_back() {
+            Some(last) => {
+                rest.push(last.as_os_str().to_owned());
+                existing.pop();
+            }
+            None => return lexical(p),
+        }
+        if existing.as_os_str().is_empty() {
+            return lexical(p);
+        }
+    };
+    let mut out = base;
+    for r in rest.iter().rev() {
+        match Path::new(r).components().next() {
+            Some(Component::ParentDir) => {
+                out.pop();
+            }
+            Some(Component::CurDir) | None => {}
+            Some(_) => out.push(r),
+        }
+    }
+    out
+}
+
+/// `p` with `.` and `..` removed as text (nothing of it exists).
+fn lexical(p: &Path) -> PathBuf {
     let mut norm = PathBuf::new();
     for c in p.components() {
         match c {
@@ -63,27 +116,7 @@ pub fn resolve_path(p: &Path) -> PathBuf {
             c => norm.push(c),
         }
     }
-    let mut existing = norm.clone();
-    let mut rest = Vec::new();
-    loop {
-        if let Ok(real) = existing.canonicalize() {
-            let mut out = real;
-            for r in rest.iter().rev() {
-                out.push(r);
-            }
-            return out;
-        }
-        match (
-            existing.file_name().map(|n| n.to_owned()),
-            existing.parent(),
-        ) {
-            (Some(name), Some(parent)) => {
-                rest.push(name);
-                existing = parent.to_owned();
-            }
-            _ => return norm,
-        }
-    }
+    norm
 }
 
 #[cfg(test)]
@@ -159,5 +192,41 @@ mod tests {
         let got = blocked_path(&line, std::slice::from_ref(&ws)).unwrap();
         assert_eq!(got, real.canonicalize().unwrap().join("f"));
         assert_eq!(dir_to_add(&got), real.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn dotdot_after_a_symlink_climbs_from_its_target() {
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path().join("home");
+        let ws = d.path().join("ws");
+        std::fs::create_dir_all(home.join(".config")).unwrap();
+        std::fs::create_dir_all(home.join(".psi")).unwrap();
+        std::fs::create_dir_all(ws.join("x")).unwrap();
+        std::os::unix::fs::symlink(home.join(".config"), ws.join("x/cfg")).unwrap();
+        // The OS writes this to home/.psi, not ws/x/.psi.
+        let p = ws.join("x/cfg/../.psi/settings.jsonc");
+        let home = home.canonicalize().unwrap();
+        assert_eq!(resolve_path(&p), home.join(".psi/settings.jsonc"));
+        // A tail that doesn't exist yet is normalized as text.
+        let ws = ws.canonicalize().unwrap();
+        assert_eq!(resolve_path(&ws.join("new/../a/./b")), ws.join("a/b"));
+    }
+
+    #[test]
+    fn a_dangling_symlink_resolves_to_where_the_write_lands() {
+        let d = tempfile::tempdir().unwrap();
+        let ws = d.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let outside = d.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(outside.join("new.txt"), ws.join("link")).unwrap();
+        assert_eq!(
+            resolve_path(&ws.join("link")),
+            outside.canonicalize().unwrap().join("new.txt")
+        );
+        // A symlink loop doesn't hang.
+        std::os::unix::fs::symlink(ws.join("b"), ws.join("a")).unwrap();
+        std::os::unix::fs::symlink(ws.join("a"), ws.join("b")).unwrap();
+        let _ = resolve_path(&ws.join("a/f"));
     }
 }
