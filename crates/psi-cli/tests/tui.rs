@@ -124,6 +124,37 @@ impl Tui {
         self.tall.lock().unwrap().screen().contents()
     }
 
+    /// Waits until `what` is on the screen as it is now (not scrollback).
+    fn wait_screen(&self, what: &str, max: Duration) {
+        let start = Instant::now();
+        while start.elapsed() < max {
+            if self.contents().contains(what) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        panic!(
+            "waited {max:?} for {what:?} on screen:\n{}",
+            self.contents()
+        );
+    }
+
+    /// Waits until `what` has been printed `n` times in all: for text that
+    /// is already in the scrollback once.
+    fn wait_count(&self, what: &str, n: usize, max: Duration) {
+        let start = Instant::now();
+        while start.elapsed() < max {
+            if self.all().matches(what).count() >= n {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        panic!(
+            "waited {max:?} for {what:?} {n} times; all:\n{}",
+            self.all()
+        );
+    }
+
     fn wait_for(&self, what: &str, max: Duration) -> Duration {
         let start = Instant::now();
         while start.elapsed() < max {
@@ -244,12 +275,8 @@ fn slash_completion_puts_the_selection_in_the_box() {
     t.typ("/un");
     t.wait_for("/undo", SLOW);
     t.send(b"\x1b[B"); // Down: the selection goes into the box
-    std::thread::sleep(Duration::from_millis(100));
-    let screen = t.contents();
-    assert!(
-        screen.contains("› /undo"),
-        "what the box shows is what Enter runs:\n{screen}"
-    );
+    // What the box shows is what Enter runs.
+    t.wait_screen("› /undo", SLOW);
     t.esc(); // Esc closes the list
     t.send(b"\x15"); // Ctrl+U clears the line
     t.quit();
@@ -282,9 +309,11 @@ fn resize_redraws_only_the_live_region() {
         .set_size(nz(5000), nz(120));
     let pid = rustix::process::Pid::from_raw(t.child.id() as i32).unwrap();
     rustix::process::kill_process(pid, rustix::process::Signal::WINCH).unwrap();
-    std::thread::sleep(Duration::from_millis(200));
-    t.typ("x");
-    t.wait_for("› x", SLOW);
+    // The new width is used: 110 characters fit on one row of the box (at
+    // the old 100 they would wrap).
+    let long = "x".repeat(110);
+    t.typ(&long);
+    t.wait_screen(&format!("› {long}"), SLOW);
     let all = t.all();
     assert_eq!(
         all.matches("first answer").count(),
@@ -361,13 +390,15 @@ fn steering_esc_and_user_bash() {
     t.wait_for("└ aborted", SLOW);
     assert!(start.elapsed() < Duration::from_secs(5));
     // !cmd runs as the user; its output goes to the model with the next prompt.
-    t.typ("!echo from-the-user\r");
+    // (Output only the command's result has: the command line itself is on
+    // screen at once, and the command runs off the UI thread.)
+    t.typ("!printf 'from-the-%s' user\r");
     t.wait_for("from-the-user", SLOW);
     t.typ("next\r");
     t.wait_for("third", SLOW);
     let reqs = server.chat_requests();
     let m = reqs.last().unwrap()["messages"].to_string();
-    assert!(m.contains("I ran `echo from-the-user`"), "{m}");
+    assert!(m.contains("I ran `printf 'from-the-%s' user`"), "{m}");
     t.quit();
 }
 
@@ -447,7 +478,8 @@ fn fork_starts_a_new_session_before_a_prompt() {
     t.wait_for("↑↓ choose", SLOW);
     t.typ("\r"); // the newest prompt
     t.wait_for("forked: ", SLOW);
-    t.wait_for("› second question", SLOW);
+    // The prompt is back in the editor: printed a second time.
+    t.wait_count("› second question", 2, SLOW);
     t.typ(" again\r");
     t.wait_for("three", SLOW);
     let reqs = s.chat_requests();
@@ -751,5 +783,32 @@ fn a_cut_answer_and_its_retry_dont_run_together() {
     );
     assert!(!all.contains("The answer isThe"), "{all}");
     assert_eq!(all.matches("The answer is").count(), 1, "{all}");
+    t.quit();
+}
+
+#[test]
+fn a_slow_bang_command_keeps_the_screen_live_and_esc_stops_it() {
+    let (mut t, _s) = Tui::start(vec![], |_| {});
+    t.wait_for("› ", SLOW);
+    t.typ("!echo $$ > bang.pid; exec sleep 30\r");
+    // Typing shows while it runs: the screen isn't frozen.
+    t.typ("still here");
+    let took = t.wait_for("still here", Duration::from_secs(2));
+    assert!(took < Duration::from_secs(2), "{took:?}");
+    let pid_file = t.project.join("bang.pid");
+    let start = Instant::now();
+    while !pid_file.exists() && start.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let pid = std::fs::read_to_string(&pid_file).unwrap();
+    t.esc();
+    t.wait_for("stopped the command", SLOW);
+    t.wait_for("[stopped]", SLOW);
+    let gone = (0..50).any(|_| {
+        std::thread::sleep(Duration::from_millis(20));
+        !std::path::Path::new(&format!("/proc/{}", pid.trim())).exists()
+    });
+    assert!(gone, "the command was left running");
+    t.typ("\x03"); // Ctrl+C clears the typed text, so Ctrl+D quits
     t.quit();
 }

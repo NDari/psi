@@ -85,6 +85,10 @@ pub(crate) fn build_with_sources(
                             arguments,
                             raw,
                         } => {
+                            // An id can come again (servers without ids get
+                            // call_0, call_1... each response): this call
+                            // isn't answered until its own result comes.
+                            answered.remove(id.as_str());
                             pending.push(id.clone());
                             let arguments = history_arguments(raw.as_deref(), arguments);
                             calls.insert(id.clone(), (name.clone(), arguments.clone()));
@@ -313,6 +317,30 @@ mod tests {
     fn entries(bodies: Vec<EntryBody>) -> Vec<Entry> {
         let mut ids = IdGen::new();
         bodies.into_iter().map(|b| ids.push(0, b)).collect()
+    }
+
+    #[test]
+    fn a_reused_call_id_without_a_result_still_gets_one() {
+        // call_0 answered in the first turn, then call_0 again cut off by
+        // an abort: the second needs its own placeholder result.
+        let es = entries(vec![
+            user("task"),
+            asst("", Some("call_0")),
+            result("call_0", "first"),
+            asst("", Some("call_0")),
+            user("again"),
+        ]);
+        let refs: Vec<&Entry> = es.iter().collect();
+        let m = build_messages("sys", &refs);
+        let tools: Vec<&ChatMessage> = m
+            .iter()
+            .filter(|x| matches!(x, ChatMessage::Tool { .. }))
+            .collect();
+        assert_eq!(tools.len(), 2, "{m:#?}");
+        assert!(
+            matches!(&m[5], ChatMessage::Tool { content, .. } if content.starts_with("(no result")),
+            "{m:#?}"
+        );
     }
 
     #[test]

@@ -824,7 +824,7 @@ impl Agent {
                 }
                 guards.reset();
             }
-            let resp = match self.request().await {
+            let resp = match self.request(turn).await {
                 Ok(r) => r,
                 Err(AiError::ContextOverflow {
                     n_prompt_tokens,
@@ -886,6 +886,16 @@ impl Agent {
             if resp.tool_calls.is_empty() {
                 self.emit(AgentEvent::TurnEnd { turn });
                 self.ext_notify("turn_end", json!({"turn": turn})).await;
+                // Steering typed during the answer goes in now, as after a
+                // tool turn (pi parity); before, it waited and slipped into
+                // the next run after its first tool call.
+                let steer = Queues::take(&self.queues.steering);
+                if !steer.is_empty() {
+                    for s in steer {
+                        self.record(Self::user_message(&s))?;
+                    }
+                    continue;
+                }
                 let follow = Queues::take(&self.queues.follow_up);
                 if follow.is_empty() {
                     let cut_off = (resp.finish == FinishReason::Length)
@@ -983,14 +993,15 @@ impl Agent {
         }
     }
 
-    async fn request(&mut self) -> Result<Response, AiError> {
+    async fn request(&mut self, turn: u32) -> Result<Response, AiError> {
         let req = self.build_request();
         self.last_request = Some(req.clone());
         if self.ext_listens("context") {
             let m: Vec<Value> = req.messages.iter().map(|m| m.to_json()).collect();
             self.ext_notify("context", json!({"messages": m})).await;
         }
-        self.ext_notify("message_start", json!({"turn": 0})).await;
+        self.ext_notify("message_start", json!({"turn": turn}))
+            .await;
         // Streamed text reaches extensions in order, through one task.
         let updates = self.ext_listens("message_update").then(|| {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -1281,7 +1292,12 @@ impl Agent {
                 }
             }
         }
-        if let Some(action) = guards.on_turn_end(self.turn_changed)
+        // A file changed: the checkpoint saw it, or a write or edit worked
+        // (with checkpoints off there is no capture to see it).
+        let wrote = planned.iter().zip(&outputs).any(|((_, p), o)| {
+            matches!(p, Ok((Callable::Core(Tool::Write | Tool::Edit), _))) && !o.is_error
+        });
+        if let Some(action) = guards.on_turn_end(self.turn_changed || wrote)
             && let (Some((call, _)), Some(o)) = (planned.last(), outputs.last_mut())
         {
             if let GuardAction::Nudge { text, .. } = &action {

@@ -20,7 +20,14 @@ rmcp = { version = "3.8.0", default-features = false, features = ["client", "tra
 
 [features]
 # A fake server over an in-process pipe, for tests.
-testing = ["rmcp/server"]
+testing = ["rmcp/server", "rmcp/transport-io"]
+
+# A real stdio server for the tests (tests/stdio.rs).
+[[bin]]
+name = "psi-mcp-fake"
+required-features = ["testing"]
+test = false
+doc = false
 
 [dev-dependencies]
 psi-mcp = { path = ".", features = ["testing"] }

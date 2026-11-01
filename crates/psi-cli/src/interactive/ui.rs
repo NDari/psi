@@ -198,6 +198,8 @@ pub struct App<W: Write> {
     queues: Queues,
     cancel: std::sync::Arc<std::sync::Mutex<CancellationToken>>,
     running: Option<Running>,
+    /// The process group of a `!cmd` still running.
+    user_bash: Option<u32>,
     card: Option<Card>,
     blocked: Option<(BlockedRequest, oneshot::Sender<BlockedChoice>)>,
     pause: Option<(String, oneshot::Sender<bool>)>,
@@ -268,6 +270,7 @@ impl<W: Write> App<W> {
             queues: p.queues,
             cancel: p.cancel,
             running: None,
+            user_bash: None,
             card: None,
             blocked: None,
             pause: None,
@@ -366,7 +369,19 @@ impl<W: Write> App<W> {
                 self.draw()?;
             }
         }
+        self.stop_user_bash();
         Ok(())
+    }
+
+    /// Stops a running `!cmd` and everything it started.
+    fn stop_user_bash(&mut self) {
+        if let Some(pid) = self
+            .user_bash
+            .take()
+            .and_then(|p| rustix::process::Pid::from_raw(p as i32))
+        {
+            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        }
     }
 
     fn on_event(&mut self, ev: Event) {
@@ -455,6 +470,9 @@ impl<W: Write> App<W> {
                 self.completer.close();
             } else if self.running.is_some() {
                 self.abort();
+            } else if self.user_bash.is_some() {
+                self.stop_user_bash();
+                self.info("  stopped the command");
             }
             return;
         }
@@ -813,31 +831,59 @@ impl<W: Write> App<W> {
         if command.is_empty() {
             return;
         }
+        if self.user_bash.is_some() {
+            return self.error("a command is still running (Esc stops it)");
+        }
         let mut l = Line::default();
         l.push("! ", theme::style(Token::BashMode).bold());
         l.push(&command, Style::default().bold());
         self.commit(vec![Line::default(), l]);
-        // Runs as the user, outside the boundary, without approval (§6).
-        let out = std::process::Command::new("bash")
+        // Runs as the user, outside the boundary, without approval (§6), on
+        // its own thread so the screen stays live, in its own process group
+        // so Esc stops all of it.
+        use std::os::unix::process::CommandExt;
+        let child = std::process::Command::new("bash")
             .arg("-c")
             .arg(&command)
             .stdin(std::process::Stdio::null())
-            .output();
-        let output = match out {
-            Ok(o) => {
-                let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
-                s.push_str(&String::from_utf8_lossy(&o.stderr));
-                if let Some(c) = o.status.code().filter(|c| *c != 0) {
-                    s.push_str(&format!("\n[exit code {c}]"));
-                }
-                s
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .process_group(0)
+            .spawn();
+        let child = match child {
+            Ok(c) => c,
+            Err(e) => {
+                return self.on_msg(UiMsg::UserBash {
+                    command,
+                    output: format!("cannot run bash: {e}"),
+                    to_context,
+                });
             }
-            Err(e) => format!("cannot run bash: {e}"),
         };
-        self.on_msg(UiMsg::UserBash {
-            command,
-            output,
-            to_context,
+        self.user_bash = Some(child.id());
+        let tx = self.ui_tx.clone();
+        std::thread::spawn(move || {
+            let output = match child.wait_with_output() {
+                Ok(o) => {
+                    let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
+                    s.push_str(&String::from_utf8_lossy(&o.stderr));
+                    match (
+                        o.status.code(),
+                        std::os::unix::process::ExitStatusExt::signal(&o.status),
+                    ) {
+                        (Some(c), _) if c != 0 => s.push_str(&format!("\n[exit code {c}]")),
+                        (None, Some(_)) => s.push_str("\n[stopped]"),
+                        _ => {}
+                    }
+                    s
+                }
+                Err(e) => format!("cannot run bash: {e}"),
+            };
+            let _ = tx.send(UiMsg::UserBash {
+                command,
+                output,
+                to_context,
+            });
         });
     }
 
@@ -1108,6 +1154,7 @@ impl<W: Write> App<W> {
                 output,
                 to_context,
             } => {
+                self.user_bash = None;
                 let lines: Vec<&str> = output.lines().collect();
                 let mut out: Vec<Line> = lines
                     .iter()

@@ -13,7 +13,7 @@ use std::time::Duration;
 use process_wrap::tokio::{CommandWrap, ProcessGroup};
 use psi_ai::ToolSchema;
 use rmcp::model::{CallToolRequestParams, ClientCapabilities, ClientConfig, Implementation};
-use rmcp::service::{RoleClient, RunningService, ServiceExt};
+use rmcp::service::{RoleClient, RunningService, ServiceError, ServiceExt};
 use rmcp::transport::TokioChildProcess;
 use rmcp::transport::streamable_http_client::{
     StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
@@ -91,6 +91,16 @@ enum Conn {
         skipped: Vec<(String, String)>,
     },
     Failed(String),
+}
+
+impl Server {
+    /// The connection is gone: its tools leave the next run's list.
+    fn fail(&self, why: &str) {
+        tracing::info!("MCP server '{}': {why}", self.config.name);
+        if let Ok(mut c) = self.conn.lock() {
+            *c = Conn::Failed(why.to_owned());
+        }
+    }
 }
 
 struct Server {
@@ -189,6 +199,7 @@ impl McpManager {
             schema: Value,
             read_only: bool,
         }
+        self.notice_closed();
         let mut picks = Vec::new();
         for s in &self.servers {
             let Ok(conn) = s.conn.lock() else { continue };
@@ -283,6 +294,17 @@ impl McpManager {
                     true,
                 ),
             },
+            Ok(Err(e @ (ServiceError::TransportClosed | ServiceError::TransportSend(_)))) => {
+                let why = format!("it stopped while psi was running ({e})");
+                server.fail(&why);
+                (
+                    format!(
+                        "MCP server '{}' {why}; its tools are gone from the next request. Say so in your answer if you needed it.",
+                        tool.server
+                    ),
+                    true,
+                )
+            }
             Ok(Err(e)) => (format!("MCP server '{}' failed: {e}", tool.server), true),
             Err(_) => (
                 format!(
@@ -297,6 +319,20 @@ impl McpManager {
             server.failed_calls.fetch_add(1, Ordering::Relaxed);
         }
         out
+    }
+
+    /// Marks servers whose connection closed between calls as failed.
+    fn notice_closed(&self) {
+        for s in &self.servers {
+            let closed = matches!(
+                s.conn.lock().as_deref(),
+                Ok(Conn::Connected { service, .. })
+                    if service.is_closed() || service.peer().is_transport_closed()
+            );
+            if closed {
+                s.fail("it stopped while psi was running");
+            }
+        }
     }
 
     /// Each server's state and tools.

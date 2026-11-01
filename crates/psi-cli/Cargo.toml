@@ -25,6 +25,7 @@ psi-ext = { path = "../psi-ext" }
 psi-session = { path = "../psi-session" }
 psi-tools = { path = "../psi-tools" }
 psi-tui = { path = "../psi-tui" }
+rustix.workspace = true
 serde_json.workspace = true
 similar.workspace = true
 tokio.workspace = true

@@ -262,6 +262,36 @@ async fn a_gate_whose_extension_stopped_blocks() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn asking_the_user_in_setup_answers_at_once() {
+    // Nothing can answer while extensions load: an empty answer now and a
+    // load problem that says where asking works, not a 20 s wait.
+    let d = tempfile::tempdir().unwrap();
+    let p = write(
+        d.path(),
+        "eager.lua",
+        r#"return { name = "eager", version = "1", description = "asks too early",
+          setup = function(psi)
+            local yes = psi.ui.confirm("Enable?", "")
+            psi.register_command("state", { description = "x", handler = function() end })
+          end }"#,
+    );
+    let start_at = Instant::now();
+    let (m, errors, _ui) = start(vec![Source::Lua(p)], Limits::default()).await;
+    assert!(
+        start_at.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        start_at.elapsed()
+    );
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].contains("ui.confirm in setup got an empty answer"),
+        "{errors:?}"
+    );
+    // The extension loaded and works.
+    m.run_command("state", "").await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn load_errors_name_the_file_and_the_problem() {
     let d = tempfile::tempdir().unwrap();
     let a = write(d.path(), "a.lua", "return 42");

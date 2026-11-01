@@ -352,11 +352,18 @@ mod tests {
         else {
             panic!("bubblewrap must work for the local check");
         };
-        // Only a loopback interface exists, and it is down: nothing connects.
+        // Only a loopback interface exists, and it is down: nothing connects,
+        // not even to a listener on the host's own 127.0.0.1 (which a
+        // sandbox sharing the host's network would reach; no traffic leaves
+        // the machine either way).
+        let host = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = host.local_addr().unwrap().port();
         let (_, out) = sh(
             &sb,
             &root,
-            "cat /proc/net/dev | tail -n +3 | cut -d: -f1 | tr -d ' '; (exec 3<>/dev/tcp/1.1.1.1/53) 2>&1 && echo connected",
+            &format!(
+                "cat /proc/net/dev | tail -n +3 | cut -d: -f1 | tr -d ' '; (exec 3<>/dev/tcp/127.0.0.1/{port}) 2>&1 && echo connected"
+            ),
         );
         assert!(
             !out.contains("connected\n") && !out.trim_end().ends_with("connected"),

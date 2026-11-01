@@ -3,7 +3,6 @@
 //! tools, scripted or recorded model responses.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use psi_agent::{Agent, AgentConfig, AgentEvent, Budgets, RunOutcome, Stop};
 use psi_ai::Client;
@@ -674,6 +673,31 @@ async fn summarizing_again_and_again_without_changes_pauses() {
 }
 
 #[tokio::test]
+async fn summarizing_often_while_writing_files_doesnt_pause() {
+    // The same refilling context, but every turn writes a file: progress,
+    // so no pause, even without checkpoints to notice the changes.
+    let mut replies = Vec::new();
+    for i in 0..14 {
+        replies.push(Reply::Chat(ScriptedReply {
+            prompt_tokens: 10_500,
+            ..ScriptedReply::call(
+                "write",
+                json!({"path": format!("out{i}.txt"), "text": "x\n".repeat(400)}),
+            )
+        }));
+        replies.push(text(SUMMARY));
+    }
+    replies.push(text("done"));
+    let f = Fixture::new(replies);
+    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    prefill(&mut a, 30);
+    let out = a.run("go on").await;
+    assert_eq!(out.stop, Stop::Done, "{:?} {:?}", out.stop, kinds(&a));
+    assert!(kinds(&a).iter().filter(|k| *k == "compaction").count() >= 12);
+    assert!(!kinds(&a).contains(&"guard compaction_loop".to_owned()));
+}
+
+#[tokio::test]
 async fn summaries_chain_and_the_oldest_merge() {
     let s1 = format!("S1 PELICAN-42 {}", "one ".repeat(700));
     let s2 = format!("S2 {}", "two ".repeat(700));
@@ -731,15 +755,20 @@ async fn abort_stops_a_running_tool() {
         call("bash", json!({"command": "sleep 30"})),
         text("never"),
     ]);
-    let mut a = f.agent(Budgets::default());
+    // Esc when the tool has started, not after a guessed delay.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut a = f.agent(Budgets::default()).with_events(tx);
     let cancel = a.cancel_token();
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        cancel.cancel();
+        while let Some(ev) = rx.recv().await {
+            if matches!(ev, AgentEvent::ToolStart { .. }) {
+                cancel.cancel();
+            }
+        }
     });
     let out = a.run("x").await;
     assert_eq!(out.stop, Stop::Aborted);
-    assert!(tool_results(&a)[0].0.ends_with("[aborted]"));
+    assert!(tool_results(&a)[0].1, "{:?}", tool_results(&a));
 }
 
 #[tokio::test]
@@ -766,6 +795,43 @@ async fn steering_and_follow_up() {
         m2.last().unwrap(),
         &json!({"role": "user", "content": "now explain"})
     );
+}
+
+#[tokio::test]
+async fn steering_during_a_final_answer_gets_its_own_turn() {
+    // The answer has no tool calls; steering typed meanwhile is used now,
+    // not carried into the next run after its first tool call.
+    let f = Fixture::new(vec![
+        text("Here is the plan."),
+        text("Using python, then."),
+        call("bash", json!({"command": "true"})),
+        text("done"),
+    ]);
+    let mut a = f.agent(Budgets::default());
+    a.queues()
+        .steering
+        .lock()
+        .unwrap()
+        .push_back("use python".into());
+    let out = a.run("start").await;
+    assert_eq!(out.text, "Using python, then.");
+    let reqs = f.server.chat_requests();
+    assert_eq!(
+        reqs[1]["messages"].as_array().unwrap().last().unwrap(),
+        &json!({"role": "user", "content": "use python"})
+    );
+    a.run("next").await;
+    let reqs = f.server.chat_requests();
+    let steered = |r: &Value| {
+        r["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["content"] == "use python")
+            .count()
+    };
+    // Once, in the history; never added again.
+    assert_eq!(steered(&reqs[3]), 1);
 }
 
 #[tokio::test]

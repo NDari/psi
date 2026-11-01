@@ -405,10 +405,14 @@ pub fn render_sse(r: &ScriptedReply) -> String {
             json!([{"finish_reason": null, "index": 0, "delta": {"content": r.text}}]),
         ));
     }
+    // Ids differ across replies, as llama-server's random ones do; the
+    // same id every turn hid a bug in pairing calls with results.
+    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     for (i, (name, args)) in r.tool_calls.iter().enumerate() {
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         events.push(chunk(
             json!([{"finish_reason": null, "index": 0, "delta": {"tool_calls": [{
-            "index": i, "id": format!("call_{i}"), "type": "function",
+            "index": i, "id": format!("call_replay_{id}"), "type": "function",
             "function": {"name": name, "arguments": args}}]}}]),
         ));
     }

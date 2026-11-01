@@ -50,6 +50,17 @@ impl ServerHandler for Fake {
     }
 }
 
+/// Serves the fake over stdin and stdout until the client goes away (the
+/// `psi-mcp-fake` binary).
+pub async fn serve_stdio(tools: Value, answer: Answer) {
+    if let Ok(s) = (Fake { tools, answer })
+        .serve(rmcp::transport::stdio())
+        .await
+    {
+        let _ = s.waiting().await;
+    }
+}
+
 /// A config for a server named `name` (the transport isn't used).
 pub fn config(name: &str) -> ServerConfig {
     ServerConfig {
@@ -73,11 +84,26 @@ pub fn config(name: &str) -> ServerConfig {
 /// A manager connected to one fake server offering `tools` (a JSON list
 /// of MCP tools).
 pub async fn fake_manager(config: ServerConfig, tools: Value, answer: Answer) -> Arc<McpManager> {
+    fake_manager_stoppable(config, tools, answer).await.0
+}
+
+/// As [`fake_manager`], with a token that stops the server (its end of
+/// the pipe closes, as when a server process dies).
+pub async fn fake_manager_stoppable(
+    config: ServerConfig,
+    tools: Value,
+    answer: Answer,
+) -> (Arc<McpManager>, tokio_util::sync::CancellationToken) {
     let (client_io, server_io) = tokio::io::duplex(1 << 16);
+    let stop = tokio_util::sync::CancellationToken::new();
+    let stopped = stop.clone();
     tokio::spawn(async move {
         if let Ok(s) = (Fake { tools, answer }).serve(server_io).await {
-            let _ = s.waiting().await;
+            tokio::select! {
+                _ = stopped.cancelled() => { let _ = s.cancel().await; }
+                _ = std::future::pending::<()>() => {}
+            }
         }
     });
-    start_with(config, client_io).await
+    (start_with(config, client_io).await, stop)
 }

@@ -60,6 +60,10 @@ pub struct ExtManager {
     ui: UnboundedSender<(String, Request)>,
     requests: UnboundedSender<(String, Request)>,
     limits: Limits,
+    /// Extensions are loading: nothing can answer the user's questions yet.
+    loading: std::sync::atomic::AtomicBool,
+    /// UI questions asked during setup, reported with the load errors.
+    setup_asks: Mutex<Vec<String>>,
 }
 
 /// Which kind an event is (from the API definition).
@@ -94,9 +98,13 @@ impl ExtManager {
             ui,
             requests: tx,
             limits,
+            loading: false.into(),
+            setup_asks: Mutex::new(Vec::new()),
         });
-        let errors = m.load(sources);
+        // Routed while loading too: a setup that asks the user gets an
+        // answer at once instead of waiting out the load timeout.
         tokio::spawn(route(Arc::downgrade(&m), rx));
+        let errors = m.load(sources);
         (m, errors)
     }
 
@@ -113,10 +121,24 @@ impl ExtManager {
             ui,
             requests,
             limits: Limits::default(),
+            loading: false.into(),
+            setup_asks: Mutex::new(Vec::new()),
         })
     }
 
     fn load(&self, sources: &[Source]) -> Vec<String> {
+        self.loading
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut errors = self.load_all(sources);
+        self.loading
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        if let Ok(mut asks) = self.setup_asks.lock() {
+            errors.append(&mut asks);
+        }
+        errors
+    }
+
+    fn load_all(&self, sources: &[Source]) -> Vec<String> {
         let mut errors = Vec::new();
         let mut actors = Vec::new();
         let mut scripts: Vec<ScriptTool> = Vec::new();
@@ -554,6 +576,40 @@ async fn route(m: Weak<ExtManager>, mut rx: UnboundedReceiver<(String, Request)>
             }
             Request::SetActiveTools(names) => m.push(AgentRequest::SetActiveTools(names)),
             Request::Log(msg) => tracing::info!(ext = %ext, "{msg}"),
+            // Setup can't ask the user: nothing can answer yet. Empty
+            // answers now, and the extension is told where asking works.
+            ask @ (Request::Confirm { .. }
+            | Request::Select { .. }
+            | Request::Input { .. }
+            | Request::Custom { .. })
+                if m.loading.load(std::sync::atomic::Ordering::SeqCst) =>
+            {
+                // Recorded before answering, so the load that waits on
+                // this setup sees it.
+                let what = match &ask {
+                    Request::Confirm { .. } => "ui.confirm",
+                    Request::Select { .. } => "ui.select",
+                    Request::Input { .. } => "ui.input",
+                    _ => "ui.custom",
+                };
+                if let Ok(mut a) = m.setup_asks.lock() {
+                    a.push(format!(
+                        "extension {ext}: {what} in setup got an empty answer (nothing can ask the user while extensions load); ask from an event, command or tool handler"
+                    ));
+                }
+                match ask {
+                    Request::Confirm { reply, .. } => {
+                        let _ = reply.send(false);
+                    }
+                    Request::Select { reply, .. } | Request::Input { reply, .. } => {
+                        let _ = reply.send(None);
+                    }
+                    Request::Custom { reply, .. } => {
+                        let _ = reply.send(None);
+                    }
+                    _ => {}
+                }
+            }
             other => {
                 if let Request::Notify { message, level } = &other {
                     tracing::info!(ext = %ext, level = %level, "{message}");

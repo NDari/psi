@@ -168,3 +168,56 @@ async fn failed_calls_are_counted() {
     m.call(&t[1], Map::new(), &cancel, 1000, dir.path()).await;
     assert_eq!(m.status(&[])[0].failed_calls, 2);
 }
+
+#[tokio::test]
+async fn a_server_that_dies_is_marked_failed_and_its_tools_leave() {
+    let (m, stop) =
+        psi_mcp::testing::fake_manager_stoppable(config("gh"), tools(), Arc::new(answer)).await;
+    let t = m.tools(&[]);
+    let dir = tempfile::tempdir().unwrap();
+    let cancel = CancellationToken::new();
+    let args = || -> Map<String, Value> { serde_json::from_value(json!({"q": "x"})).unwrap() };
+    assert!(!m.call(&t[0], args(), &cancel, 1000, dir.path()).await.1);
+    stop.cancel();
+    // The next call fails, says why and what it means, and the server is
+    // no longer shown as connected.
+    let mut r = (String::new(), false);
+    for _ in 0..50 {
+        r = m.call(&t[0], args(), &cancel, 1000, dir.path()).await;
+        if r.1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        r.1 && r.0.contains("stopped while psi was running"),
+        "{r:?}"
+    );
+    assert!(
+        matches!(&m.status(&[])[0].state, State::Failed(_)),
+        "{:?}",
+        m.status(&[])[0].state
+    );
+    assert!(m.tools(&[]).is_empty());
+}
+
+#[tokio::test]
+async fn a_death_between_calls_shows_in_the_status() {
+    let (m, stop) =
+        psi_mcp::testing::fake_manager_stoppable(config("gh"), tools(), Arc::new(answer)).await;
+    assert_eq!(m.status(&[])[0].state, State::Connected);
+    stop.cancel();
+    let mut state = State::Connected;
+    for _ in 0..50 {
+        state = m.status(&[])[0].state.clone();
+        if state != State::Connected {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        matches!(&state, State::Failed(e) if e.contains("stopped")),
+        "{state:?}"
+    );
+    assert!(m.tools(&[]).is_empty());
+}
