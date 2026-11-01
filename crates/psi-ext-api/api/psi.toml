@@ -528,6 +528,7 @@ fields = [
   { name = "id", type = "string", doc = "" },
   { name = "name", type = "string", doc = "" },
   { name = "args", type = "table", doc = "" },
+  { name = "agent", type = "string?", doc = "The sub-agent that made the call; nil for the main agent (psi help agents)" },
 ]
 
 [[type]]
@@ -546,6 +547,7 @@ fields = [
   { name = "args", type = "table", doc = "" },
   { name = "text", type = "string", doc = "" },
   { name = "is_error", type = "boolean", doc = "" },
+  { name = "agent", type = "string?", doc = "The sub-agent that made the call; nil for the main agent (psi help agents)" },
 ]
 
 [[type]]
@@ -554,6 +556,7 @@ fields = [
   { name = "tool_call_id", type = "string", doc = "" },
   { name = "decision", type = "string", doc = "" },
   { name = "reason", type = "string", doc = "" },
+  { name = "agent", type = "string?", doc = "The sub-agent that made the call; nil for the main agent (psi help agents)" },
 ]
 
 [[type]]
@@ -561,6 +564,7 @@ name = "GuardEvent"
 fields = [
   { name = "guard", type = "string", doc = "" },
   { name = "message", type = "string", doc = "" },
+  { name = "agent", type = "string?", doc = "The sub-agent that made the call; nil for the main agent (psi help agents)" },
 ]
 
 [[type]]

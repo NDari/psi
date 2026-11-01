@@ -399,6 +399,10 @@ pub async fn prepare(args: &RunArgs, approver: Arc<dyn Approver>) -> Result<Prep
         .with_safety(safety)
         .with_extensions(ext.clone())
         .with_post_edit_check(post_edit);
+    if args.settings["subagents"].as_bool() == Some(true) {
+        let defs = psi_agent::subagent::with_built_in(resources.agents.clone());
+        agent = agent.with_subagents(defs);
+    }
     agent.restore_plan();
     if args.plan {
         agent.set_plan_mode(true).map_err(anyhow::Error::msg)?;

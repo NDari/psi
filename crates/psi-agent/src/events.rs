@@ -35,6 +35,11 @@ pub enum AgentEvent {
     TurnEnd {
         turn: u32,
     },
+    /// What a sub-agent is doing (§10.1): its tool calls, as they start.
+    Subagent {
+        agent: String,
+        event: Box<AgentEvent>,
+    },
     /// A summary of the earlier conversation is being written (§7.4).
     Compacting {
         tokens: u64,

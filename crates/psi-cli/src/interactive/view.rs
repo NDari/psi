@@ -2,6 +2,7 @@
 //! committed once as a header, a summary, a few output lines and a short
 //! diff; the status line; the approval card; dropdowns.
 
+use psi_agent::approval::ApprovalRequest;
 use psi_tui::theme::{self, Token};
 use psi_tui::{Line, Style};
 use serde_json::Value;
@@ -42,6 +43,7 @@ pub fn call_summary(name: &str, args: &Value) -> String {
             out
         }
         "write" | "edit" => s("path").to_owned(),
+        "agent" => format!("{}: {}", s("agent"), s("task").replace('\n', " ")),
         "grep" => format!("{} {}", s("pattern"), s("path")).trim().to_owned(),
         "find" | "ls" => format!("{} {}", s("pattern"), s("path")).trim().to_owned(),
         "todo" => {
@@ -252,24 +254,19 @@ pub fn status_line(s: &Status, width: usize) -> Line {
 }
 
 /// The approval card under the input box (§8.7).
-pub fn approval_card(
-    tool: &str,
-    args: &Value,
-    intent: Option<&str>,
-    preceding: &str,
-    reason: &str,
-    typing: Option<&str>,
-    width: usize,
-) -> Vec<Line> {
+pub fn approval_card(req: &ApprovalRequest, typing: Option<&str>, width: usize) -> Vec<Line> {
+    let (tool, args, reason) = (req.tool.as_str(), &req.args, req.reason.as_str());
+    let (intent, preceding) = (req.intent.as_deref(), req.preceding_text.as_str());
     let w = width.saturating_sub(4);
     let border = theme::style(Token::Warning);
     let mut out = Vec::new();
     let mut top = Line::default();
     top.push("┌ ", border);
-    top.push(
-        format!("approve {tool}"),
-        theme::style(Token::Warning).bold(),
-    );
+    let title = match &req.agent {
+        Some(a) => format!("approve {tool} for {a}"),
+        None => format!("approve {tool}"),
+    };
+    top.push(title, theme::style(Token::Warning).bold());
     out.push(top);
     let body = |out: &mut Vec<Line>, label: &str, text: &str, style: Style| {
         for (i, t) in text.lines().take(4).enumerate() {

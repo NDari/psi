@@ -106,6 +106,17 @@ pub fn timeline(rec: &Record) -> Timeline {
             EntryBody::Custom { custom_type, data } => match custom_type.as_str() {
                 "session_info" => cwd = data["cwd"].as_str().map(str::to_owned),
                 "eval_end" => step_cap_hit |= data["step_cap_hit"] == Value::Bool(true),
+                "subagent" => events.push(Event::Guard {
+                    guard: "subagent".into(),
+                    message: format!(
+                        "{}: {} model requests, {} tool calls, {} ({})",
+                        data["agent"].as_str().unwrap_or("?"),
+                        data["turns"],
+                        data["tool_calls"],
+                        data["stop"].as_str().unwrap_or("?"),
+                        data["session"].as_str().unwrap_or("")
+                    ),
+                }),
                 _ => {}
             },
             EntryBody::Message {

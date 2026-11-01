@@ -33,13 +33,21 @@ impl SessionFile {
         std::fs::create_dir_all(&dir)?;
         let u = uuid::Uuid::now_v7().simple().to_string();
         let name = format!("{}_{}.jsonl", utc_stamp(now_ms()), &u[u.len() - 8..]);
-        let path = dir.join(name);
+        Self::create_at(&dir.join(name))
+    }
+
+    /// A new, empty session at `path` (a sub-agent's, next to its
+    /// parent's), creating its directory.
+    pub fn create_at(path: &Path) -> Result<Self, SessionError> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
         let file = OpenOptions::new()
             .create_new(true)
             .append(true)
-            .open(&path)?;
+            .open(path)?;
         Ok(Self {
-            path,
+            path: path.to_owned(),
             file,
             entries: Vec::new(),
             ids: IdGen::random_after(None),

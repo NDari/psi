@@ -50,6 +50,8 @@ pub struct Sources {
     pub skills: Vec<(PathBuf, SkillLayout)>,
     pub prompts: Vec<PathBuf>,
     pub themes: Vec<PathBuf>,
+    /// Sub-agent definitions (§10.1).
+    pub agents: Vec<PathBuf>,
 }
 
 impl Sources {
@@ -70,6 +72,7 @@ impl Sources {
             }
             s.prompts.push(cwd.join(".psi/prompts"));
             s.themes.push(cwd.join(".psi/themes"));
+            s.agents.push(cwd.join(".psi/agents"));
         }
         if let Some(h) = home {
             s.skills.push((h.join(".psi/skills"), SkillLayout::Psi));
@@ -77,6 +80,7 @@ impl Sources {
                 .push((h.join(".agents/skills"), SkillLayout::Agents));
             s.prompts.push(h.join(".psi/prompts"));
             s.themes.push(h.join(".psi/themes"));
+            s.agents.push(h.join(".psi/agents"));
         }
         s.skills
             .extend(extra_skills.iter().map(|p| (p.clone(), SkillLayout::Psi)));
@@ -106,6 +110,8 @@ pub struct Resources {
     pub templates: Vec<Template>,
     /// Theme files (`themes/*.json`); the built-in default isn't listed.
     pub themes: Vec<psi_tui::theme::Theme>,
+    /// Sub-agents from files; the built-in ones are added where used.
+    pub agents: Vec<psi_agent::subagent::AgentDef>,
     /// Said once at startup.
     pub warnings: Vec<String>,
 }
@@ -136,6 +142,16 @@ impl Resources {
             files.sort();
             for f in files {
                 r.add_template(&f);
+            }
+        }
+        for dir in &src.agents {
+            let mut files: Vec<PathBuf> = visible(dir)
+                .into_iter()
+                .filter(|p| p.is_file() && is_md(p))
+                .collect();
+            files.sort();
+            for f in files {
+                r.add_agent(&f);
             }
         }
         for dir in &src.themes {
@@ -273,6 +289,56 @@ impl Resources {
             description,
             argument_hint: fm.get("argument-hint").map(str::to_owned),
             body,
+        });
+    }
+
+    /// A sub-agent file (pi's format): `name`, `description`, `tools` (a
+    /// comma list) frontmatter; the body is its prompt.
+    fn add_agent(&mut self, path: &Path) {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return self.warn(path, "cannot be read");
+        };
+        let (fm, body) = match frontmatter(&text) {
+            Ok(x) => x,
+            Err(e) => return self.warn(path, &e),
+        };
+        let description = fm.get("description").unwrap_or("").trim().to_owned();
+        if description.is_empty() {
+            return self.warn(path, "has no description, so the agent isn't loaded");
+        }
+        let name = match fm.get("name").filter(|n| !n.trim().is_empty()) {
+            Some(n) => n.trim().to_owned(),
+            None => path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        };
+        if let Some(problem) = name_problem(&name) {
+            return self.warn(path, &format!("agent name '{name}' {problem}"));
+        }
+        if self.agents.iter().any(|a| a.name == name) {
+            return self.warn(
+                path,
+                &format!("agent '{name}' is defined earlier, which wins"),
+            );
+        }
+        if fm.get("model").is_some() {
+            self.warn(
+                path,
+                "model isn't supported yet; the agent uses the session's model",
+            );
+        }
+        let tools = fm.get("tools").map(|t| {
+            t.split(',')
+                .map(|n| n.trim().to_lowercase())
+                .filter(|n| !n.is_empty())
+                .collect()
+        });
+        self.agents.push(psi_agent::subagent::AgentDef {
+            name,
+            description,
+            tools,
+            prompt: body.trim().to_owned(),
         });
     }
 
@@ -699,6 +765,7 @@ mod tests {
             ],
             prompts: vec![],
             themes: vec![],
+            agents: vec![],
         };
         let r = Resources::load(&src);
         let names: Vec<(&str, &str)> = r
@@ -727,6 +794,62 @@ mod tests {
     }
 
     #[test]
+    fn agents_load_in_pi_format_and_the_project_wins() {
+        let d = tempfile::tempdir().unwrap();
+        let (proj, user) = (d.path().join("p"), d.path().join("u"));
+        write(
+            &proj.join("reviewer.md"),
+            "---\nname: reviewer\ndescription: Reviews a change\ntools: Read, bash\nmodel: big\n---\n\nYou are reviewer.\n",
+        );
+        write(
+            &user.join("reviewer.md"),
+            "---\ndescription: the user's\n---\nx\n",
+        );
+        write(
+            &user.join("helper.md"),
+            "---\ndescription: Helps\n---\nHelp.\n",
+        );
+        write(
+            &user.join("bad.md"),
+            "---\nname: Bad\ndescription: x\n---\n",
+        );
+        write(&user.join("none.md"), "no frontmatter\n");
+        let r = Resources::load(&Sources {
+            agents: vec![proj, user],
+            ..Sources::default()
+        });
+        let got: Vec<(&str, &str, Option<Vec<String>>, &str)> = r
+            .agents
+            .iter()
+            .map(|a| {
+                (
+                    a.name.as_str(),
+                    a.description.as_str(),
+                    a.tools.clone(),
+                    a.prompt.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (
+                    "reviewer",
+                    "Reviews a change",
+                    Some(vec!["read".into(), "bash".into()]),
+                    "You are reviewer."
+                ),
+                ("helper", "Helps", None, "Help."),
+            ]
+        );
+        let w = r.warnings.join("\n");
+        assert!(w.contains("model isn't supported yet"), "{w}");
+        assert!(w.contains("agent 'reviewer' is defined earlier"), "{w}");
+        assert!(w.contains("agent name 'Bad' should use only"), "{w}");
+        assert!(w.contains("none.md: has no description"), "{w}");
+    }
+
+    #[test]
     fn skill_command_inserts_the_body() {
         let d = tempfile::tempdir().unwrap();
         let f = d.path().join("s/pdf/SKILL.md");
@@ -735,6 +858,7 @@ mod tests {
             skills: vec![(d.path().join("s"), SkillLayout::Psi)],
             prompts: vec![],
             themes: vec![],
+            agents: vec![],
         });
         let e = r.expand("/skill:pdf  read report.pdf").unwrap().unwrap();
         let dir = f.parent().unwrap().display().to_string();
@@ -770,6 +894,7 @@ mod tests {
             skills: vec![],
             prompts: vec![p.clone()],
             themes: vec![],
+            agents: vec![],
         });
         assert_eq!(r.templates.len(), 2);
         assert_eq!(

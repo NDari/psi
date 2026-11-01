@@ -57,6 +57,32 @@ Flags worth sweeping: `-fa`, `-b`/`-ub`, `-ctk`/`-ctv` (KV cache type), `-t`, `-
 - Matching definitions across languages is a heuristic; a rename shows up as a removal.
 - The owner isn't sure it's worth it yet.
 
+### Sub-agent answers survive compaction (added 2026-11-01)
+
+**Question:** at a small window, does a scout's report help the main agent if the harness keeps it through compactions?
+
+**Context:** in the 16K rerun of `long_api_docs` with sub-agents on (`~/.psi/evals/2026-11-01-2045-h15-16k-fix-qwen3.6-35b`), the step budget's hint made the 35B call scout twice. Each scout read all 8 source files in its own context and returned a complete list of public functions (about 7,500 characters). The main agent then re-read files "to make sure", and two compactions later the report had been squeezed into a 230-word summary (n_ctx/70 words) that no longer held the function lists. It never wrote `docs/API.md`, and the compaction backstop paused it at step 33. Delegation works, but its result is lost before it pays off. At 64K this doesn't come up: the task passes without sub-agents.
+
+**How:** put the latest one or two sub-agent answers into the harness state block written after the summaries (psi-plan.md §7.4 stage 3), taken as of the cut like the rest of the block so the prefix cache holds, with a size cap (say a tenth of the window, cut with a note). Then rerun `long_api_docs` at 16K (`--max-output 4096`, `subagents` on) once.
+
+**Open:**
+- Costs context on every request after a compaction; the cap decides how much.
+- Which answers to keep: the latest, or only those from read-only agents.
+- The main agent may still re-read to check, whatever it is given; that is a model habit, not something this fixes.
+
+### Nudge when re-reading lines whose earlier read is gone (added 2026-11-01)
+
+**Question:** does a one-line note stop the model re-reading a file that can't fit in the window, and get it to act on one part at a time?
+
+**Context:** `multi_split_package` asks to split an 840-line `textkit.py` (about 8K tokens) into a package. At 16K the model wants the whole file in context before writing anything: in the rerun above it read it in 200-line pieces from top to bottom eight times, each piece pushing the previous one out, and never wrote a submodule (paused by the backstop at step 31; the 2026-11-01 16K runs before the fixes looped to the step cap the same way). The step budget can't help, since each step reads one piece. psi-plan.md §7.4 stage 4 already lists this as a candidate guard.
+
+**How:** count, per file, how often a read covers lines whose earlier read was cleared or summarized away. On the third time, add a line to the result, for example: "You have read these lines of textkit.py 3 times; the whole file can't fit in your 16384-token context. Write what this part needs now (or move lines with bash, e.g. `sed -n`), then read the next part." Rerun `multi_split_package` at 16K once.
+
+**Open:**
+- Model-facing text, and a nudge the 35B may ignore (the no-progress nudge fired twice without effect in the first 16K runs).
+- Line ranges overlap loosely (the model picks different offsets each pass), so "the same lines" needs a tolerant match.
+- Splitting a file without reading it all is hard for a model; this may only move the failure.
+
 ## Done
 
 ### A faster 35B on the Mac for development (added 2026-11-01)

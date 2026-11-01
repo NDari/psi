@@ -4,16 +4,17 @@
 
 use std::time::Instant;
 
-use psi_ai::{AiError, ChatMessage, ChatRequest, Response};
+use psi_ai::{AiError, ChatMessage, ChatRequest, RawToolCall, Response};
 use psi_ext::Gate;
 use psi_session::EntryBody;
+use psi_tools::ToolOutput;
 use serde_json::json;
 
-use super::Agent;
+use super::{Agent, Planned};
 use crate::compact::{
-    CHARS_PER_TOKEN, SUMMARIZER_SYSTEM, check_summary, estimate_tokens, flatten, merge_prompt,
-    plain_summary_prompt, plan_clear, plan_cut, summary_chain, summary_instruction, summary_words,
-    tail_tokens, trigger,
+    CHARS_PER_TOKEN, Chain, SUMMARIZER_SYSTEM, check_summary, estimate_tokens, flatten,
+    merge_prompt, plain_summary_prompt, plan_clear, plan_cut, step_budget, summary_chain,
+    summary_instruction, summary_words, tail_tokens, trigger,
 };
 use crate::events::AgentEvent;
 use crate::messages::build_with_sources;
@@ -34,16 +35,19 @@ const INSTRUCTION_TOKENS: u64 = 400;
 impl Agent {
     /// Past the trigger, clear old tool results if that frees enough;
     /// otherwise summarize, and clear in what is left if still needed.
-    pub(super) async fn fit_context(&mut self) -> Result<(), String> {
+    /// Returns whether it summarized.
+    pub(super) async fn fit_context(&mut self) -> Result<bool, String> {
         let (tokens, at) = self.context_size();
         if tokens < at {
-            return Ok(());
+            return Ok(false);
         }
         let clearing = self.plan_clearing(tokens, at);
         if let Some((ids, freed)) = &clearing
             && *freed >= self.room_needed(tokens, at)
         {
-            return self.record_clearing(ids.clone(), tokens, *freed);
+            return self
+                .record_clearing(ids.clone(), tokens, *freed)
+                .map(|()| false);
         }
         let n_ctx = self.cfg.n_ctx;
         let retry = self
@@ -56,11 +60,11 @@ impl Agent {
             {
                 self.record_clearing(ids, tokens, freed)?;
             }
-            return Ok(());
+            return Ok(true);
         }
         match clearing {
-            Some((ids, freed)) => self.record_clearing(ids, tokens, freed),
-            None => Ok(()),
+            Some((ids, freed)) => self.record_clearing(ids, tokens, freed).map(|()| false),
+            None => Ok(false),
         }
     }
 
@@ -84,6 +88,62 @@ impl Agent {
             .filter(|s| offered.iter().any(|n| n == s.name))
             .map(|s| s.to_openai().to_string().len())
             .sum()
+    }
+
+    /// The system prompt, tools and summaries, in tokens.
+    fn overhead(&self, chain: &Chain) -> u64 {
+        let summaries: usize = chain.summaries.iter().map(|(_, s)| s.len()).sum();
+        (self.system_prompt().len() + self.tools_chars() + summaries) as u64 / CHARS_PER_TOKEN
+    }
+
+    /// Read-only results of one step past what the context can keep are
+    /// not given to the model: a note says so and how to go on. Otherwise
+    /// they are cleared or summarized before it reads them, and it reads
+    /// them again. The first result always stays. Returns the indices of
+    /// the calls held back.
+    pub(super) fn limit_step(
+        &mut self,
+        planned: &[(RawToolCall, Planned)],
+        outputs: &mut [ToolOutput],
+    ) -> Result<Vec<usize>, String> {
+        let overhead = self.overhead(&summary_chain(&self.session.branch()));
+        let result_tokens = self.ctx.max_result_chars as u64 / CHARS_PER_TOKEN;
+        let budget = step_budget(self.cfg.n_ctx, self.trigger(), overhead, result_tokens);
+        let mut used = 0;
+        let mut held = Vec::new();
+        for (i, ((_, p), o)) in planned.iter().zip(outputs.iter()).enumerate() {
+            let tokens = o.text.len() as u64 / CHARS_PER_TOKEN;
+            let read_only = matches!(p, Ok((c, _)) if c.read_only());
+            if i > 0 && read_only && (!held.is_empty() || used + tokens > budget) {
+                held.push(i);
+            } else {
+                used += tokens;
+            }
+        }
+        let Some(&first) = held.first() else {
+            return Ok(held);
+        };
+        let scout = if self.offers_agents() {
+            " To go through many files, give the reading to scout with the agent tool."
+        } else {
+            ""
+        };
+        let note = format!(
+            "Not run: the results before this one take about {used} tokens, as much as one step can keep in your {}-token context; more would be cleared before you read them. Use those first, then make this call again, or read only the part you need.{scout}",
+            self.cfg.n_ctx
+        );
+        for &i in &held {
+            outputs[i] = ToolOutput::err(note.clone());
+        }
+        self.record(EntryBody::GuardEvent {
+            guard: "step_budget".into(),
+            message: format!(
+                "{} read-only calls not run: the step's results passed about {budget} tokens",
+                held.len()
+            ),
+            tool_call_id: Some(planned[first].0.id.clone()),
+        })?;
+        Ok(held)
     }
 
     /// How much to free: down to a fifth of the window below the trigger.
@@ -154,9 +214,7 @@ impl Agent {
         let branch = self.session.branch();
         let chain = summary_chain(&branch);
         let from = chain.keep_from;
-        let summaries_chars: usize = chain.summaries.iter().map(|(_, s)| s.len()).sum();
-        let overhead = (self.system_prompt().len() + self.tools_chars() + summaries_chars) as u64
-            / CHARS_PER_TOKEN;
+        let overhead = self.overhead(&chain);
         let tail = tail_tokens(n_ctx, self.trigger(), overhead);
         let Some(cut) = plan_cut(&branch, from, tail) else {
             return Ok(Compacted::Nothing);

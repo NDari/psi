@@ -13,7 +13,8 @@ use serde_json::Value;
 
 /// D-20: estimate conservatively when the server's count is not known.
 pub(crate) const CHARS_PER_TOKEN: u64 = 3;
-/// The most recent tool results are never cleared (Anthropic keeps 3).
+/// The most recent tool results are never cleared (Anthropic keeps 3),
+/// nor those of the last step, which the model hasn't read yet.
 const KEEP_RECENT: usize = 3;
 /// Results shorter than this stay: clearing them frees almost nothing.
 const MIN_CLEAR_CHARS: usize = 800;
@@ -122,9 +123,11 @@ pub(crate) fn plan_clear(
     // across turns, so each result takes the latest call with its id.
     let mut calls: HashMap<&str, (&str, &str)> = HashMap::new();
     let mut results = Vec::new();
+    let mut unread_from = 0;
     for (m, src) in messages.iter().zip(sources) {
         match m {
             ChatMessage::Assistant { tool_calls, .. } => {
+                unread_from = results.len();
                 for c in tool_calls {
                     calls.insert(&c.id, (&c.name, &c.arguments));
                 }
@@ -141,7 +144,7 @@ pub(crate) fn plan_clear(
             _ => {}
         }
     }
-    let old = results.len().saturating_sub(KEEP_RECENT);
+    let old = results.len().saturating_sub(KEEP_RECENT).min(unread_from);
     let mut ids = Vec::new();
     let mut freed = 0;
     for (id, name, args, content) in &results[..old] {
@@ -279,6 +282,18 @@ pub(crate) fn tail_tokens(n_ctx: u64, trigger: u64, overhead: u64) -> u64 {
     (n_ctx / 5)
         .max(20_000)
         .min(trigger.saturating_sub(overhead) / 2)
+}
+
+/// How many tokens one step's results may take: what is left under the
+/// trigger after `overhead` (system prompt, tools, summaries), less a tenth
+/// of the window for the rest of the context (the harness state, the
+/// restated request, the step's own calls), and at least one full result.
+/// Past it, results would be cleared or summarized before the model read
+/// them, and it would read them again (the 2026-11-01 re-read loop).
+pub(crate) fn step_budget(n_ctx: u64, trigger: u64, overhead: u64, result_tokens: u64) -> u64 {
+    trigger
+        .saturating_sub(overhead + n_ctx / 10)
+        .max(result_tokens)
 }
 
 /// A user message or a model step: where a kept part may start without
@@ -550,6 +565,45 @@ mod tests {
         assert_eq!(ids, ["e0", "e2", "e3"]);
         // Too little to be worth breaking the cache for.
         assert_eq!(plan_clear(&m, &src, 100_000, 10_000), None);
+    }
+
+    #[test]
+    fn the_last_steps_results_are_never_cleared() {
+        let mut m = vec![ChatMessage::User("task".into())];
+        let mut src = vec![None];
+        m.extend(turn("a", 3000));
+        src.extend([None, Some("e0".to_owned())]);
+        // One step of five reads: the model has read none of them yet.
+        let calls = (1..=5)
+            .map(|i| RawToolCall {
+                id: format!("c{i}"),
+                name: "read".into(),
+                arguments: r#"{"path": "f"}"#.into(),
+            })
+            .collect();
+        m.push(ChatMessage::Assistant {
+            text: String::new(),
+            tool_calls: calls,
+        });
+        src.push(None);
+        for i in 1..=5 {
+            m.push(ChatMessage::Tool {
+                call_id: format!("c{i}"),
+                content: "x".repeat(3000),
+            });
+            src.push(Some(format!("e{i}")));
+        }
+        let (ids, _) = plan_clear(&m, &src, 100_000, 100).unwrap();
+        assert_eq!(ids, ["e0"]);
+    }
+
+    #[test]
+    fn a_step_gets_what_is_left_under_the_trigger() {
+        // 16K, 4K answers: about 5.3K tokens, two full reads.
+        let at = trigger(16_384, 4096, 2457);
+        assert_eq!(step_budget(16_384, at, 2900, 2457), at - 2900 - 1638);
+        // Nothing left: still one full result.
+        assert_eq!(step_budget(16_384, at, 9000, 2457), 2457);
     }
 
     fn entries(bodies: Vec<EntryBody>) -> Vec<Entry> {

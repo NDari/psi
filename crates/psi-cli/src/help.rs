@@ -5,6 +5,7 @@
 
 /// (name, text): each file's first line is its one-line summary.
 pub const TOPICS: &[(&str, &str)] = &[
+    ("agents", include_str!("../../../docs/help/agents.md")),
     ("commands", include_str!("../../../docs/help/commands.md")),
     (
         "extensions",
@@ -42,6 +43,7 @@ const ALIASES: &[(&str, &str)] = &[
     ("check", "post-edit-check"),
     ("config", "settings"),
     ("slash", "commands"),
+    ("subagents", "agents"),
 ];
 
 /// The topic list, one per line with its summary.

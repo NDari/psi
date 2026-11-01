@@ -620,6 +620,7 @@ A custom UI component (pi-tui parity), drawn under the input box under a deadlin
 | `id` | `string` |  |
 | `name` | `string` |  |
 | `args` | `table` |  |
+| `agent` | `string?` | The sub-agent that made the call; nil for the main agent (psi help agents) |
 
 ### ToolCallResult
 
@@ -638,6 +639,7 @@ A custom UI component (pi-tui parity), drawn under the input box under a deadlin
 | `args` | `table` |  |
 | `text` | `string` |  |
 | `is_error` | `boolean` |  |
+| `agent` | `string?` | The sub-agent that made the call; nil for the main agent (psi help agents) |
 
 ### PolicyEvent
 
@@ -646,6 +648,7 @@ A custom UI component (pi-tui parity), drawn under the input box under a deadlin
 | `tool_call_id` | `string` |  |
 | `decision` | `string` |  |
 | `reason` | `string` |  |
+| `agent` | `string?` | The sub-agent that made the call; nil for the main agent (psi help agents) |
 
 ### GuardEvent
 
@@ -653,6 +656,7 @@ A custom UI component (pi-tui parity), drawn under the input box under a deadlin
 |---|---|---|
 | `guard` | `string` |  |
 | `message` | `string` |  |
+| `agent` | `string?` | The sub-agent that made the call; nil for the main agent (psi help agents) |
 
 ### EventName
 

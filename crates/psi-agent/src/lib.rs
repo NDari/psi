@@ -13,6 +13,7 @@ pub mod post_edit;
 pub mod prompt;
 pub mod recovery;
 mod run;
+pub mod subagent;
 
 pub use events::AgentEvent;
 pub use messages::build_messages;

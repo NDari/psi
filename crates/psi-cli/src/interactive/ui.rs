@@ -1414,6 +1414,14 @@ impl<W: Write> App<W> {
                 }
             }
             AgentEvent::TurnEnd { .. } => self.flush_text(),
+            AgentEvent::Subagent { agent, event } => {
+                if let AgentEvent::ToolStart { name, args, .. } = *event {
+                    self.flush_text();
+                    let w = self.width();
+                    let line = format!("    {agent} › {name} {}", view::call_summary(&name, &args));
+                    self.commit(vec![Line::styled(view::cut(&line, w), dim())]);
+                }
+            }
             AgentEvent::Compacting { tokens } => {
                 self.flush_text();
                 self.commit(vec![Line::styled(
@@ -1642,15 +1650,7 @@ impl<W: Write> App<W> {
         live.extend(rows);
         let mut cursor = Some((top + cr, cc));
         if let Some(c) = &self.card {
-            live.extend(approval_card(
-                &c.req.tool,
-                &c.req.args,
-                c.req.intent.as_deref(),
-                &c.req.preceding_text,
-                &c.req.reason,
-                c.typing.as_deref(),
-                w,
-            ));
+            live.extend(approval_card(&c.req, c.typing.as_deref(), w));
             cursor = None;
         } else if let Some((req, _)) = &self.blocked {
             let y = theme::style(Token::Warning);

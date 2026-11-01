@@ -138,6 +138,7 @@
 ---@field id string
 ---@field name string
 ---@field args table
+---@field agent? string The sub-agent that made the call; nil for the main agent (psi help agents)
 
 ---@class ToolCallResult
 ---@field block? boolean
@@ -150,15 +151,18 @@
 ---@field args table
 ---@field text string
 ---@field is_error boolean
+---@field agent? string The sub-agent that made the call; nil for the main agent (psi help agents)
 
 ---@class PolicyEvent
 ---@field tool_call_id string
 ---@field decision string
 ---@field reason string
+---@field agent? string The sub-agent that made the call; nil for the main agent (psi help agents)
 
 ---@class GuardEvent
 ---@field guard string
 ---@field message string
+---@field agent? string The sub-agent that made the call; nil for the main agent (psi help agents)
 
 ---@class psi
 local psi = {}

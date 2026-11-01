@@ -21,6 +21,8 @@ pub struct ApprovalRequest {
     pub reason: String,
     /// What a session grant covers.
     pub keys: Vec<String>,
+    /// The sub-agent asking, when it isn't the main agent (§10.1).
+    pub agent: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

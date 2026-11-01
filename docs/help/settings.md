@@ -11,6 +11,7 @@ Keys:
 - always_ask, always_ask_remove: commands that always ask, added or dropped.
 - post_edit_check: a command run after turns that edit files (psi help post-edit-check).
 - todo: true offers the model the todo tool (psi help todo).
+- subagents: true offers the model the agent tool (psi help agents).
 - theme: a theme name (psi help themes).
 - skills, prompts: more directories of skills or prompt templates.
 - packages: installed packages (psi help packages).

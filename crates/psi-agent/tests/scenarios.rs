@@ -445,6 +445,63 @@ async fn old_tool_results_are_cleared_past_the_trigger() {
     assert!(tool_results(&a).iter().all(|(t, _)| t.contains("line 199")));
 }
 
+#[tokio::test]
+async fn a_step_keeps_only_the_results_the_context_can_hold() {
+    // Six full reads at once in a 16K window (the 2026-11-01 re-read
+    // loop): three fit, the rest are held back with the way on.
+    let f = Fixture::new(vec![
+        Reply::Chat(ScriptedReply {
+            tool_calls: (0..6)
+                .map(|i| {
+                    (
+                        "read".into(),
+                        json!({"path": format!("f{i}.txt")}).to_string(),
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        }),
+        call("read", json!({"path": "f3.txt"})),
+        text("done"),
+    ]);
+    write_files(&f.cwd, 6, 600);
+    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    let out = a.run("read the files").await;
+    assert_eq!(out.stop, Stop::Done, "{:?}", out.stop);
+    let r = tool_results(&a);
+    for (i, (t, _)) in r[..3].iter().enumerate() {
+        assert!(t.contains(&format!("file {i} line")));
+    }
+    for (t, is_error) in &r[3..6] {
+        assert!(*is_error);
+        assert!(
+            t.starts_with("Not run: the results before this one take about"),
+            "{t}"
+        );
+        assert!(t.contains("16384-token context"), "{t}");
+    }
+    assert!(r[6].0.contains("file 3 line"));
+    assert_eq!(
+        kinds(&a)
+            .iter()
+            .filter(|k| *k == "guard step_budget")
+            .count(),
+        1
+    );
+    // The three it kept reach the model whole, not cleared.
+    let reqs = f.server.chat_requests();
+    let next: Vec<&str> = reqs[1]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == "tool")
+        .map(|m| m["content"].as_str().unwrap())
+        .collect();
+    for (i, t) in next[..3].iter().enumerate() {
+        assert!(t.contains(&format!("file {i} line")), "{t}");
+    }
+}
+
 /// A session with a task holding planted facts, then `turns` small read
 /// turns (too small to clear), as if from earlier work.
 fn prefill(a: &mut Agent, turns: usize) {
@@ -588,6 +645,32 @@ async fn a_summary_falls_back_to_a_plain_request() {
             .unwrap()
             .contains(SUMMARY)
     );
+}
+
+#[tokio::test]
+async fn summarizing_again_and_again_without_changes_pauses() {
+    // Every step refills the context (the 2026-11-01 re-read loops): the
+    // twelfth summary with no file changed stops a headless run.
+    let mut replies = Vec::new();
+    for i in 0..12 {
+        replies.push(read_at(&format!("f{i}.txt"), 9500));
+        replies.push(text(SUMMARY));
+    }
+    replies.push(text("not reached"));
+    let f = Fixture::new(replies);
+    write_files(&f.cwd, 12, 200);
+    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    prefill(&mut a, 30);
+    let out = a.run("go on").await;
+    assert_eq!(
+        out.stop,
+        Stop::Guard("the context was summarized 12 times and no file changed".into()),
+        "{:?}",
+        kinds(&a)
+    );
+    assert_eq!(kinds(&a).iter().filter(|k| *k == "compaction").count(), 12);
+    assert!(kinds(&a).contains(&"guard compaction_loop".to_owned()));
+    assert_eq!(f.server.remaining(), 1);
 }
 
 #[tokio::test]

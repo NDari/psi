@@ -216,3 +216,78 @@ async fn extension_tools_gates_rewrites_and_results() {
     );
     ext.shutdown();
 }
+
+/// A sub-agent's tool calls go through the same gates, tagged with its
+/// name; its lifecycle events don't reach extensions (§10.1).
+#[tokio::test(flavor = "multi_thread")]
+async fn sub_agent_calls_go_through_the_gates_with_their_name() {
+    const GATE: &str = r#"
+return {
+  name = "gate", version = "0.1.0", description = "Test gate",
+  setup = function(psi)
+    local turns = 0
+    psi.on("turn_start", function() turns = turns + 1 end)
+    psi.on("tool_call", function(ev)
+      if ev.name == "bash" and ev.args.command == "rm -rf build" then
+        return { block = true, reason = "blocked for " .. (ev.agent or "main") .. " after " .. turns .. " turns" }
+      end
+    end)
+  end,
+}
+"#;
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().join("project");
+    let exts = tmp.path().join("exts");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::create_dir_all(&exts).unwrap();
+    std::fs::write(exts.join("gate.lua"), GATE).unwrap();
+    let sources: Vec<Source> = psi_ext::load::discover(&exts)
+        .into_iter()
+        .map(|r| r.unwrap())
+        .collect();
+    let shared = Arc::new(RwLock::new(Shared {
+        cwd: cwd.display().to_string(),
+        mode: "test".into(),
+        ..Shared::default()
+    }));
+    let (ui, _ui_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (ext, errors) = tokio::task::spawn_blocking(move || {
+        ExtManager::start(&sources, shared, Limits::default(), ui)
+    })
+    .await
+    .unwrap();
+    assert!(errors.is_empty(), "{errors:?}");
+    let server = ReplayServer::start(vec![
+        call("agent", json!({"agent": "worker", "task": "Remove build."})),
+        call("bash", json!({"command": "rm -rf build"})),
+        text("It was blocked."),
+        text("done"),
+    ])
+    .unwrap();
+    let session = SessionFile::create(&tmp.path().join("sessions"), &cwd).unwrap();
+    let cfg = AgentConfig {
+        model: "local".into(),
+        max_output: 256,
+        n_ctx: 32_768,
+        enable_thinking: None,
+        budgets: Budgets::default(),
+        system_prompt: "sys".into(),
+        tools: core_tools(false),
+        home: None,
+    };
+    let ctx = ToolCtx::new(&cwd, &tmp.path().join("tmp"), 20_000);
+    let mut agent = Agent::new(Client::new(&server.base_url()), session, cfg, ctx)
+        .with_extensions(ext)
+        .with_subagents(psi_agent::subagent::built_in());
+    agent.run("clean").await;
+    let reqs = server.chat_requests();
+    let child_result = reqs[2]["messages"].as_array().unwrap().last().unwrap()["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // One turn: the parent's; the sub-agent's turn_start never reached it.
+    assert!(
+        child_result.contains("blocked for worker after 1 turns"),
+        "{child_result}"
+    );
+}

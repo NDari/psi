@@ -13,11 +13,12 @@ use serde_json::{Map, Value, json};
 
 use crate::approval::{Approval, ApprovalRequest, Approver};
 
-/// What a call runs: a core tool or an extension's.
+/// What a call runs: a core tool, an extension's, or a sub-agent (§10.1).
 #[derive(Debug, Clone)]
 pub enum Callable {
     Core(Tool),
     Ext(ToolInfo),
+    Agent,
 }
 
 impl Callable {
@@ -25,13 +26,17 @@ impl Callable {
         match self {
             Callable::Core(t) => t.name(),
             Callable::Ext(i) => &i.name,
+            Callable::Agent => crate::subagent::TOOL,
         }
     }
 
+    /// Read-only calls run side by side. A sub-agent never does: it needs
+    /// the agent that runs it, and the server runs one request at a time.
     pub fn read_only(&self) -> bool {
         match self {
             Callable::Core(t) => t.read_only(),
             Callable::Ext(i) => i.read_only,
+            Callable::Agent => false,
         }
     }
 }
@@ -80,6 +85,8 @@ pub async fn invoke(
 ) -> ToolOutput {
     match c {
         Callable::Core(t) => t.run(args, ctx).await,
+        // The agent runs sub-agents itself (run_one); never reached.
+        Callable::Agent => ToolOutput::err("A sub-agent can't run here."),
         Callable::Ext(info) => {
             if ctx.cancel.is_cancelled() {
                 return ToolOutput::err("Aborted before it ran.");
@@ -129,7 +136,8 @@ pub async fn decide(
             let shown = args.get("path").and_then(Value::as_str).unwrap_or("");
             policy.file_write(t.name(), &path, shown, facts)
         }
-        Callable::Core(_) => Decision::Allow,
+        // A sub-agent's own calls go through the policy one by one.
+        Callable::Core(_) | Callable::Agent => Decision::Allow,
         Callable::Ext(info) => {
             let script = ext.script(&info.name).is_some();
             policy.ext_tool(&info.name, info.read_only, info.always_ask, script)
@@ -187,6 +195,7 @@ pub fn tool_runner(
                         preceding_text: String::new(),
                         reason: reason.clone(),
                         keys,
+                        agent: None,
                     };
                     match approver.approve(req).await {
                         Approval::Once | Approval::Session => {}

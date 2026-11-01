@@ -11,6 +11,11 @@ pub const REPEAT_NUDGE: u32 = 3;
 pub const REPEAT_PAUSE: u32 = 5;
 /// Turns that only repeat earlier calls and change no file, before a nudge (G-12).
 pub const NO_PROGRESS_TURNS: u32 = 6;
+/// Summaries in one run with no file changed since, before a pause: the
+/// context fills again as fast as it is compacted (Claude Code stops a
+/// "thrashing" autocompact the same way). In the 16K runs of 2026-11-01,
+/// passes reached 11 and the re-read loops 14 and 26.
+pub const COMPACTIONS_PAUSE: u32 = 12;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuardAction {
@@ -32,6 +37,7 @@ pub struct Guards {
     turn_progress: bool,
     announced: bool,
     truncated: u32,
+    compactions: u32,
 }
 
 /// Answers cut off by the output limit that get another turn, per run.
@@ -56,6 +62,7 @@ impl Guards {
             turn_progress: false,
             announced: false,
             truncated: 0,
+            compactions: 0,
         }
     }
 
@@ -65,6 +72,7 @@ impl Guards {
         self.repeats = 0;
         self.streak = 0;
         self.idle_turns = 0;
+        self.compactions = 0;
     }
 
     /// One call's outcome; `sig` is the tool and its arguments.
@@ -161,6 +169,9 @@ impl Guards {
 
     /// The end of a turn with tool calls; `files_changed` from the checkpoint.
     pub fn on_turn_end(&mut self, files_changed: bool) -> Option<GuardAction> {
+        if files_changed {
+            self.compactions = 0;
+        }
         let progress = std::mem::take(&mut self.turn_progress) || files_changed;
         if progress {
             self.idle_turns = 0;
@@ -178,11 +189,42 @@ impl Guards {
             ),
         })
     }
+
+    /// The context was summarized before a request.
+    pub fn on_compaction(&mut self) -> Option<GuardAction> {
+        self.compactions += 1;
+        (self.compactions == COMPACTIONS_PAUSE).then(|| GuardAction::Pause {
+            guard: "compaction_loop",
+            reason: format!(
+                "the context was summarized {COMPACTIONS_PAUSE} times and no file changed"
+            ),
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summaries_without_a_changed_file_pause_once() {
+        let mut g = Guards::new(3);
+        for _ in 1..COMPACTIONS_PAUSE {
+            assert_eq!(g.on_compaction(), None);
+        }
+        // A changed file starts the count over.
+        g.on_turn_end(true);
+        for _ in 1..COMPACTIONS_PAUSE {
+            assert_eq!(g.on_compaction(), None);
+        }
+        assert!(matches!(
+            g.on_compaction(),
+            Some(GuardAction::Pause {
+                guard: "compaction_loop",
+                ..
+            })
+        ));
+    }
 
     fn guards(a: &[GuardAction]) -> Vec<&'static str> {
         a.iter()

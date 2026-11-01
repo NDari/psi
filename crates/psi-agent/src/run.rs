@@ -29,9 +29,11 @@ use crate::guards::{GuardAction, Guards};
 use crate::messages::{build_messages, plan_drop};
 use crate::plan::{self, PlanState};
 use crate::post_edit::{self, PostEditCheck};
+use crate::subagent::{self, AgentDef};
 use psi_ext::{AgentRequest, ExtManager, Gate, ToolInfo};
 
 mod fit;
+mod sub;
 
 /// Limits on one run (§5). Reaching one stops a headless run.
 #[derive(Debug, Clone)]
@@ -181,6 +183,14 @@ pub struct Agent {
     plan_off_note: bool,
     /// The plan state changed before the session had its first entry.
     plan_unrecorded: bool,
+    /// Sub-agents the `agent` tool offers (§10.1); empty: no tool.
+    subagents: Vec<AgentDef>,
+    /// This agent is a sub-agent with this name: one level only, and only
+    /// tool events reach extensions.
+    sub: Option<String>,
+    /// A sub-agent without write or edit: bash runs read-only commands and
+    /// extension tools that may change things are refused.
+    reads_only: bool,
     /// The last request sent, to check a summary request extends it (D-38).
     last_request: Option<ChatRequest>,
     /// The context size when summarizing last failed: no new try until it
@@ -204,6 +214,15 @@ fn signature(call: &RawToolCall, p: &Planned) -> String {
         Err(_) => format!("{} {}", call.name, call.arguments),
     }
 }
+
+/// The extension events a sub-agent sends (§10.1).
+const SUB_EVENTS: [&str; 5] = [
+    "tool_call",
+    "tool_execution_update",
+    "tool_result",
+    "policy_decision",
+    "guard_event",
+];
 
 /// The pause before the one retry of a request that may pass.
 const RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -232,6 +251,9 @@ impl Agent {
             plan: PlanState::default(),
             plan_off_note: false,
             plan_unrecorded: false,
+            subagents: Vec::new(),
+            sub: None,
+            reads_only: false,
             last_request: None,
             compact_failed_at: None,
         }
@@ -277,6 +299,10 @@ impl Agent {
                 (t, s)
             })
             .collect();
+        // The runner and shared state are the main agent's.
+        if self.sub.is_some() {
+            return;
+        }
         self.ext.set_tool_runner(tool_runner(
             self.ctx.clone(),
             self.safety.policy.clone(),
@@ -298,7 +324,8 @@ impl Agent {
             .iter()
             .filter(|t| !(planning && matches!(t, Tool::Write | Tool::Edit)))
             .map(|t| t.name().to_owned())
-            .chain(self.ext_tools.iter().map(|(t, _)| t.name.clone()));
+            .chain(self.ext_tools.iter().map(|(t, _)| t.name.clone()))
+            .chain(self.offers_agents().then(|| subagent::TOOL.to_owned()));
         match &self.active {
             Some(a) => all.filter(|n| a.contains(n)).collect(),
             None => all.collect(),
@@ -309,11 +336,30 @@ impl Agent {
     fn all_schemas(&self) -> Vec<ToolSchema> {
         let mut v = self.schemas.clone();
         v.extend(self.ext_tools.iter().map(|(_, s)| s.clone()));
+        if self.offers_agents() {
+            v.push(subagent::schema(&self.subagents));
+        }
         v
+    }
+
+    /// The `agent` tool: sub-agents are set, and this isn't one (D-41).
+    fn offers_agents(&self) -> bool {
+        !self.subagents.is_empty() && self.sub.is_none()
+    }
+
+    /// Sub-agents for the `agent` tool (§10.1).
+    pub fn with_subagents(mut self, defs: Vec<AgentDef>) -> Self {
+        self.subagents = defs;
+        self.refresh_tool_names();
+        self
     }
 
     /// What extensions asked for since the last step.
     fn apply_ext_requests(&mut self) -> Result<(), String> {
+        // Requests are for the main agent; a sub-agent leaves them.
+        if self.sub.is_some() {
+            return Ok(());
+        }
         for r in self.ext.take_agent_requests() {
             match r {
                 AgentRequest::SendMessage { custom_type, text } => {
@@ -334,6 +380,9 @@ impl Agent {
 
     /// The branch's custom entries and the session file, for extensions.
     fn share_session(&self) {
+        if self.sub.is_some() {
+            return;
+        }
         let entries: Vec<(String, Value)> = self
             .session
             .branch()
@@ -448,6 +497,9 @@ impl Agent {
     }
 
     fn refresh_tool_names(&self) {
+        if self.sub.is_some() {
+            return;
+        }
         let names = self.tool_names();
         self.ext.update_shared(|s| s.active_tools = names);
     }
@@ -495,6 +547,46 @@ impl Agent {
         }
     }
 
+    /// Whether extensions see this event: a sub-agent sends only its tool
+    /// events (§10.1), so handlers of the run's lifecycle see one run.
+    fn ext_sees(&self, event: &str) -> bool {
+        self.sub.is_none() || SUB_EVENTS.contains(&event)
+    }
+
+    /// A sub-agent's event payload carries its name as `agent`.
+    fn tag(&self, mut v: Value) -> Value {
+        if let (Some(a), Value::Object(m)) = (&self.sub, &mut v) {
+            m.insert("agent".into(), Value::String(a.clone()));
+        }
+        v
+    }
+
+    fn ext_listens(&self, event: &str) -> bool {
+        self.ext_sees(event) && self.ext.listens(event)
+    }
+
+    async fn ext_notify(&self, event: &str, payload: Value) {
+        if self.ext_sees(event) {
+            self.ext.notify(event, self.tag(payload)).await;
+        }
+    }
+
+    async fn ext_gate(&self, event: &str, payload: Value) -> Gate {
+        if self.ext_sees(event) {
+            self.ext.gate(event, self.tag(payload)).await
+        } else {
+            Gate::Allow(payload)
+        }
+    }
+
+    async fn ext_chain(&self, event: &str, payload: Value) -> Value {
+        if self.ext_sees(event) {
+            self.ext.chain(event, self.tag(payload)).await
+        } else {
+            payload
+        }
+    }
+
     fn record(&mut self, body: EntryBody) -> Result<Entry, String> {
         let path = self.session.path().display().to_string();
         let e = self
@@ -519,9 +611,10 @@ impl Agent {
             _ => None,
         };
         if let Some((name, payload)) = ev
-            && self.ext.listens(name)
+            && self.ext_listens(name)
         {
             let ext = self.ext.clone();
+            let payload = self.tag(payload);
             tokio::spawn(async move { ext.notify(name, payload).await });
         }
         Ok(e)
@@ -577,12 +670,11 @@ impl Agent {
             }
         }
         self.run_system.clear();
-        self.ext
-            .notify(
-                "agent_end",
-                json!({"stop": out.stop.name(), "text": out.text}),
-            )
-            .await;
+        self.ext_notify(
+            "agent_end",
+            json!({"stop": out.stop.name(), "text": out.text}),
+        )
+        .await;
         self.emit(AgentEvent::RunEnd {
             stop: out.stop.name().into(),
             reason: out.stop.reason().map(str::to_owned),
@@ -617,10 +709,9 @@ impl Agent {
         self.share_session();
         self.apply_ext_requests()?;
         let start_ev = json!({"prompt": input, "system": ""});
-        let r = self.ext.chain("before_agent_start", start_ev).await;
+        let r = self.ext_chain("before_agent_start", start_ev).await;
         self.run_system = r["system"].as_str().unwrap_or("").to_owned();
-        self.ext
-            .notify("agent_start", json!({"prompt": input}))
+        self.ext_notify("agent_start", json!({"prompt": input}))
             .await;
         let start = Instant::now();
         let b = self.cfg.budgets.clone();
@@ -654,9 +745,21 @@ impl Agent {
             let turn = out.turns;
             self.apply_ext_requests()?;
             self.emit(AgentEvent::TurnStart { turn });
-            self.ext.notify("turn_start", json!({"turn": turn})).await;
+            self.ext_notify("turn_start", json!({"turn": turn})).await;
 
-            self.fit_context().await?;
+            if self.fit_context().await?
+                && let Some(GuardAction::Pause { guard, reason }) = guards.on_compaction()
+            {
+                self.record(EntryBody::GuardEvent {
+                    guard: guard.into(),
+                    message: format!("paused: {reason}"),
+                    tool_call_id: None,
+                })?;
+                if let Some(stop) = self.pause_run(reason).await {
+                    return Ok(stop);
+                }
+                guards.reset();
+            }
             let resp = match self.request().await {
                 Ok(r) => r,
                 Err(AiError::ContextOverflow {
@@ -703,23 +806,22 @@ impl Agent {
                 }
                 self.record_plan()?;
             }
-            if self.ext.listens("message_end") {
+            if self.ext_listens("message_end") {
                 let calls: Vec<Value> = resp
                     .tool_calls
                     .iter()
                     .map(|c| json!({"id": c.id, "name": c.name, "arguments": c.arguments}))
                     .collect();
-                self.ext
-                    .notify(
-                        "message_end",
-                        json!({"text": resp.text, "tool_calls": calls}),
-                    )
-                    .await;
+                self.ext_notify(
+                    "message_end",
+                    json!({"text": resp.text, "tool_calls": calls}),
+                )
+                .await;
             }
 
             if resp.tool_calls.is_empty() {
                 self.emit(AgentEvent::TurnEnd { turn });
-                self.ext.notify("turn_end", json!({"turn": turn})).await;
+                self.ext_notify("turn_end", json!({"turn": turn})).await;
                 let follow = Queues::take(&self.queues.follow_up);
                 if follow.is_empty() {
                     let cut_off = (resp.finish == FinishReason::Length)
@@ -765,17 +867,13 @@ impl Agent {
             let (n, pause) = self.run_calls(&resp, &mut guards).await?;
             out.tool_calls += n;
             self.emit(AgentEvent::TurnEnd { turn });
-            self.ext.notify("turn_end", json!({"turn": turn})).await;
+            self.ext_notify("turn_end", json!({"turn": turn})).await;
             if self.ctx.cancel.is_cancelled() {
                 return Ok(Stop::Aborted);
             }
             if let Some(reason) = pause {
-                let go_on = tokio::select! {
-                    g = self.safety.approver.pause(reason.clone()) => g,
-                    () = self.ctx.cancel.cancelled() => return Ok(Stop::Aborted),
-                };
-                if !go_on {
-                    return Ok(Stop::Guard(reason));
+                if let Some(stop) = self.pause_run(reason).await {
+                    return Ok(stop);
                 }
                 guards.reset();
             }
@@ -783,6 +881,15 @@ impl Agent {
                 self.record(Self::user_message(&s))?;
             }
         }
+    }
+
+    /// Asks whether to go on after a guard's pause; the stop when not.
+    async fn pause_run(&self, reason: String) -> Option<Stop> {
+        let go_on = tokio::select! {
+            g = self.safety.approver.pause(reason.clone()) => g,
+            () = self.ctx.cancel.cancelled() => return Some(Stop::Aborted),
+        };
+        (!go_on).then_some(Stop::Guard(reason))
     }
 
     fn system_prompt(&self) -> String {
@@ -815,13 +922,13 @@ impl Agent {
     async fn request(&mut self) -> Result<Response, AiError> {
         let req = self.build_request();
         self.last_request = Some(req.clone());
-        if self.ext.listens("context") {
+        if self.ext_listens("context") {
             let m: Vec<Value> = req.messages.iter().map(|m| m.to_json()).collect();
-            self.ext.notify("context", json!({"messages": m})).await;
+            self.ext_notify("context", json!({"messages": m})).await;
         }
-        self.ext.notify("message_start", json!({"turn": 0})).await;
+        self.ext_notify("message_start", json!({"turn": 0})).await;
         // Streamed text reaches extensions in order, through one task.
-        let updates = self.ext.listens("message_update").then(|| {
+        let updates = self.ext_listens("message_update").then(|| {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
             let ext = self.ext.clone();
             tokio::spawn(async move {
@@ -955,8 +1062,13 @@ impl Agent {
                             .find(|(t, _)| t.name == f.name)
                             .map(|(t, _)| Callable::Ext(t.clone()))
                     };
+                    let agent = || {
+                        (f.name == subagent::TOOL && self.offers_agents())
+                            .then_some(Callable::Agent)
+                    };
                     match core
                         .or_else(ext)
+                        .or_else(agent)
                         .filter(|c| offered.iter().any(|n| n == c.name()))
                     {
                         Some(c) => Ok((c, f.args)),
@@ -978,12 +1090,12 @@ impl Agent {
 
         // tool_call: extensions may block a call or rewrite its arguments,
         // before the policy sees it (§9.4); both are recorded.
-        if self.ext.listens("tool_call") {
+        if self.ext_listens("tool_call") {
             for (call, p) in planned.iter_mut() {
                 let Ok((c, args)) = p else { continue };
                 let ev =
                     json!({"id": call.id, "name": c.name(), "args": Value::Object(args.clone())});
-                match self.ext.gate("tool_call", ev).await {
+                match self.ext_gate("tool_call", ev).await {
                     Gate::Block(reason) => {
                         self.policy(&call.id, "blocked_by_extension", &reason)?;
                         *p = Err(format!("Blocked: {reason}"));
@@ -1024,7 +1136,7 @@ impl Agent {
                         args: Value::Object(args.clone()),
                     });
                     let ev = json!({"id": call.id, "name": c.name(), "args": Value::Object(args.clone())});
-                    self.ext.notify("tool_execution_update", ev).await;
+                    self.ext_notify("tool_execution_update", ev).await;
                 }
             }
             if let (call, Ok((c, args))) = &planned[i]
@@ -1053,12 +1165,12 @@ impl Agent {
             .map(|o| o.unwrap_or_else(|| ToolOutput::err("not run")))
             .collect();
         // tool_result: extensions may change what the model sees.
-        if self.ext.listens("tool_result") {
+        if self.ext_listens("tool_result") {
             for ((call, p), o) in planned.iter().zip(outputs.iter_mut()) {
                 let Ok((c, args)) = p else { continue };
                 let ev = json!({"id": call.id, "name": c.name(), "args": Value::Object(args.clone()),
                                 "text": o.text, "is_error": o.is_error});
-                let r = self.ext.chain("tool_result", ev).await;
+                let r = self.ext_chain("tool_result", ev).await;
                 if let Some(t) = r["text"].as_str() {
                     o.text = t.to_owned();
                 }
@@ -1067,9 +1179,14 @@ impl Agent {
                 }
             }
         }
+        let held = self.limit_step(&planned, &mut outputs)?;
         let mut pause = None;
         let mut fired = Vec::new();
-        for ((call, p), o) in planned.iter().zip(outputs.iter_mut()) {
+        for (i, ((call, p), o)) in planned.iter().zip(outputs.iter_mut()).enumerate() {
+            // Held back, not run: the guards don't count it.
+            if held.contains(&i) {
+                continue;
+            }
             let sig = signature(call, p);
             for action in guards.on_call(&sig, o.is_error) {
                 fired.push((call.id.clone(), action.clone()));
@@ -1170,11 +1287,14 @@ impl Agent {
         args: &serde_json::Map<String, Value>,
         preceding: &str,
     ) -> Result<ToolOutput, String> {
-        if self.plan.enabled
+        if (self.plan.enabled || self.reads_only)
             && let Some(why) = self.plan_refusal(callable, args)
         {
             self.policy(id, "refused", &why)?;
             return Ok(ToolOutput::err(why));
+        }
+        if matches!(callable, Callable::Agent) {
+            return self.run_subagent(id, args).await;
         }
         let decision = decide(
             &self.safety.policy,
@@ -1207,6 +1327,7 @@ impl Agent {
                         preceding_text: preceding.into(),
                         reason: reason.clone(),
                         keys: keys.clone(),
+                        agent: self.sub.clone(),
                     };
                     let answer = tokio::select! {
                         a = self.safety.approver.approve(req) => a,
@@ -1307,22 +1428,42 @@ impl Agent {
 
     /// Why plan mode doesn't run a call: bash that isn't read-only, or an
     /// extension tool that may change things.
+    /// A read-only sub-agent gets the same refusals, in its own words.
     fn plan_refusal(
         &self,
         callable: &Callable,
         args: &serde_json::Map<String, Value>,
     ) -> Option<String> {
+        let (who, instead) = match (&self.sub, self.plan.enabled) {
+            (Some(name), false) => (
+                format!("{name} is a read-only agent"),
+                "Say in your answer what should change instead.",
+            ),
+            _ => (
+                "plan mode allows only reading".to_owned(),
+                "Put it in your plan instead.",
+            ),
+        };
         match callable {
             Callable::Core(Tool::Bash) => {
                 let cmd = args.get("command").and_then(Value::as_str).unwrap_or("");
-                psi_safety::read_only::check(cmd).err().map(|why| {
-                    format!("Not run: plan mode allows only read-only commands, and {why}. Put the change in your plan instead.")
-                })
+                psi_safety::read_only::check(cmd)
+                    .err()
+                    .map(|why| format!("Not run: {who}, and {why}. {instead}"))
             }
             Callable::Ext(i) if !i.read_only => Some(format!(
-                "Not run: {} may change things, and plan mode allows only reading. Put it in your plan instead.",
+                "Not run: {} may change things, and {who}. {instead}",
                 i.name
             )),
+            Callable::Agent => {
+                let name = args.get("agent").and_then(Value::as_str).unwrap_or("");
+                let ro = self
+                    .subagents
+                    .iter()
+                    .find(|d| d.name == name)
+                    .is_none_or(|d| d.read_only(&self.cfg.tools));
+                (!ro).then(|| format!("Not run: {name} may change files, and {who}. Use a read-only agent such as scout, or {}", instead.to_lowercase()))
+            }
             _ => None,
         }
     }
