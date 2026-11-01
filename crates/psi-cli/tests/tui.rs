@@ -432,6 +432,61 @@ fn rewind_picks_a_prompt_and_restores_its_files() {
     t.quit();
 }
 
+/// /fork (pi parity): a new session from the history before a prompt,
+/// with that prompt back in the editor; the original file stays as it was.
+#[test]
+fn fork_starts_a_new_session_before_a_prompt() {
+    let (mut t, s) = Tui::start(vec![text("one"), text("two"), text("three")], |_| {});
+    t.wait_for("› ", SLOW);
+    t.typ("first question\r");
+    t.wait_for("one", SLOW);
+    t.typ("second question\r");
+    t.wait_for("two", SLOW);
+    t.typ("/fork\r");
+    t.wait_for("↑↓ choose", SLOW);
+    t.typ("\r"); // the newest prompt
+    t.wait_for("forked: ", SLOW);
+    t.wait_for("› second question", SLOW);
+    t.typ(" again\r");
+    t.wait_for("three", SLOW);
+    let reqs = s.chat_requests();
+    let msgs = reqs[2]["messages"].as_array().unwrap();
+    let texts: Vec<&str> = msgs[1..]
+        .iter()
+        .map(|m| m["content"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(texts, ["first question", "one", "second question again"]);
+    let dir = t.project.parent().unwrap().join("home/.psi/sessions");
+    let files: Vec<_> = walk(&dir)
+        .into_iter()
+        .filter(|p| {
+            p.extension().is_some_and(|e| e == "jsonl")
+                && !p.to_string_lossy().ends_with(".wire.jsonl")
+        })
+        .collect();
+    assert_eq!(files.len(), 2, "{files:?}");
+    let forked = files
+        .iter()
+        .find(|f| std::fs::read_to_string(f).unwrap().contains("forked_from"))
+        .expect("the new session records where it came from");
+    let original = files.iter().find(|f| *f != forked).unwrap();
+    assert!(std::fs::read_to_string(original).unwrap().contains("two"));
+    t.quit();
+}
+
+fn walk(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            out.extend(walk(&p));
+        } else {
+            out.push(p);
+        }
+    }
+    out
+}
+
 fn example(name: &str) -> String {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples/extensions")
@@ -548,6 +603,42 @@ fn prompt_templates_and_skill_commands() {
         skill.starts_with("<skill name=\"pdf\"") && skill.ends_with("</skill>\n\nthe report"),
         "{skill}"
     );
+    t.quit();
+}
+
+/// The `input` event (pi parity): a handler consumes "ping" (and answers
+/// with a notification) and rewrites "hi" into a prompt template, which
+/// then expands. Commands still go first.
+#[test]
+fn input_handlers_rewrite_or_consume_typed_text() {
+    let (mut t, s) = Tui::start_with(
+        vec![text("hello there")],
+        |p| {
+            let home = p.parent().unwrap().join("home/.psi");
+            std::fs::create_dir_all(home.join("prompts")).unwrap();
+            std::fs::write(home.join("prompts/greet.md"), "Say hello to $1.").unwrap();
+            std::fs::write(
+                p.join("router.lua"),
+                r#"return { name = "router", version = "1", description = "d", setup = function(psi)
+                  psi.on("input", function(ev, ctx)
+                    if ev.text == "ping" then ctx.ui.notify("pong"); return { handled = true } end
+                    if ev.text == "hi" then return { text = "/greet " .. ev.source } end
+                  end)
+                end }"#,
+            )
+            .unwrap();
+        },
+        &["--extension", "router.lua"],
+    );
+    t.wait_for("› ", SLOW);
+    t.typ("ping\r");
+    t.wait_for("pong", SLOW);
+    t.typ("hi\r");
+    t.wait_for("hello there", SLOW);
+    let reqs = s.chat_requests();
+    assert_eq!(reqs.len(), 1, "ping never reached the model");
+    let msgs = reqs[0]["messages"].as_array().unwrap();
+    assert_eq!(msgs.last().unwrap()["content"], "Say hello to interactive.");
     t.quit();
 }
 

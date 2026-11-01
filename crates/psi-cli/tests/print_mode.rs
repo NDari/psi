@@ -503,3 +503,53 @@ end }"#,
     let again = psi(&e, &["remove", "~/pkgs/kit"]);
     assert!(!again.status.success());
 }
+
+/// The `input` event (pi parity): handlers see the prompt before template
+/// expansion and can rewrite it or consume it.
+#[test]
+fn input_handlers_rewrite_or_consume_the_prompt() {
+    let server = ReplayServer::start(vec![text("done")]).unwrap();
+    let e = env_for(&server);
+    std::fs::create_dir_all(e.home.join(".psi/prompts")).unwrap();
+    std::fs::write(e.home.join(".psi/prompts/greet.md"), "Say hello to $1.\n").unwrap();
+    let ext = e.home.join("router.lua");
+    std::fs::write(
+        &ext,
+        r#"return { name = "router", version = "0.1.0", description = "d", setup = function(psi)
+  psi.on("input", function(ev)
+    if ev.text == "ping" then return { handled = true } end
+    if ev.text == "hi" then return { text = "/greet " .. ev.source } end
+  end)
+end }"#,
+    )
+    .unwrap();
+    let ext = ext.display().to_string();
+    let out = psi(&e, &["-p", "ping", "--extension", &ext]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+    assert!(
+        !server
+            .requests()
+            .iter()
+            .any(|r| r.path.ends_with("/chat/completions")),
+        "a consumed prompt sends nothing"
+    );
+    let out = psi(&e, &["-p", "hi", "--extension", &ext]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let chat = server
+        .requests()
+        .into_iter()
+        .find(|r| r.path.ends_with("/chat/completions"))
+        .unwrap();
+    let body = chat.json();
+    let msgs = body["messages"].as_array().unwrap();
+    assert_eq!(msgs.last().unwrap()["content"], "Say hello to print.\n");
+}

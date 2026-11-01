@@ -257,7 +257,7 @@ result = "GateResult?"
 [[event]]
 name = "input"
 kind = "chain"
-doc = "The user submitted text. Return { text = ... } to change it, or { handled = true } to consume it."
+doc = "The user submitted text that is not a command (extension commands run first). Return { text = ... } to change it, or { handled = true } to consume it; skills and prompt templates expand after."
 payload = "InputEvent"
 result = "InputResult?"
 
@@ -473,7 +473,10 @@ fields = [{ name = "cancel", type = "boolean?", doc = "" }]
 
 [[type]]
 name = "InputEvent"
-fields = [{ name = "text", type = "string", doc = "" }]
+fields = [
+  { name = "text", type = "string", doc = "As typed: before /skill: and prompt template expansion" },
+  { name = "source", type = "\"interactive\"|\"print\"|\"extension\"", doc = "Typed in the TUI, the headless prompt (-p or --json), or psi.send_user_message" },
+]
 
 [[type]]
 name = "InputResult"

@@ -8,7 +8,7 @@ use psi_agent::recovery;
 use psi_agent::{Agent, AgentEvent, RunOutcome};
 use psi_safety::checkpoint::Checkpoints;
 use psi_safety::policy::Mode;
-use psi_session::{EntryBody, SessionFile};
+use psi_session::{Entry, EntryBody, Role, SessionFile, text_of};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use super::ui::UiMsg;
@@ -33,6 +33,9 @@ pub enum Cmd {
     },
     New,
     Resume(PathBuf),
+    /// A new session from the history before one of the user's prompts
+    /// (/fork, pi parity); the prompt goes back into the editor.
+    Fork(String),
     /// The whole session, for /tree, /rewind, /stats and /inspect.
     Entries,
     /// Load the extensions again.
@@ -91,6 +94,7 @@ impl Worker {
                     Ok(s) => self.switch(s, "resumed"),
                     Err(e) => UiMsg::Error(format!("cannot open {}: {e}", p.display())),
                 },
+                Cmd::Fork(id) => self.fork(&id),
                 Cmd::Reload => self.reload().await,
                 Cmd::Plan => {
                     let on = !self.agent.plan().enabled;
@@ -212,7 +216,42 @@ impl Worker {
             what: what.into(),
             path,
             entries: self.agent.session().entries().to_vec(),
+            prefill: None,
         }
+    }
+
+    fn fork(&mut self, id: &str) -> UiMsg {
+        let session = self.agent.session();
+        let branch = session.branch();
+        let Some(i) = branch.iter().position(|e| e.id == id) else {
+            return UiMsg::Error("that prompt is not on this branch".into());
+        };
+        let text = match &branch[i].body {
+            EntryBody::Message {
+                role: Role::User,
+                content,
+                ..
+            } => text_of(content),
+            _ => return UiMsg::Error("/fork starts from one of your prompts".into()),
+        };
+        let history: Vec<Entry> = branch[..i].iter().map(|e| (*e).clone()).collect();
+        let from = session.path().display().to_string();
+        let mut s = match SessionFile::fork(&self.sessions_root, &self.cwd, &history) {
+            Ok(s) => s,
+            Err(e) => return UiMsg::Error(format!("cannot create a session: {e}")),
+        };
+        // Not sent to the model: where this session came from.
+        if let Err(e) = s.append(EntryBody::Custom {
+            custom_type: "forked_from".into(),
+            data: serde_json::json!({"session": from, "entry_id": id}),
+        }) {
+            return UiMsg::Error(format!("cannot write the new session: {e}"));
+        }
+        let mut m = self.switch(s, "forked");
+        if let UiMsg::Switched { prefill, .. } = &mut m {
+            *prefill = Some(text);
+        }
+        m
     }
 }
 

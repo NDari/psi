@@ -38,6 +38,12 @@ pub enum UiMsg {
     RunDone(RunOutcome),
     Info(String),
     Error(String),
+    /// The `input` event's answer: the text to send on, or None when a
+    /// handler consumed it.
+    Input {
+        text: Option<String>,
+        follow_up: bool,
+    },
     Restored {
         what: String,
         written: usize,
@@ -54,6 +60,8 @@ pub enum UiMsg {
         what: String,
         path: PathBuf,
         entries: Vec<Entry>,
+        /// Text for the editor (/fork puts the prompt back).
+        prefill: Option<String>,
     },
     /// `!cmd` finished.
     UserBash {
@@ -117,6 +125,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/label", "label the current point: /label <text>"),
     ("/new", "start a new session"),
     ("/resume", "continue an earlier session in this directory"),
+    (
+        "/fork",
+        "a new session from before an earlier prompt, to edit and resend it",
+    ),
     ("/inspect", "the session as an inspection timeline"),
     ("/reload", "load the extensions again"),
     ("/quit", "leave psi"),
@@ -149,6 +161,11 @@ enum Picker {
     },
     Resume {
         items: Vec<PathBuf>,
+        sel: usize,
+    },
+    /// Pick a prompt to fork from (/fork).
+    Fork {
+        items: Vec<(String, String)>,
         sel: usize,
     },
     /// What to do with a proposed plan.
@@ -563,7 +580,7 @@ impl<W: Write> App<W> {
     fn picker_key(&mut self, k: KeyEvent) {
         let Some(p) = &mut self.picker else { return };
         let (n, sel) = match p {
-            Picker::Goto { items, sel, .. } => (items.len(), sel),
+            Picker::Goto { items, sel, .. } | Picker::Fork { items, sel } => (items.len(), sel),
             Picker::Resume { items, sel } => (items.len(), sel),
             Picker::Select { items, sel, .. } => (items.len(), sel),
             Picker::Plan { sel } => (PLAN_CHOICES.len(), sel),
@@ -588,6 +605,11 @@ impl<W: Write> App<W> {
                 Some(Picker::Resume { items, sel }) => {
                     if let Some(p) = items.get(sel) {
                         self.send(Cmd::Resume(p.clone()));
+                    }
+                }
+                Some(Picker::Fork { items, sel }) => {
+                    if let Some((id, _)) = items.get(sel) {
+                        self.send(Cmd::Fork(id.clone()));
                     }
                 }
                 Some(Picker::Select {
@@ -677,6 +699,13 @@ impl<W: Write> App<W> {
     }
 
     fn submit(&mut self, text: String, follow_up: bool) {
+        self.submit_from(text, follow_up, "interactive");
+    }
+
+    /// Commands and `!bash` first; then the `input` event (pi parity),
+    /// whose handlers may change or consume the text; then skills,
+    /// prompt templates and the agent (`after_input`).
+    fn submit_from(&mut self, text: String, follow_up: bool, source: &'static str) {
         let t = text.trim().to_owned();
         if t.is_empty() {
             return;
@@ -688,19 +717,9 @@ impl<W: Write> App<W> {
             let builtin = COMMANDS.iter().any(|(c, _)| &c[1..] == name)
                 || ["?", "exit", "q"].contains(&name)
                 || self.ext.commands().iter().any(|(n, _, _)| n == name);
-            if !builtin {
-                // Skills and prompt templates (D-35); built-ins win.
-                match self.resources.expand(&t) {
-                    Ok(Some(e)) => {
-                        let text = e.text.clone();
-                        self.info(&format!("  {}", e.note));
-                        return self.send_prompt(text, follow_up);
-                    }
-                    Ok(None) => {}
-                    Err(e) => return self.error(&e),
-                }
+            if builtin {
+                return self.slash(cmd);
             }
-            return self.slash(cmd);
         }
         if let Some(c) = t.strip_prefix('!') {
             let (command, to_context) = match c.strip_prefix('!') {
@@ -708,6 +727,39 @@ impl<W: Write> App<W> {
                 None => (c.trim().to_owned(), true),
             };
             return self.user_bash(command, to_context);
+        }
+        if self.ext.listens("input") {
+            let (ext, tx) = (self.ext.clone(), self.ui_tx.clone());
+            self.rt.spawn(async move {
+                let out = ext
+                    .chain("input", serde_json::json!({"text": t, "source": source}))
+                    .await;
+                let text = if out["handled"] == serde_json::Value::Bool(true) {
+                    None
+                } else {
+                    Some(out["text"].as_str().unwrap_or(&t).to_owned())
+                };
+                let _ = tx.send(UiMsg::Input { text, follow_up });
+            });
+            return;
+        }
+        self.after_input(t, follow_up);
+    }
+
+    fn after_input(&mut self, t: String, follow_up: bool) {
+        if let Some(cmd) = t.strip_prefix('/')
+            && !cmd.split_whitespace().next().unwrap_or("").contains('/')
+        {
+            // Skills and prompt templates (D-35); built-ins won above.
+            match self.resources.expand(&t) {
+                Ok(Some(e)) => {
+                    let text = e.text.clone();
+                    self.info(&format!("  {}", e.note));
+                    return self.send_prompt(text, follow_up);
+                }
+                Ok(None) => return self.slash(cmd),
+                Err(e) => return self.error(&e),
+            }
         }
         self.send_prompt(t, follow_up);
     }
@@ -837,10 +889,11 @@ impl<W: Write> App<W> {
             "quit" | "exit" | "q" => self.quit = true,
             "undo" => self.send(Cmd::Undo),
             "diff" => self.send(Cmd::Diff),
-            "rewind" | "tree" | "stats" | "inspect" | "todos" => {
+            "rewind" | "tree" | "fork" | "stats" | "inspect" | "todos" => {
                 self.pending_entries = Some(match name {
                     "rewind" => "rewind",
                     "tree" => "tree",
+                    "fork" => "fork",
                     "stats" => "stats",
                     "todos" => "todos",
                     _ => "inspect",
@@ -993,6 +1046,11 @@ impl<W: Write> App<W> {
             }
             UiMsg::Info(s) => self.info(&format!("  {s}")),
             UiMsg::Error(s) => self.error(&format!("  {s}")),
+            UiMsg::Input { text, follow_up } => {
+                if let Some(t) = text {
+                    self.after_input(t, follow_up);
+                }
+            }
             UiMsg::Restored {
                 what,
                 written,
@@ -1026,12 +1084,16 @@ impl<W: Write> App<W> {
                 what,
                 path,
                 entries,
+                prefill,
             } => {
                 self.shown.clear();
                 self.info(&format!("  {what}: {}", path.display()));
                 // The agent takes plan mode from the new session; so does the screen.
                 self.set_plan(PlanState::default());
                 let _ = self.replay(&entries);
+                if let Some(t) = prefill {
+                    self.editor.set_text(&t);
+                }
             }
             UiMsg::Ext(ext, req) => self.on_ext(ext, req),
             UiMsg::UserBash {
@@ -1146,7 +1208,7 @@ impl<W: Write> App<W> {
                     }
                     self.queued.push_back((text, follow_up));
                 } else {
-                    self.submit(text, false);
+                    self.submit_from(text, false, "extension");
                 }
             }
             _ => {}
@@ -1225,6 +1287,27 @@ impl<W: Write> App<W> {
                     sel,
                     files: what == "rewind",
                 });
+            }
+            "fork" => {
+                let items: Vec<(String, String)> = branch
+                    .iter()
+                    .filter_map(|e| match &e.body {
+                        EntryBody::Message {
+                            role: Role::User,
+                            content,
+                            ..
+                        } => Some((
+                            e.id.clone(),
+                            view::cut(&text_of(content).replace('\n', " "), 100),
+                        )),
+                        _ => None,
+                    })
+                    .collect();
+                if items.is_empty() {
+                    return self.info("  no earlier prompts to fork from");
+                }
+                let sel = items.len() - 1;
+                self.picker = Some(Picker::Fork { items, sel });
             }
             "label" => {
                 if let (Some(id), Some(t)) = (leaf, self.label_text.take()) {
@@ -1586,7 +1669,7 @@ impl<W: Write> App<W> {
             cursor = None;
         } else if let Some(p) = &self.picker {
             let (items, sel): (Vec<String>, usize) = match p {
-                Picker::Goto { items, sel, .. } => {
+                Picker::Goto { items, sel, .. } | Picker::Fork { items, sel } => {
                     (items.iter().map(|(_, l)| l.clone()).collect(), *sel)
                 }
                 Picker::Resume { items, sel } => (

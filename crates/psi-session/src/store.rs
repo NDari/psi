@@ -47,6 +47,22 @@ impl SessionFile {
         })
     }
 
+    /// A new session holding a copy of `history` (a branch, root first),
+    /// for /fork: new entries continue from its last entry.
+    pub fn fork(root: &Path, cwd: &Path, history: &[Entry]) -> Result<Self, SessionError> {
+        let mut s = Self::create(root, cwd)?;
+        for e in history {
+            let mut line = serde_json::to_vec(e).map_err(std::io::Error::other)?;
+            line.push(b'\n');
+            s.file.write_all(&line)?;
+        }
+        s.file.flush()?;
+        s.entries = history.to_vec();
+        s.leaf = history.last().map(|e| e.id.clone());
+        s.ids = IdGen::random_after(s.leaf.clone());
+        Ok(s)
+    }
+
     /// An existing session; new entries continue from its last one.
     pub fn open(path: &Path) -> Result<Self, SessionError> {
         let entries = read_entries(BufReader::new(File::open(path)?))?;
@@ -178,6 +194,25 @@ mod tests {
         assert_eq!(ids.len(), 3);
         assert_eq!(ids[0], a);
         assert_eq!(ids[0].len(), 8);
+    }
+
+    #[test]
+    fn fork_copies_a_branch_into_a_new_file() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = Path::new("/home/u/proj");
+        let mut s = SessionFile::create(root.path(), cwd).unwrap();
+        s.append(cp("a")).unwrap();
+        s.append(cp("b")).unwrap();
+        let history: Vec<Entry> = s.branch().into_iter().cloned().collect();
+        let mut f = SessionFile::fork(root.path(), cwd, &history).unwrap();
+        assert_ne!(f.path(), s.path());
+        let c = f.append(cp("c")).unwrap().clone();
+        assert_eq!(c.parent_id.as_deref(), Some(history[1].id.as_str()));
+        let back = SessionFile::open(f.path()).unwrap();
+        assert_eq!(back.entries().len(), 3);
+        assert_eq!(back.branch().len(), 3);
+        // The original is untouched.
+        assert_eq!(SessionFile::open(s.path()).unwrap().entries().len(), 2);
     }
 
     #[test]

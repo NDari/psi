@@ -534,6 +534,35 @@ pub async fn run(args: RunArgs) -> Result<ExitCode> {
     } else {
         args.prompt.clone()
     };
+    // The `input` event, before skill and template expansion (pi parity).
+    let mut prompt = prompt;
+    let ext = agent.extensions().clone();
+    if ext.listens("input") {
+        let out = ext
+            .chain(
+                "input",
+                serde_json::json!({"text": prompt.trim(), "source": "print"}),
+            )
+            .await;
+        if out["handled"] == serde_json::Value::Bool(true) {
+            let session_path = agent.session().path().to_owned();
+            ext.notify(
+                "session_shutdown",
+                serde_json::json!({"session_file": session_path}),
+            )
+            .await;
+            ext.shutdown();
+            drop(agent);
+            if let Some(p) = printer {
+                let _ = p.await;
+            }
+            let _ = std::fs::remove_dir_all(&tmpdir);
+            return Ok(ExitCode::SUCCESS);
+        }
+        if let Some(t) = out["text"].as_str() {
+            prompt = t.to_owned();
+        }
+    }
     // `/skill:name` and prompt templates work headless too (pi parity).
     let prompt = match resources.expand(prompt.trim()) {
         Ok(Some(e)) => e.text,

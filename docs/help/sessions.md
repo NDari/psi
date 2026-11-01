@@ -8,5 +8,7 @@ prompting again starts a new branch.
 - /resume picks an earlier session; /new starts one.
 - /tree moves to any earlier prompt (the files stay as they are); /rewind does that and
   restores the files too. /label names the current point.
+- /fork starts a new session from the history before one of your prompts and puts that
+  prompt in the editor to edit and send; the original session is left as it was.
 - psi inspect <session> shows a session as a timeline; psi replay <session> --at <n>
   resends one request.
