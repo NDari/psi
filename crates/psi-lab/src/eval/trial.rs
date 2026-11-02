@@ -269,24 +269,8 @@ fn psi_run(
             "off",
         ])
         .run(&dir.join("run.jsonl"), &dir.join("run.stderr"))?;
-    // The run's last event says how it ended.
     let events = fsutil::read_to_string(&dir.join("run.jsonl"))?;
-    let end: Option<Value> = events
-        .lines()
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .rfind(|v| v["type"] == "run_end");
-    let stop = end.as_ref().and_then(|e| e["stop"].as_str()).unwrap_or("");
-    let reason = end
-        .as_ref()
-        .and_then(|e| e["reason"].as_str())
-        .unwrap_or("")
-        .to_owned();
-    let facts = RunFacts {
-        exit_code,
-        settled: end.is_some(),
-        failure: (stop == "failed").then(|| format!("psi failed: {reason}")),
-        step_cap_hit: stop == "budget" && reason.contains("model requests"),
-    };
+    let facts = psi_facts(&events, exit_code);
     // psi's own session file is the record (D-31); copy it and its wire log.
     let sessions = home.join(".psi/sessions");
     let found = std::fs::read_dir(&sessions)
@@ -325,6 +309,35 @@ fn psi_run(
         None => Vec::new(),
     };
     Ok((facts, entries))
+}
+
+/// What a psi run's `--json` output says about how it ended: its last
+/// `run_end` event's `stop` and `reason`.
+fn psi_facts(events: &str, exit_code: i32) -> RunFacts {
+    let end: Option<Value> = events
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .rfind(|v| v["type"] == "run_end");
+    let stop = end.as_ref().and_then(|e| e["stop"].as_str()).unwrap_or("");
+    let reason = end
+        .as_ref()
+        .and_then(|e| e["reason"].as_str())
+        .unwrap_or("")
+        .to_owned();
+    RunFacts {
+        exit_code,
+        settled: end.is_some(),
+        failure: (stop == "failed").then(|| format!("psi failed: {reason}")),
+        step_cap_hit: stop == "budget" && reason.contains("model requests"),
+    }
+}
+
+/// The outcome of a psi trial from its `--json` output and exit code, as
+/// the eval runner decides it: for testing the runner against the real
+/// binary's output (crates/psi-cli/tests/print_mode.rs).
+#[doc(hidden)]
+pub fn psi_outcome(events: &str, exit_code: i32, graded: &Result<Grade>) -> (Outcome, String) {
+    classify(Agent::Psi, &psi_facts(events, exit_code), 1200, graded)
 }
 
 /// Decides the outcome class. Timeouts and the step cap are the model's;

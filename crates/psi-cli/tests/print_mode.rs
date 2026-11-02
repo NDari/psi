@@ -738,3 +738,346 @@ fn ctrl_c_stops_a_print_run_with_130() {
         }
     )));
 }
+
+/// How the eval runner classifies a trial, fed with the real binary's
+/// `--json` output and exit code (the strings it reads are psi's own).
+#[test]
+fn the_eval_runner_classifies_real_psi_output() {
+    use psi_lab::eval::{Grade, Outcome, psi_outcome};
+    let run = |replies: Vec<Reply>, args: &[&str]| {
+        let server = ReplayServer::start(replies).unwrap();
+        let e = env_for(&server);
+        let mut all = vec!["-p", "task", "--json"];
+        all.extend_from_slice(args);
+        let out = psi(&e, &all);
+        (
+            String::from_utf8(out.stdout).unwrap(),
+            out.status.code().unwrap_or(-1),
+        )
+    };
+    let grade = |p, t| {
+        Ok(Grade {
+            passed: p,
+            total: t,
+        })
+    };
+    let bash = || Reply::Chat(ScriptedReply::call("bash", json!({"command": "true"})));
+
+    let (out, code) = run(vec![text("done")], &[]);
+    assert_eq!(
+        psi_outcome(&out, code, &grade(3, 3)),
+        (Outcome::Pass, String::new())
+    );
+
+    let (out, code) = run(vec![bash()], &["--max-turns", "1"]);
+    assert_eq!(
+        psi_outcome(&out, code, &grade(1, 3)),
+        (Outcome::ModelFail, "step cap; checks: 1 passed of 3".into())
+    );
+
+    let (out, code) = run(vec![bash(), error(500, "CUDA error: out of memory")], &[]);
+    let (o, why) = psi_outcome(&out, code, &grade(0, 3));
+    assert_eq!(o, Outcome::HarnessFail);
+    assert!(
+        why.starts_with("psi failed:") && why.contains("out of memory"),
+        "{why}"
+    );
+
+    let failing = (0..6)
+        .map(|_| Reply::Chat(ScriptedReply::call("bash", json!({"command": "false"}))))
+        .collect();
+    let (out, code) = run(failing, &[]);
+    assert_eq!(
+        psi_outcome(&out, code, &grade(0, 3)),
+        (Outcome::ModelFail, "checks: 0 passed of 3".into())
+    );
+
+    // A trial past its time: the runner wraps psi in `timeout -s INT`.
+    let server = ReplayServer::start(vec![Reply::hang("thinking")]).unwrap();
+    let e = env_for(&server);
+    let out = Command::new("timeout")
+        .args([
+            "-k",
+            "5",
+            "-s",
+            "INT",
+            "2",
+            env!("CARGO_BIN_EXE_psi"),
+            "-p",
+            "task",
+            "--json",
+        ])
+        .env("HOME", &e.home)
+        .current_dir(&e.project)
+        .output()
+        .unwrap();
+    let (o, why) = psi_outcome(
+        &String::from_utf8(out.stdout).unwrap(),
+        out.status.code().unwrap_or(-1),
+        &grade(0, 3),
+    );
+    assert_eq!(o, Outcome::ModelFail);
+    assert!(why.starts_with("timeout"), "{why}");
+}
+
+/// `psi inspect` on sessions the binary itself wrote: filters, a trial
+/// directory with its result, and a session with a branch left behind.
+#[test]
+fn inspect_reads_real_sessions() {
+    let server = ReplayServer::start(vec![
+        Reply::Chat(ScriptedReply::call("bash", json!({"command": "git push"}))),
+        Reply::Chat(ScriptedReply::call("bash", json!({"command": "false"}))),
+        text("done"),
+    ])
+    .unwrap();
+    let e = env_for(&server);
+    assert_eq!(psi(&e, &["-p", "ship it"]).status.code(), Some(0));
+    let session = sessions(&e).pop().unwrap();
+    let inspect = |args: &[&str], path: &Path| {
+        let out = Command::new(env!("CARGO_BIN_EXE_psi"))
+            .arg("inspect")
+            .args(args)
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (
+            String::from_utf8(out.stdout).unwrap(),
+            String::from_utf8(out.stderr).unwrap(),
+        )
+    };
+    // --blocked: the denied push, and nothing else.
+    let (out, _) = inspect(&["--blocked", "--json"], &session);
+    let v: Value = serde_json::from_str(&out).unwrap();
+    let events = v["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1, "{v}");
+    assert!(events[0].to_string().contains("always-ask"), "{v}");
+    // --step: one step, in full; --failures: the failed command's step.
+    let (out, _) = inspect(&["--step", "2"], &session);
+    assert!(
+        out.contains("bash {\"command\":\"false\"}") && !out.contains("git push"),
+        "{out}"
+    );
+    let (out, _) = inspect(&["--failures", "--json"], &session);
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert!(v["events"].to_string().contains("false"), "{v}");
+
+    // A trial directory: its result leads the timeline.
+    let trial = e.home.join("trial-0");
+    std::fs::create_dir_all(&trial).unwrap();
+    std::fs::copy(&session, trial.join("session.jsonl")).unwrap();
+    std::fs::write(
+        trial.join("result.json"),
+        json!({"task": "ship", "trial": 0, "agent": "psi", "outcome": "MODEL-FAIL",
+               "reason": "checks: 1 passed of 2", "checks_passed": 1, "checks_total": 2,
+               "steps": 3, "tool_calls": 2, "tool_errors": 2, "tokens_in": 10,
+               "tokens_out": 5, "step_cap_hit": false, "exit_code": 0, "wall_s": 1})
+        .to_string(),
+    )
+    .unwrap();
+    let (out, _) = inspect(&[], &trial);
+    assert!(out.starts_with("psi ship: MODEL-FAIL checks 1/2"), "{out}");
+
+    // A branch left behind (/tree): the timeline follows the last one.
+    let mut s = psi_session::SessionFile::open(&session).unwrap();
+    let first_user = s
+        .entries()
+        .iter()
+        .find(|en| {
+            matches!(
+                &en.body,
+                EntryBody::Message {
+                    role: psi_session::Role::User,
+                    ..
+                }
+            )
+        })
+        .unwrap()
+        .id
+        .clone();
+    s.set_leaf(&first_user).unwrap();
+    s.append(EntryBody::Message {
+        role: psi_session::Role::Assistant,
+        content: vec![psi_session::Block::Text {
+            text: "another way".into(),
+        }],
+        usage: None,
+        stop_reason: None,
+        error: None,
+        model: None,
+    })
+    .unwrap();
+    let (out, err) = inspect(&[], &session);
+    assert!(
+        out.contains("another way") && !out.contains("git push"),
+        "{out}"
+    );
+    assert!(err.contains("entries on other branches left out"), "{err}");
+}
+
+/// Records every event it sees (one line each) and uses the API through
+/// the real binary: flags, entries, active tools, messages, the bus.
+const LIFECYCLE: &str = r#"
+local function rec(line)
+  local f = io.open("events.log", "a")
+  f:write(line .. "\n")
+  f:close()
+end
+local EVENTS = {"session_start", "agent_start", "turn_start", "context", "message_start",
+  "message_update", "message_end", "tool_call", "tool_execution_update", "tool_result",
+  "policy_decision", "guard_event", "turn_end", "agent_end", "session_shutdown"}
+return { name = "lifecycle", version = "1", description = "records events",
+  setup = function(psi)
+    psi.register_flag("tag", { description = "a tag", default = "none" })
+    for _, name in ipairs(EVENTS) do
+      psi.on(name, function(e)
+        local s = name
+        if e.turn ~= nil then s = s .. " turn=" .. tostring(e.turn) end
+        if e.decision ~= nil then s = s .. " decision=" .. tostring(e.decision) end
+        if e.guard ~= nil then s = s .. " guard=" .. tostring(e.guard) end
+        if name == "context" then s = s .. " messages=" .. tostring(#e.messages) end
+        rec(s)
+      end)
+    end
+    psi.on("agent_start", function(e)
+      rec("flag=" .. tostring(psi.get_flag("tag")))
+      rec("entries=" .. tostring(#psi.entries("seen")))
+      psi.append_entry("seen", { prompt = e.prompt })
+      psi.set_active_tools({ "read", "bash" })
+      rec("active=" .. table.concat(psi.get_active_tools(), ","))
+      psi.events.emit("hello", { from = "lifecycle" })
+    end)
+    psi.on("turn_end", function(e)
+      if e.turn == 1 then psi.send_message("note", "the extension says hi") end
+    end)
+  end }
+"#;
+
+const LISTENER: &str = r#"
+return { name = "listener", version = "1", description = "hears the bus",
+  setup = function(psi)
+    psi.events.on("hello", function(d)
+      local f = io.open("events.log", "a")
+      f:write("bus from=" .. tostring(d.from) .. "\n")
+      f:close()
+    end)
+  end }
+"#;
+
+#[test]
+fn extensions_see_every_event_and_use_the_api() {
+    let bash = |c: &str| Reply::Chat(ScriptedReply::call("bash", json!({"command": c})));
+    let server = ReplayServer::start(vec![
+        bash("git push"),
+        bash("false"),
+        bash("false"),
+        bash("false"),
+        text("done"),
+        text("again"),
+    ])
+    .unwrap();
+    let e = env_for(&server);
+    let exts = e.home.join("exts");
+    std::fs::create_dir_all(&exts).unwrap();
+    std::fs::write(exts.join("lifecycle.lua"), LIFECYCLE).unwrap();
+    std::fs::write(exts.join("listener.lua"), LISTENER).unwrap();
+    let args = |prompt: &'static str| {
+        vec![
+            "--extension".to_owned(),
+            exts.join("lifecycle.lua").display().to_string(),
+            "--extension".to_owned(),
+            exts.join("listener.lua").display().to_string(),
+            "--ext-flag".to_owned(),
+            "tag=blue".to_owned(),
+            "-p".to_owned(),
+            prompt.to_owned(),
+        ]
+    };
+    let a = args("ship it");
+    let out = psi(&e, &a.iter().map(String::as_str).collect::<Vec<_>>());
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let log = std::fs::read_to_string(e.project.join("events.log")).unwrap();
+    let lines: Vec<&str> = log.lines().collect();
+
+    // Session events first and last; the run's in between.
+    assert_eq!(lines.first(), Some(&"session_start"), "{log}");
+    assert_eq!(lines.last(), Some(&"session_shutdown"), "{log}");
+    for want in [
+        "agent_start",
+        "agent_end",
+        "message_update",
+        "tool_execution_update",
+    ] {
+        assert!(lines.contains(&want), "{want} missing:\n{log}");
+    }
+    // Each request: turn_start, context, message_start and message_end
+    // with its turn number (message_start used to say 0).
+    for turn in 1..=5 {
+        for ev in ["turn_start", "message_start", "turn_end"] {
+            assert!(
+                lines.contains(&format!("{ev} turn={turn}").as_str()),
+                "{ev} {turn}:\n{log}"
+            );
+        }
+    }
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|l| l.starts_with("context messages="))
+            .count(),
+        5
+    );
+    assert_eq!(lines.iter().filter(|l| **l == "message_end").count(), 5);
+    assert_eq!(lines.iter().filter(|l| **l == "tool_call").count(), 4);
+    assert_eq!(lines.iter().filter(|l| **l == "tool_result").count(), 4);
+    assert!(lines.contains(&"policy_decision decision=denied"), "{log}");
+    assert!(
+        lines.contains(&"guard_event guard=repeated_failure"),
+        "{log}"
+    );
+    // The API: the flag, the bus to another extension, active tools.
+    assert!(lines.contains(&"flag=blue"), "{log}");
+    assert!(lines.contains(&"bus from=lifecycle"), "{log}");
+    assert!(lines.contains(&"active=read,bash"), "{log}");
+    let reqs = server.chat_requests();
+    let tools: Vec<&str> = reqs[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["function"]["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(tools, ["read", "bash"]);
+    // send_message: the model sees it with the next request.
+    assert!(
+        reqs[1]["messages"]
+            .to_string()
+            .contains("the extension says hi")
+    );
+    assert!(
+        !reqs[0]["messages"]
+            .to_string()
+            .contains("the extension says hi")
+    );
+
+    // append_entry is kept in the session: a continued run reads it back.
+    assert!(lines.contains(&"entries=0"), "{log}");
+    std::fs::remove_file(e.project.join("events.log")).unwrap();
+    let mut a = args("once more");
+    a.insert(0, "-c".to_owned());
+    let out = psi(&e, &a.iter().map(String::as_str).collect::<Vec<_>>());
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let log = std::fs::read_to_string(e.project.join("events.log")).unwrap();
+    assert!(log.lines().any(|l| l == "entries=1"), "{log}");
+}

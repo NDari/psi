@@ -154,3 +154,56 @@ fn eval_refuses_a_directory_that_is_not_evals() {
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("is not the evals directory"), "{stderr}");
 }
+
+/// `psi ext test` and `psi ext check` as an extension author runs them:
+/// exit codes and what they name.
+#[test]
+fn ext_test_and_check_report_failures_with_their_exit_code() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let example = repo.join("examples/extensions/tidy-results");
+    let out = psi().args(["ext", "test"]).arg(&example).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // A copy with one expectation broken: exit 1, the case named.
+    let dir = tempfile::tempdir().unwrap();
+    let ext = dir.path().join("tidy-results");
+    std::fs::create_dir_all(&ext).unwrap();
+    for f in ["init.lua", "tidy_results_test.lua"] {
+        std::fs::copy(example.join(f), ext.join(f)).unwrap();
+    }
+    let test_file = ext.join("tidy_results_test.lua");
+    let text = std::fs::read_to_string(&test_file).unwrap();
+    std::fs::write(
+        &test_file,
+        text.replace("\"3 passed in 0.2s\"", "\"something else\""),
+    )
+    .unwrap();
+    let out = psi().args(["ext", "test"]).arg(&ext).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("color codes are removed"), "{stdout}");
+
+    // check: a good extension passes, a broken one fails and says why.
+    let fixtures = repo.join("crates/psi-ext/tests/fixtures");
+    let out = psi()
+        .args(["ext", "check"])
+        .arg(fixtures.join("good.lua"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let out = psi()
+        .args(["ext", "check"])
+        .arg(fixtures.join("bad_tool.lua"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(!out.stdout.is_empty());
+}

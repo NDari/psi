@@ -34,6 +34,26 @@ pub fn load(path: &Path) -> Result<Record> {
     for s in &skipped {
         tracing::warn!("{}: {s} (left out)", session.display());
     }
+    // The branch that ends at the last entry, as /resume continues it:
+    // after /rewind or /tree the file also holds branches left behind,
+    // and walking them in file order would mix two conversations.
+    let entries = if entries.iter().skip(1).any(|e| e.parent_id.is_some()) {
+        let last = entries.last().map(|e| e.id.clone());
+        let branch: Vec<Entry> = psi_session::branch(&entries, last.as_deref())
+            .into_iter()
+            .cloned()
+            .collect();
+        let left = entries.len() - branch.len();
+        if left > 0 {
+            tracing::warn!(
+                "{}: {left} entries on other branches left out (the timeline follows the last one)",
+                session.display()
+            );
+        }
+        branch
+    } else {
+        entries
+    };
     let result = match result_path {
         Some(p) if p.is_file() => {
             let text = fsutil::read_to_string(&p)?;

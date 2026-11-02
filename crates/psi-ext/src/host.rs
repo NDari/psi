@@ -75,6 +75,8 @@ pub enum Request {
         data: Json,
     },
     Log(String),
+    /// Answered once every request sent before it was handled.
+    Flush(oneshot::Sender<()>),
 }
 
 /// Where an extension's requests go.

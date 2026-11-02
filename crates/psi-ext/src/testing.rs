@@ -71,6 +71,9 @@ impl Backend for FakeBackend {
                 self.0.borrow_mut().output.push(format!("log: {m}"));
                 record(self, json!({"kind": "log", "message": m}));
             }
+            Request::Flush(reply) => {
+                let _ = reply.send(());
+            }
             Request::Confirm {
                 title,
                 message,

@@ -299,7 +299,22 @@ impl ExtManager {
                 Err(_) => {}
             }
         }
+        self.flush().await;
         Ok(out)
+    }
+
+    /// Waits until every request the handlers sent so far was handled, so
+    /// what a handler asked for (`send_message`, `set_active_tools`, ...)
+    /// is in place before the agent goes on. The channel keeps order.
+    async fn flush(&self) {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .requests
+            .send((String::new(), Request::Flush(tx)))
+            .is_ok()
+        {
+            let _ = tokio::time::timeout(EVENT_TIMEOUT, rx).await;
+        }
     }
 
     /// A notify event; errors were already reported by the extension.
@@ -576,6 +591,9 @@ async fn route(m: Weak<ExtManager>, mut rx: UnboundedReceiver<(String, Request)>
             }
             Request::SetActiveTools(names) => m.push(AgentRequest::SetActiveTools(names)),
             Request::Log(msg) => tracing::info!(ext = %ext, "{msg}"),
+            Request::Flush(reply) => {
+                let _ = reply.send(());
+            }
             // Setup can't ask the user: nothing can answer yet. Empty
             // answers now, and the extension is told where asking works.
             ask @ (Request::Confirm { .. }
