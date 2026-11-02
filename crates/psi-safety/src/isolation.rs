@@ -383,6 +383,8 @@ mod tests {
             .args(args)
             .args(["bash", "-c", script])
             .current_dir(cwd)
+            // As the bash tool sets it; else $TMPDIR is the host's.
+            .env("TMPDIR", &sb.config().tmpdir)
             .output()
             .unwrap();
         let mut s = String::from_utf8_lossy(&out.stdout).into_owned();

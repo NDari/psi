@@ -265,9 +265,10 @@ mod tests {
             ),
             Decision::Allow
         );
+        // Not /etc: on macOS it resolves to /private/etc.
         assert_eq!(
-            keys(p.file_write("write", Path::new("/etc/hosts"), "/etc/hosts", f)),
-            ["outside:/etc/hosts"]
+            keys(p.file_write("write", Path::new("/usr/x"), "/usr/x", f)),
+            ["outside:/usr/x"]
         );
         // `..` doesn't get out unnoticed.
         assert_eq!(
