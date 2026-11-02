@@ -68,7 +68,8 @@ release:
 
 # Build an optimized psi and install it as ~/.local/bin/psi
 install: release
-    install -Dm755 target/release/psi "$HOME/.local/bin/psi"
+    mkdir -p "$HOME/.local/bin"
+    install -m755 target/release/psi "$HOME/.local/bin/psi"
     @echo "installed $HOME/.local/bin/psi ($("$HOME/.local/bin/psi" --version))"
 
 # Run psi in the directory you call this from, e.g. `just run -p "hi"`

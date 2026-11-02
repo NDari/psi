@@ -298,7 +298,6 @@ fn signal_of(s: &std::process::ExitStatus) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
     use std::time::Instant;
 
     async fn bash(cmd: &str, timeout: Option<i64>) -> ToolOutput {
@@ -422,7 +421,7 @@ mod tests {
         let a = json!({"command": format!("touch {marker}")});
         let out = run(a.as_object().unwrap().clone(), &c, true).await;
         assert!(!out.is_error, "{out:?}");
-        assert!(Path::new(&marker).exists());
+        assert!(std::path::Path::new(&marker).exists());
         let _ = std::fs::remove_file(&marker);
     }
 

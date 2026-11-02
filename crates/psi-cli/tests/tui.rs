@@ -108,8 +108,12 @@ impl Tui {
                 if n == 0 {
                     break;
                 }
-                s.lock().unwrap().process(&buf[..n]);
-                t2.lock().unwrap().process(&buf[..n]);
+                // Both under their locks at once, so text seen on one is on
+                // the other (a test that waits on the screen and then reads
+                // the scrollback failed under load on macOS).
+                let (mut a, mut b) = (s.lock().unwrap(), t2.lock().unwrap());
+                a.process(&buf[..n]);
+                b.process(&buf[..n]);
             }
         });
         let tui = Self {
@@ -726,15 +730,14 @@ fn plan_mode_proposes_and_carries_out_a_plan() {
     t.wait_for("plan mode: read-only", SLOW);
     t.typ("write notes\r");
     t.wait_for("what next?", SLOW);
-    let screen = t.contents();
-    assert!(screen.contains("plan: 2 steps"), "{screen}");
-    assert!(screen.contains("Carry out the plan"), "{screen}");
+    // Wait for each part: the card can reach the screen in pieces.
+    t.wait_screen("plan: 2 steps", SLOW);
+    t.wait_screen("Carry out the plan", SLOW);
     t.send(b"\r");
     t.wait_for("Made the file.", SLOW);
     t.wait_for("plan 1/2", SLOW);
-    let screen = t.contents();
-    assert!(screen.contains("✓ Create notes.txt"), "{screen}");
-    assert!(screen.contains("○ Fill it in"), "{screen}");
+    t.wait_screen("✓ Create notes.txt", SLOW);
+    t.wait_screen("○ Fill it in", SLOW);
     assert!(t.project.join("notes.txt").exists());
     let reqs = s.chat_requests();
     assert_eq!(
@@ -764,9 +767,9 @@ fn keybindings_file_rebinds_actions() {
     t.send(b"\x07"); // Ctrl+G
     t.wait_for("plan mode: read-only", SLOW);
     t.typ("/help\r");
-    t.wait_for("plan mode on or off", SLOW);
-    let all = t.all();
-    assert!(all.contains("Ctrl+g"), "{all}");
+    // The key list comes after the commands (one of which also says "plan
+    // mode on or off"), and can arrive later.
+    t.wait_for("Ctrl+g", SLOW);
     t.quit();
 }
 
