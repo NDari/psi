@@ -26,11 +26,13 @@ default:
     @just --list --unsorted
 
 # The local check (D-33): format, lint, test, eval smoke. Run before every commit.
+# The eval smoke needs Linux (a static x86_64 musl psi run in podman), so other
+# systems skip it.
 check:
     cargo fmt --all --check
     cargo clippy --workspace --all-targets -- -D warnings
     cargo test --workspace
-    just eval-smoke
+    {{ if os() == "linux" { "just eval-smoke" } else { "echo 'eval smoke skipped: it needs Linux'" } }}
 
 # The static psi the eval trials run: the host's glibc can be newer than the image's
 eval-build:

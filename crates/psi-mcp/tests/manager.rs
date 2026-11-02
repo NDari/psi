@@ -124,12 +124,9 @@ async fn stdio_servers_that_fail_say_why() {
 
 #[tokio::test]
 async fn an_http_server_that_is_down_says_where() {
-    // A port nothing listens on.
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    // Port 1: nothing listens there, and the OS never hands it to another
+    // test's server (a port freed here could go to one running in parallel).
+    let port = 1;
     let mut c = config("docs");
     c.transport = Transport::Http {
         url: format!("http://127.0.0.1:{port}/mcp"),

@@ -189,12 +189,9 @@ async fn errors_and_garbage_inside_the_stream() {
 #[tokio::test]
 async fn an_unreachable_server_names_its_address() {
     let fx = Fx::new();
-    // A port nothing listens on.
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    // Port 1: nothing listens there, and the OS never hands it to another
+    // test's server (a port freed here could go to one running in parallel).
+    let port = 1;
     let url = format!("http://127.0.0.1:{port}");
     let (out, a, notices) = run(fx.agent(&url), "hi").await;
     let why = failed(&out);

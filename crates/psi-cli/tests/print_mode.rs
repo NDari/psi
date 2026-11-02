@@ -195,11 +195,9 @@ fn budget_and_failures_have_exit_codes() {
     assert_eq!(out.status.code(), Some(3));
     assert!(String::from_utf8_lossy(&out.stderr).contains("reached the limit of 1 model requests"));
 
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    // Port 1: nothing listens there, and the OS never hands it to another
+    // test's server (a port freed here could go to one running in parallel).
+    let port = 1;
     let down = Env {
         home: e.home.clone(),
         project: e.project.clone(),

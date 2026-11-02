@@ -213,11 +213,9 @@ async fn abort_returns_quickly() {
 
 #[tokio::test]
 async fn unreachable_server_is_a_connect_error() {
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    // Port 1: nothing listens there, and the OS never hands it to another
+    // test's server (a port freed here could go to one running in parallel).
+    let port = 1;
     let r = Client::new(&format!("http://127.0.0.1:{port}/v1"))
         .props()
         .await;
