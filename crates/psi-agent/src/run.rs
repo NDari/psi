@@ -947,7 +947,12 @@ impl Agent {
                 continue;
             }
 
-            let (n, pause) = self.run_calls(&resp, &mut guards).await?;
+            let allowed = self
+                .cfg
+                .budgets
+                .max_tool_calls
+                .saturating_sub(out.tool_calls) as usize;
+            let (n, pause) = self.run_calls(&resp, &mut guards, allowed).await?;
             out.tool_calls += n;
             self.emit(AgentEvent::TurnEnd { turn });
             self.ext_notify("turn_end", json!({"turn": turn})).await;
@@ -1120,10 +1125,13 @@ impl Agent {
     /// Runs the calls of one response: read-only ones side by side, the
     /// rest one at a time, in order, each through the policy. Returns how
     /// many ran, and why a guard paused, if one did.
+    /// Runs one response's calls; those past `allowed` (the rest of the
+    /// run's tool-call budget) are refused, not run.
     async fn run_calls(
         &mut self,
         resp: &Response,
         guards: &mut Guards,
+        allowed: usize,
     ) -> Result<(u32, Option<String>), String> {
         let truncated = resp.finish == FinishReason::Length;
         let n = resp.tool_calls.len();
@@ -1184,6 +1192,15 @@ impl Agent {
                     }
                 }
                 Err(msg) => Err(msg),
+            };
+            // Past the budget: not run, though the response asked for it.
+            let fixed = if i >= allowed {
+                Err(format!(
+                    "Not run: this run reached its limit of {} tool calls. Say in your answer what is left to do.",
+                    self.cfg.budgets.max_tool_calls
+                ))
+            } else {
+                fixed
             };
             planned.push((call.clone(), fixed));
         }

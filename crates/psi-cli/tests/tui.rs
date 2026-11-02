@@ -986,3 +986,69 @@ fn a_paste_is_one_edit_not_a_submit() {
     );
     t.quit();
 }
+
+#[test]
+fn thinking_never_reaches_the_screen() {
+    let (mut t, _s) = Tui::start(
+        vec![Reply::Chat(ScriptedReply {
+            reasoning: "SECRET-THOUGHT about the answer".into(),
+            ..ScriptedReply::text("the visible answer")
+        })],
+        |_| {},
+    );
+    t.wait_for("› ", SLOW);
+    t.typ("hi\r");
+    t.wait_for("the visible answer", SLOW);
+    assert!(!t.all().contains("SECRET-THOUGHT"), "{}", t.all());
+    t.quit();
+}
+
+const UI_EXT: &str = r#"return { name = "uibits", version = "1", description = "ui pieces",
+  setup = function(psi)
+    psi.register_shortcut("ctrl+g", { description = "say hi", handler = function(ctx)
+      psi.ui.notify("shortcut fired")
+    end })
+    psi.register_tool_renderer("bash", function(call, width)
+      return { "PREFIX> " .. call.args.command }
+    end)
+    psi.on("agent_start", function(ev)
+      psi.ui.status("uibits", "status-item")
+      psi.ui.widget("uibits", { "widget-line" })
+    end)
+  end }"#;
+
+#[test]
+fn extension_shortcuts_renderers_status_widgets_and_reload() {
+    let (mut t, _s) = Tui::start_with(
+        vec![
+            call("bash", json!({"command": "echo one"})),
+            text("ok one"),
+            call("bash", json!({"command": "echo two"})),
+            text("ok two"),
+        ],
+        |p| std::fs::write(p.join("uibits.lua"), UI_EXT).unwrap(),
+        &["--extension", "uibits.lua"],
+    );
+    t.wait_for("› ", SLOW);
+    // A shortcut runs its handler.
+    t.send(b"\x07");
+    t.wait_for("shortcut fired", SLOW);
+    // A run: the renderer draws the call, the status line and the widget
+    // show what the extension set.
+    t.typ("go\r");
+    t.wait_for("ok one", SLOW);
+    t.wait_for("PREFIX> echo one", SLOW);
+    t.wait_screen("status-item", SLOW);
+    t.wait_screen("widget-line", SLOW);
+    // /reload picks up a changed extension.
+    std::fs::write(
+        t.project.join("uibits.lua"),
+        UI_EXT.replace("PREFIX> ", "CHANGED> "),
+    )
+    .unwrap();
+    t.typ("/reload\r");
+    t.typ("again\r");
+    t.wait_for("ok two", SLOW);
+    t.wait_for("CHANGED> echo two", SLOW);
+    t.quit();
+}

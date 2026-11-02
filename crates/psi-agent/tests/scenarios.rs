@@ -64,6 +64,12 @@ impl Fixture {
         Agent::new(Client::new(&self.server.base_url()), session, cfg, ctx)
     }
 
+    async fn run_with(&self, budgets: Budgets) -> (RunOutcome, Agent) {
+        let mut a = self.agent(budgets);
+        let out = a.run("go").await;
+        (out, a)
+    }
+
     async fn run(&self, input: &str) -> (RunOutcome, Agent) {
         let mut a = self.agent(Budgets::default());
         let out = a.run(input).await;
@@ -290,6 +296,122 @@ async fn turn_budget_stops_the_run() {
         Stop::Budget("reached the limit of 3 model requests in one run".into())
     );
     assert_eq!(out.turns, 3);
+}
+
+#[tokio::test]
+async fn one_response_cant_run_past_the_tool_call_budget() {
+    // Five calls in one response with a limit of three: three run, two are
+    // refused with the limit, and the run stops on it.
+    let f = Fixture::new(vec![
+        Reply::Chat(ScriptedReply {
+            tool_calls: (1..=5)
+                .map(|i| {
+                    (
+                        "bash".into(),
+                        json!({"command": format!("touch f{i}")}).to_string(),
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        }),
+        text("never"),
+    ]);
+    let out = f
+        .run_with(Budgets {
+            max_tool_calls: 3,
+            ..Budgets::default()
+        })
+        .await;
+    assert_eq!(
+        out.0.stop,
+        Stop::Budget("reached the limit of 3 tool calls in one run".into())
+    );
+    for i in 1..=3 {
+        assert!(f.cwd.join(format!("f{i}")).exists());
+    }
+    assert!(!f.cwd.join("f4").exists() && !f.cwd.join("f5").exists());
+    let r = tool_results(&out.1);
+    assert!(
+        r[4].1
+            && r[4]
+                .0
+                .starts_with("Not run: this run reached its limit of 3 tool calls"),
+        "{r:?}"
+    );
+    assert_eq!(f.server.chat_requests().len(), 1);
+}
+
+#[tokio::test]
+async fn reasoning_is_kept_but_never_sent_back() {
+    let f = Fixture::new(vec![
+        Reply::Chat(ScriptedReply {
+            reasoning: "PRIVATE: a.txt probably holds the answer".into(),
+            ..ScriptedReply::call("read", json!({"path": "a.txt"}))
+        }),
+        Reply::Chat(ScriptedReply {
+            reasoning: "PRIVATE: it says 42".into(),
+            ..ScriptedReply::text("It is 42.")
+        }),
+    ]);
+    std::fs::write(f.cwd.join("a.txt"), "42\n").unwrap();
+    let mut a = f.agent(Budgets::default());
+    let out = a.run("what is it?").await;
+    assert_eq!(out.text, "It is 42.");
+    // Kept in the session as thinking blocks.
+    let thinking = a
+        .session()
+        .entries()
+        .iter()
+        .filter(|e| {
+            matches!(&e.body, EntryBody::Message { content, .. }
+            if content.iter().any(|b| matches!(b, psi_session::Block::Thinking { .. })))
+        })
+        .count();
+    assert_eq!(thinking, 2);
+    // Never sent back to the model.
+    let second = f.server.chat_requests()[1]["messages"].to_string();
+    assert!(!second.contains("PRIVATE"), "{second}");
+}
+
+#[tokio::test]
+async fn an_answer_that_is_all_reasoning_gets_another_turn() {
+    // The model spent its output on thinking (finish: length, no text):
+    // the run goes on instead of ending with an empty answer.
+    let f = Fixture::new(vec![
+        Reply::Chat(ScriptedReply {
+            reasoning: "thinking ".repeat(200),
+            finish: Some("length".into()),
+            ..Default::default()
+        }),
+        text("The answer."),
+    ]);
+    let (out, a) = f.run("go").await;
+    assert_eq!(out.stop, Stop::Done, "{:?}", out.stop);
+    assert_eq!(out.text, "The answer.");
+    assert!(
+        kinds(&a).contains(&"guard truncated_answer".to_owned()),
+        "{:?}",
+        kinds(&a)
+    );
+}
+
+#[tokio::test]
+async fn the_time_budget_stops_the_run() {
+    let f = Fixture::new(vec![
+        call("bash", json!({"command": "sleep 1.2"})),
+        text("never"),
+    ]);
+    let out = f
+        .run_with(Budgets {
+            max_wall: Some(std::time::Duration::from_secs(1)),
+            ..Budgets::default()
+        })
+        .await;
+    assert_eq!(
+        out.0.stop,
+        Stop::Budget("reached the time limit of 1 seconds".into())
+    );
+    assert_eq!(f.server.chat_requests().len(), 1);
 }
 
 #[tokio::test]
@@ -695,6 +817,72 @@ async fn summarizing_often_while_writing_files_doesnt_pause() {
     assert_eq!(out.stop, Stop::Done, "{:?} {:?}", out.stop, kinds(&a));
     assert!(kinds(&a).iter().filter(|k| *k == "compaction").count() >= 12);
     assert!(!kinds(&a).contains(&"guard compaction_loop".to_owned()));
+}
+
+#[tokio::test]
+async fn a_failed_summary_is_recorded_and_not_retried_at_once() {
+    // Both ways of asking fail (the model calls a tool, then answers with
+    // nothing): the run goes on, one compaction_failed, no summary, and no
+    // new try until the context grows by a tenth of the window.
+    let f = Fixture::new(vec![
+        read_at("f0.txt", 9500),
+        call("read", json!({"path": "x"})),
+        text(""),
+        read_at("f0.txt", 9600),
+        text("done"),
+    ]);
+    write_files(&f.cwd, 1, 200);
+    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    prefill(&mut a, 30);
+    let out = a.run("go on").await;
+    assert_eq!(out.stop, Stop::Done, "{:?} {:?}", out.stop, kinds(&a));
+    let k = kinds(&a);
+    assert_eq!(
+        k.iter().filter(|x| *x == "guard compaction_failed").count(),
+        1,
+        "{k:?}"
+    );
+    assert!(!k.contains(&"compaction".to_owned()), "{k:?}");
+    assert_eq!(f.server.chat_requests().len(), 5);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_extension_can_stop_compaction() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("keep.lua"),
+        r#"return { name = "keep", version = "1", description = "keeps the history",
+          setup = function(psi)
+            psi.on("session_before_compact", function(ev)
+              return { block = true, reason = "keep it all" }
+            end)
+          end }"#,
+    )
+    .unwrap();
+    let (ui, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let sources = vec![psi_ext::Source::Lua(dir.path().join("keep.lua"))];
+    let (ext, errors) = tokio::task::spawn_blocking(move || {
+        psi_ext::ExtManager::start(
+            &sources,
+            std::sync::Arc::default(),
+            psi_ext::Limits::default(),
+            ui,
+        )
+    })
+    .await
+    .unwrap();
+    assert!(errors.is_empty(), "{errors:?}");
+    let f = Fixture::new(vec![read_at("f0.txt", 9500), text("done")]);
+    write_files(&f.cwd, 1, 200);
+    let mut a = f
+        .agent_sized(Budgets::default(), core_tools(false), 16_384, 7372)
+        .with_extensions(ext);
+    prefill(&mut a, 30);
+    let out = a.run("go on").await;
+    assert_eq!(out.stop, Stop::Done, "{:?}", out.stop);
+    // No summary was asked for; the run went straight on.
+    assert_eq!(f.server.chat_requests().len(), 2);
+    assert!(!kinds(&a).contains(&"compaction".to_owned()));
 }
 
 #[tokio::test]

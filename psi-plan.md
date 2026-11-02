@@ -863,6 +863,9 @@ Each phase ends with its acceptance criteria passing in the local check, where a
 - **Isolation tests** on Linux, in the local check; macOS when that backend exists (**[G-20]**).
 - **Eval:** run only when tests can't answer (§12.5, D-32). Look for transcripts that show harness bugs, not score differences.
 - **Extension tests:** every example has `*_test.lua`, run with `psi ext test`.
+- **Unhappy paths (2026-11-01):** the 35B rarely trips the error paths, so they are tested by causing each failure on purpose, and every such test checks three things: the run ends (no hang), the user or model gets a reason that says what happened and what to do, and the state stays whole (the session opens and resumes, no process left running). `tests/faults.rs` covers the model server (errors, cut or garbled streams, an unreachable server, overflow), `tests/aborts.rs` Esc at every stage of a run, crash-cut session files are tested on the store and through the binary, `psi-mcp`'s `psi-mcp-fake` is a real stdio server for MCP failures, and print-mode and pty tests cover exit codes, signals and interactive flows.
+- **Recorded model mistakes:** when an eval shows a model mistake, `just record-fixture <trial> <steps> <name>` copies those responses byte for byte into `crates/psi-agent/tests/fixtures/recorded`, and `tests/recorded.rs` replays them against today's Psi, so the harness is tested on what models sent, not on what a test author imagines.
+- **Tests wait for events, not time:** pty tests wait for text (on screen, or a count of it), agent tests press Esc on an event; a fixed sleep before an assertion is a flaky test.
 
 ---
 

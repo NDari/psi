@@ -1081,3 +1081,24 @@ fn extensions_see_every_event_and_use_the_api() {
     let log = std::fs::read_to_string(e.project.join("events.log")).unwrap();
     assert!(log.lines().any(|l| l == "entries=1"), "{log}");
 }
+
+#[test]
+fn the_thinking_switch_reaches_the_server() {
+    let server = ReplayServer::start(vec![text("a"), text("b")]).unwrap();
+    let e = env_for(&server);
+    assert!(psi(&e, &["-p", "hi"]).status.success());
+    // Unset: the server's own default.
+    assert!(
+        server.chat_requests()[0]
+            .get("chat_template_kwargs")
+            .is_none()
+    );
+    let models = json!({"models": [{"id": "local", "base_url": server.base_url(),
+        "max_output": 256, "reasoning": {"enable_thinking": false}}]});
+    std::fs::write(e.home.join(".psi/models.jsonc"), models.to_string()).unwrap();
+    assert!(psi(&e, &["-p", "hi"]).status.success());
+    assert_eq!(
+        server.chat_requests()[1]["chat_template_kwargs"],
+        json!({"enable_thinking": false})
+    );
+}

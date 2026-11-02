@@ -84,6 +84,9 @@ impl Reply {
 pub struct ScriptedReply {
     #[serde(default)]
     pub text: String,
+    /// Streamed as `reasoning_content` before the text (a thinking model).
+    #[serde(default)]
+    pub reasoning: String,
     /// (tool name, arguments as JSON text)
     #[serde(default)]
     pub tool_calls: Vec<(String, String)>,
@@ -400,6 +403,11 @@ pub fn render_sse(r: &ScriptedReply) -> String {
     };
     let mut events = vec![chunk(json!([{"finish_reason": null, "index": 0,
         "delta": {"role": "assistant", "content": null}}]))];
+    if !r.reasoning.is_empty() {
+        events.push(chunk(
+            json!([{"finish_reason": null, "index": 0, "delta": {"reasoning_content": r.reasoning}}]),
+        ));
+    }
     if !r.text.is_empty() {
         events.push(chunk(
             json!([{"finish_reason": null, "index": 0, "delta": {"content": r.text}}]),
