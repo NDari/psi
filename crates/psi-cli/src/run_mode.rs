@@ -397,12 +397,15 @@ pub async fn prepare(args: &RunArgs, approver: Arc<dyn Approver>) -> Result<Prep
     warnings.extend(ext_warnings);
     let post_edit = psi_agent::PostEditCheck::from_setting(&args.settings["post_edit_check"])
         .map_err(anyhow::Error::msg)?;
+    let compaction = psi_agent::CompactionSettings::from_setting(&args.settings["compaction"])
+        .map_err(anyhow::Error::msg)?;
     let mcp = psi_cli::mcp::start(home.as_deref(), &cwd, args.project_trusted);
     warnings.extend(mcp.problems().iter().map(|p| format!("mcp: {p}")));
     let mut agent = Agent::new(client, session, cfg, ctx)
         .with_safety(safety)
         .with_extensions(ext.clone())
         .with_post_edit_check(post_edit)
+        .with_compaction(compaction)
         .with_mcp(mcp);
     if args.settings["subagents"].as_bool() == Some(true) {
         let defs = psi_agent::subagent::with_built_in(resources.agents.clone());

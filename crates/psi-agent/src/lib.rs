@@ -15,6 +15,7 @@ pub mod recovery;
 mod run;
 pub mod subagent;
 
+pub use compact::{CompactionSettings, SummaryForm};
 pub use events::AgentEvent;
 pub use messages::build_messages;
 pub use post_edit::PostEditCheck;

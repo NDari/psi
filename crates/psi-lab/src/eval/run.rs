@@ -41,11 +41,26 @@ pub struct RunConfig {
     pub steps: u32,
     pub timeout_s: u64,
     pub max_output: u64,
+    /// The context window the agent is told, when smaller than the
+    /// server's (a compaction test); `None` takes the server's.
+    pub n_ctx: Option<u64>,
     /// The psi binary for psi trials (the one running `psi eval`).
     pub psi_binary: Option<PathBuf>,
     /// Copied into each psi trial's `~/.psi` (settings, skills, prompts):
     /// a variant, such as a battery turned on.
     pub psi_config: Option<PathBuf>,
+}
+
+/// The window the agent is told: `asked` when given, which must fit in the
+/// server's, or the server's.
+fn window(asked: Option<u64>, server: u64) -> Result<u64> {
+    match asked {
+        Some(n) if n == 0 || n > server => Err(other(format!(
+            "--n-ctx {n} must be between 1 and the server's context ({server})"
+        ))),
+        Some(n) => Ok(n),
+        None => Ok(server),
+    }
 }
 
 /// Runs one trial of each selected task and writes `run.json`, the trial
@@ -54,6 +69,7 @@ pub struct RunConfig {
 pub fn run(cfg: &RunConfig, progress: &mut dyn FnMut(&str)) -> Result<Vec<TrialResult>> {
     let tasks = load_tasks(&cfg.evals_dir.join("code"), &cfg.selection)?;
     let server = probe(cfg.port)?;
+    let n_ctx = window(cfg.n_ctx, server.n_ctx)?;
     if cfg.results_dir.join("run.json").exists() {
         return Err(other(format!(
             "{} already holds a run; pick a new results directory",
@@ -79,7 +95,7 @@ pub fn run(cfg: &RunConfig, progress: &mut dyn FnMut(&str)) -> Result<Vec<TrialR
         steps: cfg.steps,
         timeout_s: cfg.timeout_s,
         max_output: cfg.max_output,
-        n_ctx: server.n_ctx,
+        n_ctx,
         model: server.props["model_path"]
             .as_str()
             .unwrap_or("?")
@@ -100,7 +116,7 @@ pub fn run(cfg: &RunConfig, progress: &mut dyn FnMut(&str)) -> Result<Vec<TrialR
         evals_dir: &cfg.evals_dir,
         run_dir: &cfg.results_dir,
         port: cfg.port,
-        n_ctx: server.n_ctx,
+        n_ctx,
         max_output: cfg.max_output,
         steps: cfg.steps,
         timeout_s: cfg.timeout_s,
@@ -262,4 +278,17 @@ pub fn check_graders(
         report.rows.push(row);
     }
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::window;
+
+    #[test]
+    fn the_window_can_be_made_smaller_than_the_servers_only() {
+        assert_eq!(window(None, 65_536).unwrap(), 65_536);
+        assert_eq!(window(Some(16_384), 65_536).unwrap(), 16_384);
+        assert!(window(Some(131_072), 65_536).is_err());
+        assert!(window(Some(0), 65_536).is_err());
+    }
 }

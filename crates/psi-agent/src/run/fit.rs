@@ -13,8 +13,8 @@ use serde_json::json;
 use super::{Agent, Planned};
 use crate::compact::{
     CHARS_PER_TOKEN, Chain, SUMMARIZER_SYSTEM, check_summary, estimate_tokens, flatten,
-    merge_prompt, plain_summary_prompt, plan_clear, plan_cut, step_budget, summary_chain,
-    summary_instruction, summary_words, tail_tokens, trigger,
+    merge_prompt, plain_summary_prompt, plan_clear, plan_cut, request_before, step_budget,
+    summary_chain, summary_instruction, summary_words, tail_tokens, trigger,
 };
 use crate::events::AgentEvent;
 use crate::messages::build_with_sources;
@@ -215,7 +215,8 @@ impl Agent {
         let chain = summary_chain(&branch);
         let from = chain.keep_from;
         let overhead = self.overhead(&chain);
-        let tail = tail_tokens(n_ctx, self.trigger(), overhead);
+        let set = self.compaction;
+        let tail = tail_tokens(n_ctx, self.trigger(), overhead, set.tail);
         let Some(cut) = plan_cut(&branch, from, tail) else {
             return Ok(Compacted::Nothing);
         };
@@ -228,6 +229,7 @@ impl Agent {
             .unwrap_or_default();
         let max_chars = n_ctx.saturating_sub(self.cfg.max_output + 1500) * CHARS_PER_TOKEN;
         let text = flatten(&branch[from..cut], max_chars as usize);
+        let request = request_before(&branch[..cut], from);
         drop(branch);
 
         self.emit(AgentEvent::Compacting { tokens });
@@ -246,8 +248,11 @@ impl Agent {
         let mut done = None;
         if fallback.is_none() {
             let mut r = req;
-            r.messages
-                .push(ChatMessage::User(summary_instruction(after_summary, words)));
+            r.messages.push(ChatMessage::User(summary_instruction(
+                after_summary,
+                words,
+                set.summary,
+            )));
             match self.summary_request(&r).await {
                 Ok(resp) => match check_summary(&resp) {
                     Ok(s) => done = Some(("extend", s, resp)),
@@ -258,7 +263,9 @@ impl Agent {
             }
         }
         if done.is_none() {
-            let r = self.plain_request(plain_summary_prompt(&text, words) + &focus_text);
+            let r = self.plain_request(
+                plain_summary_prompt(&text, request.as_deref(), words, set.summary) + &focus_text,
+            );
             let failed = match self.summary_request(&r).await {
                 Ok(resp) => match check_summary(&resp) {
                     Ok(s) => {
@@ -313,7 +320,7 @@ impl Agent {
         let ((a_id, a), (b_id, b)) = (chain.summaries[0], chain.summaries[1]);
         let replaces = vec![a_id.to_owned(), b_id.to_owned()];
         let first_kept_id = branch[chain.keep_from].id.clone();
-        let prompt = merge_prompt(a, b, summary_words(self.cfg.n_ctx));
+        let prompt = merge_prompt(a, b, summary_words(self.cfg.n_ctx), self.compaction.summary);
         drop(branch);
         let started = Instant::now();
         let r = self.plain_request(prompt);

@@ -1,0 +1,4 @@
+// The free-summary variant (evals/variants/README.md, H-11).
+{
+  "compaction": { "summary": "free" },
+}

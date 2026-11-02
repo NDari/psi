@@ -728,6 +728,43 @@ async fn a_summary_extends_the_last_request_and_keeps_a_tail() {
 }
 
 #[tokio::test]
+async fn the_compaction_setting_sets_the_tail_and_the_summary_form() {
+    let f = Fixture::new(vec![
+        read_at("f0.txt", 9500),
+        text("Porting the parser."),
+        text("done"),
+    ]);
+    write_files(&f.cwd, 1, 200);
+    let mut a = f
+        .agent_sized(Budgets::default(), core_tools(false), 16_384, 7372)
+        .with_compaction(psi_agent::CompactionSettings {
+            tail: Some(0),
+            summary: psi_agent::SummaryForm::Free,
+        });
+    prefill(&mut a, 30);
+    let out = a.run("go on").await;
+    assert_eq!(out.stop, Stop::Done, "{:?} {:?}", out.stop, kinds(&a));
+    let reqs = f.server.chat_requests();
+    let sum = reqs[1]["messages"].as_array().unwrap();
+    let instruction = sum.last().unwrap()["content"].as_str().unwrap();
+    assert!(
+        instruction.contains("as plain prose without headings"),
+        "{instruction}"
+    );
+    assert!(!instruction.contains("## Goal"));
+    // A tail of 0 keeps only the last step: its call and its result.
+    let next = reqs[2]["messages"].as_array().unwrap();
+    assert!(
+        next[1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Porting the parser.")
+    );
+    assert_eq!(next.len(), 4, "{next:#?}");
+    assert_eq!(next[3]["role"], "tool");
+}
+
+#[tokio::test]
 async fn a_summary_falls_back_to_a_plain_request() {
     let f = Fixture::new(vec![
         read_at("f0.txt", 9500),

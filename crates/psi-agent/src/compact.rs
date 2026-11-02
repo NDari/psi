@@ -11,6 +11,49 @@ use psi_ai::ChatMessage;
 use psi_session::{Block, Entry, EntryBody, Role, text_of};
 use serde_json::Value;
 
+/// The `compaction` setting: `{"tail": tokens | "auto", "summary":
+/// "structured" | "free"}`. Both exist to compare variants (H-07, H-11).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CompactionSettings {
+    /// Tokens kept verbatim after a summary; `None` is the default size
+    /// (`tail_tokens`). 0 keeps only the last user message or step.
+    pub tail: Option<u64>,
+    pub summary: SummaryForm,
+}
+
+/// How a summary is laid out.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SummaryForm {
+    /// Fixed headings (goal, constraints, decisions, state, problems, next).
+    #[default]
+    Structured,
+    /// The same content as prose, without headings.
+    Free,
+}
+
+impl CompactionSettings {
+    pub fn from_setting(v: &Value) -> Result<Self, String> {
+        const USAGE: &str =
+            "compaction is {\"tail\": tokens or \"auto\", \"summary\": \"structured\" or \"free\"}";
+        let o = match v {
+            Value::Null => return Ok(Self::default()),
+            Value::Object(o) => o,
+            _ => return Err(USAGE.into()),
+        };
+        let tail = match o.get("tail") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(s)) if s == "auto" => None,
+            Some(t) => Some(t.as_u64().ok_or(USAGE)?),
+        };
+        let summary = match o.get("summary").map(|v| v.as_str()) {
+            None | Some(Some("structured")) => SummaryForm::Structured,
+            Some(Some("free")) => SummaryForm::Free,
+            _ => return Err(USAGE.into()),
+        };
+        Ok(Self { tail, summary })
+    }
+}
+
 /// D-20: estimate conservatively when the server's count is not known.
 pub(crate) const CHARS_PER_TOKEN: u64 = 3;
 /// The most recent tool results are never cleared (Anthropic keeps 3),
@@ -278,9 +321,9 @@ const MAX_STATE_FILES: usize = 30;
 /// window and 20K (pi's keepRecentTokens), but at most half of what is
 /// left under the trigger after `overhead` (system prompt, tools,
 /// summaries), so a compaction leaves room to work before the next one.
-pub(crate) fn tail_tokens(n_ctx: u64, trigger: u64, overhead: u64) -> u64 {
-    (n_ctx / 5)
-        .max(20_000)
+/// `set` (the `tail` setting) replaces the default size, under the same cap.
+pub(crate) fn tail_tokens(n_ctx: u64, trigger: u64, overhead: u64, set: Option<u64>) -> u64 {
+    set.unwrap_or((n_ctx / 5).max(20_000))
         .min(trigger.saturating_sub(overhead) / 2)
 }
 
@@ -345,7 +388,15 @@ pub(crate) fn summary_words(n_ctx: u64) -> u64 {
 }
 
 /// The length and headings every summary is asked for.
-fn summary_spec(words: u64) -> String {
+fn summary_spec(words: u64, form: SummaryForm) -> String {
+    if form == SummaryForm::Free {
+        return format!(
+            "under {words} words, as plain prose without headings: the goal; \
+             every name, number, path and requirement the user gave, exactly as given; \
+             what was decided; what is done, what works and what fails; \
+             open problems; and the next step."
+        );
+    }
     format!(
         "under {words} words, with these headings:\n\n\
          ## Goal\n\
@@ -360,7 +411,7 @@ fn summary_spec(words: u64) -> String {
 }
 
 /// The instruction appended to the conversation to get a summary (D-38).
-pub(crate) fn summary_instruction(after_summary: bool, words: u64) -> String {
+pub(crate) fn summary_instruction(after_summary: bool, words: u64, form: SummaryForm) -> String {
     let what = if after_summary {
         "everything after the last summary"
     } else {
@@ -368,15 +419,51 @@ pub(crate) fn summary_instruction(after_summary: bool, words: u64) -> String {
     };
     format!(
         "Stop the task for a moment: older messages are about to be removed from this conversation, and you will continue from your summary of them. Do not call tools now. Summarize {what} for yourself, {}",
-        summary_spec(words)
+        summary_spec(words, form)
     )
 }
 
-/// The request text of a summary built from text (the fallback).
-pub(crate) fn plain_summary_prompt(conversation: &str, words: u64) -> String {
+/// The user message the entries from `from` on are working on, when it
+/// comes before them: a summary built from text sees only those entries,
+/// and without it wrote a goal from what they showed ("the agent is
+/// reading files", 2026-11-02 16K runs).
+pub(crate) fn request_before(branch: &[&Entry], from: usize) -> Option<String> {
+    let user = |e: &Entry| {
+        matches!(
+            e.body,
+            EntryBody::Message {
+                role: Role::User,
+                ..
+            }
+        )
+    };
+    if branch.get(from..)?.iter().any(|e| user(e)) {
+        return None;
+    }
+    branch[..from]
+        .iter()
+        .rev()
+        .find(|e| user(e))
+        .map(|e| match &e.body {
+            EntryBody::Message { content, .. } => text_of(content),
+            _ => String::new(),
+        })
+}
+
+/// The request text of a summary built from text (the fallback), with the
+/// user's request when the entries don't hold it (`request_before`).
+pub(crate) fn plain_summary_prompt(
+    conversation: &str,
+    request: Option<&str>,
+    words: u64,
+    form: SummaryForm,
+) -> String {
+    let request = request
+        .map(|r| format!("The user's request this work is for:\n<request>\n{r}\n</request>\n\n"))
+        .unwrap_or_default();
     format!(
-        "<conversation>\n{conversation}\n</conversation>\n\nSummarize this part of the agent's work for the agent, {}",
-        summary_spec(words)
+        "{request}<conversation>\n{conversation}\n</conversation>\n\nSummarize this part of the agent's work for the agent, {}",
+        summary_spec(words, form)
     )
 }
 
@@ -433,9 +520,13 @@ fn cut_chars(s: &str, max: usize) -> String {
 }
 
 /// The request text that merges the two oldest summaries into one.
-pub(crate) fn merge_prompt(older: &str, newer: &str, words: u64) -> String {
+pub(crate) fn merge_prompt(older: &str, newer: &str, words: u64, form: SummaryForm) -> String {
+    let layout = match form {
+        SummaryForm::Structured => "with the same headings",
+        SummaryForm::Free => "as plain prose",
+    };
     format!(
-        "Merge these two summaries of consecutive parts of a coding agent's work into one, under {words} words, with the same headings. Keep every name, number, path and requirement exactly; where they disagree, the second is newer.\n\n<summary>\n{older}\n</summary>\n\n<summary>\n{newer}\n</summary>"
+        "Merge these two summaries of consecutive parts of a coding agent's work into one, under {words} words, {layout}. Keep every name, number, path and requirement exactly; where they disagree, the second is newer.\n\n<summary>\n{older}\n</summary>\n\n<summary>\n{newer}\n</summary>"
     )
 }
 
@@ -678,9 +769,72 @@ mod tests {
     #[test]
     fn the_tail_is_pis_size_unless_the_window_is_small() {
         // 64K: 20K, as in pi.
-        assert_eq!(tail_tokens(65_536, 45_875, 3000), 20_000);
+        assert_eq!(tail_tokens(65_536, 45_875, 3000, None), 20_000);
         // 16K: half of what is left under the trigger.
-        assert_eq!(tail_tokens(16_384, 9831, 1831), 4000);
+        assert_eq!(tail_tokens(16_384, 9831, 1831, None), 4000);
+        // The setting replaces the size, under the same cap.
+        assert_eq!(tail_tokens(65_536, 45_875, 3000, Some(0)), 0);
+        assert_eq!(tail_tokens(16_384, 9831, 1831, Some(2000)), 2000);
+        assert_eq!(tail_tokens(16_384, 9831, 1831, Some(50_000)), 4000);
+    }
+
+    #[test]
+    fn the_compaction_setting_reads_tail_and_summary_form() {
+        use serde_json::json;
+        let read = CompactionSettings::from_setting;
+        assert_eq!(read(&Value::Null).unwrap(), CompactionSettings::default());
+        let s = read(&json!({"tail": 0, "summary": "free"})).unwrap();
+        assert_eq!((s.tail, s.summary), (Some(0), SummaryForm::Free));
+        assert_eq!(read(&json!({"tail": "auto"})).unwrap().tail, None);
+        assert!(read(&json!({"tail": "big"})).is_err());
+        assert!(read(&json!({"summary": "bullets"})).is_err());
+        assert!(read(&json!(5)).is_err());
+    }
+
+    #[test]
+    fn a_plain_summary_after_the_first_carries_the_request() {
+        let es = entries(vec![
+            msg(Role::User, "Write docs/API.md"),
+            msg(Role::Assistant, "reading"),
+            msg(Role::Assistant, "more reading"),
+            msg(Role::User, "also skip legacy"),
+            msg(Role::Assistant, "ok"),
+        ]);
+        let refs: Vec<&Entry> = es.iter().collect();
+        // The part to summarize (up to the cut) starts after the request:
+        // the latest one before it.
+        assert_eq!(
+            request_before(&refs[..3], 1).as_deref(),
+            Some("Write docs/API.md")
+        );
+        assert_eq!(
+            request_before(&refs, 4).as_deref(),
+            Some("also skip legacy")
+        );
+        // The part holds a user message already.
+        assert_eq!(request_before(&refs, 0), None);
+        assert_eq!(request_before(&refs, 2), None);
+        let p = plain_summary_prompt(
+            "Assistant: reading",
+            Some("Write docs/API.md"),
+            200,
+            SummaryForm::Structured,
+        );
+        assert!(p.starts_with("The user's request this work is for:\n<request>\nWrite docs/API.md\n</request>\n\n<conversation>"));
+        assert!(
+            plain_summary_prompt("x", None, 200, SummaryForm::Structured)
+                .starts_with("<conversation>")
+        );
+    }
+
+    #[test]
+    fn a_free_form_summary_asks_for_the_same_content_without_headings() {
+        let free = summary_instruction(false, 234, SummaryForm::Free);
+        let structured = summary_instruction(false, 234, SummaryForm::Structured);
+        assert!(structured.contains("## Goal"));
+        assert!(!free.contains("##"));
+        assert!(free.contains("exactly as given") && free.contains("under 234 words"));
+        assert!(merge_prompt("a", "b", 100, SummaryForm::Free).contains("as plain prose"));
     }
 
     #[test]

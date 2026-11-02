@@ -23,6 +23,7 @@ use tokio_util::sync::CancellationToken;
 use crate::approval::{
     Approval, ApprovalRequest, Approver, BlockedChoice, BlockedRequest, Headless,
 };
+use crate::compact::CompactionSettings;
 use crate::events::AgentEvent;
 use crate::ext::{Callable, decide, invoke, schema_of, tool_runner};
 use crate::guards::{GuardAction, Guards};
@@ -178,6 +179,7 @@ pub struct Agent {
     run_system: String,
     /// Run after a turn whose write or edit calls changed files (D-36).
     post_edit: Option<PostEditCheck>,
+    compaction: CompactionSettings,
     /// Plan mode (D-34).
     plan: PlanState,
     /// Plan mode was turned off by hand: say so with the next prompt.
@@ -261,6 +263,7 @@ impl Agent {
             active: None,
             run_system: String::new(),
             post_edit: None,
+            compaction: CompactionSettings::default(),
             plan: PlanState::default(),
             plan_off_note: false,
             plan_unrecorded: false,
@@ -572,6 +575,12 @@ impl Agent {
         }
         let names = self.tool_names();
         self.ext.update_shared(|s| s.active_tools = names);
+    }
+
+    /// The tail size and summary form compaction uses (the `compaction` setting).
+    pub fn with_compaction(mut self, settings: CompactionSettings) -> Self {
+        self.compaction = settings;
+        self
     }
 
     /// The project's check command, run after turns that edited files.

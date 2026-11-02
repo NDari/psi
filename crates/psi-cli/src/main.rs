@@ -233,6 +233,10 @@ enum EvalCommand {
         /// The agent's output token limit per response.
         #[arg(long, default_value_t = 8192)]
         max_output: u64,
+        /// The context window the agent is told (default: the server's). Smaller
+        /// than the server's, it tests compaction without restarting llama-server.
+        #[arg(long, value_name = "TOKENS")]
+        n_ctx: Option<u64>,
         /// Appended to the results directory's name.
         #[arg(long)]
         label: Option<String>,
@@ -661,6 +665,7 @@ fn eval_command(cmd: EvalCommand) -> Result<ExitCode> {
             steps,
             timeout,
             max_output,
+            n_ctx,
             label,
             psi_binary,
             psi_config,
@@ -680,6 +685,7 @@ fn eval_command(cmd: EvalCommand) -> Result<ExitCode> {
                 steps,
                 timeout_s: timeout,
                 max_output,
+                n_ctx,
                 psi_binary: psi_binary
                     .map(|p| std::path::absolute(&p).unwrap_or(p))
                     .or_else(|| std::env::current_exe().ok()),

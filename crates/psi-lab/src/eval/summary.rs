@@ -47,10 +47,15 @@ pub fn load_meta(run_dir: &Path) -> Option<RunMeta> {
 pub fn summary_markdown(meta: Option<&RunMeta>, results: &[TrialResult]) -> String {
     let mut s = String::from("# Eval run\n\n");
     if let Some(m) = meta {
+        let server_ctx = m.server_props["default_generation_settings"]["n_ctx"].as_u64();
+        let ctx = match server_ctx {
+            Some(n) if n != m.n_ctx => format!("{} (the server's: {n})", m.n_ctx),
+            _ => m.n_ctx.to_string(),
+        };
         let _ = writeln!(
             s,
-            "Agent {}. Model `{}`, llama-server build {}, context {}, step cap {}, max output {}.\n",
-            m.agent, m.model, m.server_build, m.n_ctx, m.steps, m.max_output
+            "Agent {}. Model `{}`, llama-server build {}, context {ctx}, step cap {}, max output {}.\n",
+            m.agent, m.model, m.server_build, m.steps, m.max_output
         );
     }
     s.push_str(
