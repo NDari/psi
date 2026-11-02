@@ -406,7 +406,26 @@ bwrap --ro-bind / / --dev /dev --proc /proc
 - **Startup check:** run bwrap once with the real flags. If it fails, print the error and the likely fix (for example, Ubuntu 24.04+ restricting unprivileged user namespaces), run bash without isolation, ask before every call, and show `UNISOLATED` in the status line. Never fall back silently.
 - **Known gaps, accepted for now (§13):** sockets under `$XDG_RUNTIME_DIR` (including the session bus) are reachable, and reads are unrestricted.
 
-**macOS:** not in the first cut. When needed, choose between libkrun (a micro-VM that works on both platforms, but needs an image with the user's tools) and a Seatbelt profile (host tools stay available); see **[G-20]**. Windows via WSL.
+**macOS: a Seatbelt profile (G-20, D-44).** Every bash call and script tool runs as `sandbox-exec -p <profile> --`, the profile made from the same directories:
+
+```
+(version 1)
+(allow default)
+(deny file-write* (require-not (require-any
+  (subpath "/dev") (subpath "/private/tmp") (subpath "/private/var/folders")
+  (subpath <root>) <git dirs> <cache dirs> <added dirs> (subpath <session TMPDIR>))))
+[(deny network*)]                         ; when network: off
+```
+
+- **Paths are resolved first:** `/tmp`, `/var` and `/etc` are links into `/private`, and Seatbelt matches real paths.
+- **`/tmp` stays shared and writable**, with `/private/var/folders`: macOS tools write their own temp and cache files there whatever `TMPDIR` says (Heimdall's lesson), so blocking them breaks ordinary commands. `TMPDIR` is still the session's, and the prompt line about a private `/tmp` is left out.
+- **Cache dirs** add `~/Library/Caches` (Go's build cache and others live there on macOS).
+- **A blocked write** reads "Operation not permitted", which is also an ordinary error; as with bwrap it counts only for a path outside every writable directory.
+- **Startup check:** run `sandbox-exec` once with the real profile, as for bwrap.
+- **Known gaps, accepted:** `/tmp` is shared between calls and sessions; no PID namespace or parent-death signal, so a command can outlive Psi if Psi itself crashes (an aborted or timed-out call still has its process group killed); reads are unrestricted. `sandbox-exec` is marked deprecated but is what macOS offers command-line tools; the other choices (a Linux container or micro-VM) lose the host's tools and put Linux binaries in the workspace (2026-11-01).
+- **Tests:** the Seatbelt tests run only on macOS; the owner runs them by hand there (the local check is Linux).
+
+Windows via WSL.
 
 **Evals** run Psi inside a podman container with isolation off; the container is the boundary (§12.5).
 
@@ -836,7 +855,7 @@ Each phase ends with its acceptance criteria passing in the local check, where a
   2. H-09, thinking on vs off, on the 35B (it runs with thinking on, and once spent all 8192 output tokens thinking). Done 2026-11-01 (§14 results: off is the default).
   3. Harder quick-set tasks (G-19): the 35B passes 9 of 10, too few failures to find harness problems. Done 2026-11-01: a screening run of the 30 tasks outside the quick set (`~/.psi/evals/2026-11-01-1638-screen-qwen3.6-35b`: 25 pass, 5 model failures, no harness failures, no guards, no shape fixes) picked four quick failures to replace the four tasks every 35B run passed (`fix_retry_backoff`, `multi_config_object`, `feat_query_paging`, `feat_config_env` for `fix_invoice_rounding`, `multi_rename_callers`, `multi_shipping_bug`, `sh_logreport`). The new set on the 35B (`2026-11-01-1705-quick-g19-qwen3.6-35b`): 4 pass, 6 model failures, no harness failures. `fix_retry_backoff` failed the same way both times: the model replaced `retry.py` with write and dropped the `retrying` decorator another file imports, and the result only said "Replaced retry.py (29 lines)".
   4. Sub-agents (G-07) and MCP (G-08): more useful with a model that can delegate and handle many tools. Both built 2026-11-01 (§10.1, §10.2); sub-agents stay off (H-15). The MCP eval (H-16) is still to do: no eval run has used an MCP server yet.
-  5. H-14 on the 35B (one pi run), finishing H-01 (below), and as wanted: RPC mode, HTML export, `/fork`, firing the `input` extension event (defined in Phase 5, never sent), macOS isolation (G-20, when Psi runs on the Mac).
+  5. H-14 on the 35B (one pi run), finishing H-01 (below), and as wanted: RPC mode, HTML export, `/fork`, firing the `input` extension event (defined in Phase 5, never sent), macOS isolation (G-20, when Psi runs on the Mac; Seatbelt built 2026-11-01, D-44).
   - Built 2026-11-01: the `input` extension event fires (pi parity: after commands, before `/skill:` and template expansion; `{ text = ... }` rewrites, `{ handled = true }` consumes; `source` is `interactive`, `print` or `extension`), and `/fork` starts a new session from the history before an earlier prompt, puts that prompt back in the editor and records a `forked_from` entry (pi's `session_before_fork` event is not added).
   - Closed or left to the counters (§14 results): H-02, H-04, H-05, H-06, H-12, H-13; H-03 recorded. Dropped: H-08, H-10, other backends (G-18, unless a backend we need forces it) and no-progress tuning (G-12).
 - Original scope (before the re-scope above): work through the hypothesis table, including H-01 (the extension-writing eval, deferred from Phase 5 on 2026-10-31); compaction with the summary from the prefix cache (D-38) and its tuning; RPC mode; HTML export; MCP (**[G-08]**); sub-agents (**[G-07]**); other backends (**[G-18]**); macOS isolation (**[G-20]**).
@@ -916,6 +935,7 @@ Each phase ends with its acceptance criteria passing in the local check, where a
 | D-41 | **Sub-agents run in-process, one at a time, one level deep, off by default** (§10.1) | In-process (as Claude Code and Codex do) lets a sub-agent's asks reach the user and its tool calls show in the TUI; a child `psi -p` would be headless and denied everything on the always-ask list. One at a time because the server has one slot; one level because deep delegation is where a local model goes wrong. Off until H-15 shows the 35B delegates usefully (2026-11-01) |
 | D-42 | **MCP tools are all declared up front and approved by their read-only hint** (§10.2) | A local model at 64K meets few servers, and doesn't search for tools it can't see (H-15), so tool search and pi's codemode wait; the user trims with `tools`/`disabledTools` and a size warning. A tool list that changes mid-run breaks the prefix cache, so it changes only between prompts. MCP servers act outside the project, beyond checkpoints, so a call asks unless the server marks the tool read-only (Codex's default), with a per-server or per-tool override (2026-11-01) |
 | D-43 | **Markdown through `pulldown-cmark`, code highlighting through `syntect`, colors from pi's theme tokens** (§11.5) | The hand-written subset printed tables as raw rows and code uncolored. Both crates are the common Rust choice (bat, delta, mdbook); rendering stays per complete block, so streaming and commit-once don't change; scopes map onto pi's `syntax*` tokens, so pi themes work and the 16-color default keeps the terminal's palette (2026-11-01) |
+| D-44 | **macOS isolation is a Seatbelt profile with a shared `/tmp`** (§8.4) | Keeps the host's tools, as Codex and Claude Code do on macOS. No boundary works the same on both platforms without running bash in a Linux container or VM, which loses the Mac's tools and mixes Linux binaries into the workspace (`node_modules`, `.venv`, `target`). `/tmp` and `/private/var/folders` stay writable because macOS tools write there regardless of `TMPDIR` (Heimdall). `sandbox-exec` is deprecated but still the only option for command-line tools. |
 
 ---
 
@@ -935,7 +955,7 @@ Each phase ends with its acceptance criteria passing in the local check, where a
 | G-17 | Secret-taint tracking | Public readiness |
 | G-18 | Backends without tool-call templates (text protocol, JSON repair) | Phase 7, only if a needed backend requires it |
 | G-19 | Task-set refresh | Replace tasks that give the same result every trial (done 2026-11-01, Phase 7) |
-| G-20 | macOS isolation backend | When needed: libkrun or Seatbelt (Heimdall's profile is in its lessons); the owner tests by hand |
+| G-20 | macOS isolation backend | Built 2026-11-01: Seatbelt (§8.4, D-44); the owner tests by hand |
 
 (Resolved: G-01 by D-29; G-02 and G-15 by the Heimdall lessons, now tracked as hypotheses; G-11 by D-09; G-13 by D-25.)
 

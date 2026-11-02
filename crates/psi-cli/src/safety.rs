@@ -146,7 +146,7 @@ pub fn setup_with(
         _ => {}
     }
     let isolation_name = match &isolation {
-        Isolation::Bwrap(_) => "bwrap",
+        Isolation::On(sb) => sb.backend().name(),
         Isolation::Off => "off",
         Isolation::Unavailable(_) => "unavailable",
     };

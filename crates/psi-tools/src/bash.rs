@@ -104,8 +104,9 @@ async fn exec(
     let sandbox = ctx.sandbox.as_ref().filter(|_| !outside);
     let mut cmd = match sandbox {
         Some(sb) => {
-            let mut c = tokio::process::Command::new("bwrap");
-            c.args(sb.args(&ctx.cwd)).args(argv);
+            let (program, args) = sb.command(&ctx.cwd);
+            let mut c = tokio::process::Command::new(program);
+            c.args(args).args(argv);
             c
         }
         None => {
@@ -381,6 +382,7 @@ mod tests {
 
     /// The same process handling under bubblewrap: output, timeouts and
     /// background leftovers.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn sandboxed_calls_end_cleanly() {
         let d = tempfile::tempdir().unwrap();
@@ -392,8 +394,7 @@ mod tests {
             tmpdir: d.path().join("t"),
             network: true,
         };
-        let psi_safety::Isolation::Bwrap(sb) = psi_safety::isolation::choose(true, cfg, None)
-        else {
+        let psi_safety::Isolation::On(sb) = psi_safety::isolation::choose(true, cfg, None) else {
             panic!("bubblewrap must work for the local check");
         };
         c.sandbox = Some(sb);

@@ -6,7 +6,7 @@ commas are fine. Objects merge by key; other values replace; always_ask lists ap
 
 Keys:
 - mode: "auto" (default) or "strict" (psi help safety).
-- network: "on" or "off". isolation: "bwrap" or "off".
+- network: "on" or "off". isolation: "on" (bubblewrap on Linux, Seatbelt on macOS) or "off".
 - cache_dirs: directories bash may write under the sandbox.
 - always_ask, always_ask_remove: commands that always ask, added or dropped.
 - post_edit_check: a command run after turns that edit files (psi help post-edit-check).

@@ -48,7 +48,7 @@ struct Cli {
     #[arg(long, value_name = "ENTRY")]
     allow: Vec<String>,
 
-    /// Run bash inside bubblewrap, or directly when something else is the boundary.
+    /// Run bash inside the sandbox (bubblewrap on Linux, Seatbelt on macOS), or directly when something else is the boundary.
     #[arg(long, value_enum)]
     isolation: Option<IsolationArg>,
 
@@ -93,7 +93,9 @@ impl Mode {
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum IsolationArg {
-    Bwrap,
+    // "bwrap" was the only value before macOS had a sandbox.
+    #[value(alias = "bwrap")]
+    On,
     Off,
 }
 
@@ -579,7 +581,7 @@ fn flags_layer(cli: &Cli) -> Value {
     }
     if let Some(i) = cli.isolation {
         let v = match i {
-            IsolationArg::Bwrap => "bwrap",
+            IsolationArg::On => "on",
             IsolationArg::Off => "off",
         };
         m.insert("isolation".into(), v.into());

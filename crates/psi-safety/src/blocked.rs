@@ -7,10 +7,17 @@ use std::path::{Component, Path, PathBuf};
 /// "read-only file system" (any case), the last absolute path, resolved
 /// through symlinks, when it lies outside every writable directory.
 pub fn blocked_path(output: &str, writable: &[PathBuf]) -> Option<PathBuf> {
+    blocked_path_with(output, writable, "read-only file system")
+}
+
+/// [`blocked_path`] for a backend whose denial says `marker` (lowercase):
+/// Seatbelt's "operation not permitted" is also an ordinary error, which
+/// the writable check keeps from counting.
+pub fn blocked_path_with(output: &str, writable: &[PathBuf], marker: &str) -> Option<PathBuf> {
     let writable: Vec<PathBuf> = writable.iter().map(|d| resolve_path(d)).collect();
     output
         .lines()
-        .filter(|l| l.to_ascii_lowercase().contains("read-only file system"))
+        .filter(|l| l.to_ascii_lowercase().contains(marker))
         .filter_map(last_abs_path)
         .map(|p| resolve_path(&p))
         .find(|p| !writable.iter().any(|w| p.starts_with(w)))
@@ -153,8 +160,40 @@ mod tests {
         ];
         for (out, want) in cases {
             let got = blocked_path(&format!("some output\n{out}\nmore"), &w());
-            assert_eq!(got.as_deref(), Some(Path::new(want)), "{out}");
+            // resolved: /etc and /var are links into /private on macOS
+            assert_eq!(got, Some(resolve_path(Path::new(want))), "{out}");
         }
+    }
+
+    /// Seatbelt (macOS) denies with EPERM; inside a writable directory
+    /// the same text is an ordinary error, not a block.
+    #[test]
+    fn seatbelt_denials_name_the_path() {
+        let m = "operation not permitted";
+        let cases = [
+            ("touch: /etc/hosts: Operation not permitted", "/etc/hosts"),
+            (
+                "bash: /opt/x/out.txt: Operation not permitted",
+                "/opt/x/out.txt",
+            ),
+            ("mkdir: /srv/data: Operation not permitted", "/srv/data"),
+            (
+                "PermissionError: [Errno 1] Operation not permitted: '/usr/local/x'",
+                "/usr/local/x",
+            ),
+        ];
+        for (out, want) in cases {
+            let got = blocked_path_with(out, &w(), m);
+            assert_eq!(got, Some(resolve_path(Path::new(want))), "{out}");
+        }
+        assert_eq!(
+            blocked_path_with("chmod: /work/project/a: Operation not permitted", &w(), m),
+            None
+        );
+        assert_eq!(
+            blocked_path_with("touch: /etc/hosts: Read-only file system", &w(), m),
+            None
+        );
     }
 
     #[test]

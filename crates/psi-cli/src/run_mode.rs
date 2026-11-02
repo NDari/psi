@@ -367,7 +367,7 @@ pub async fn prepare(args: &RunArgs, approver: Arc<dyn Approver>) -> Result<Prep
     let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
     let facts = PromptFacts {
         checkpoints: safety.checkpoints.is_some(),
-        sandboxed: sandbox.is_some(),
+        sandboxed: sandbox.as_ref().is_some_and(|s| s.private_tmp()),
     };
     let system = system_prompt(
         &names,

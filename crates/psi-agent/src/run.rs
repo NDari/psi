@@ -11,7 +11,7 @@ use psi_ai::{
     AiError, ChatRequest, Client, Delta, FinishReason, RawToolCall, Response, ToolSchema, fix_call,
 };
 use psi_safety::always_ask::Rules;
-use psi_safety::blocked::{blocked_message, blocked_path, dir_to_add};
+use psi_safety::blocked::{blocked_message, dir_to_add};
 use psi_safety::checkpoint::Checkpoints;
 use psi_safety::policy::{Decision, Mode, Policy};
 use psi_session::{Block, Entry, EntryBody, Role, SessionFile, StopReason, Usage};
@@ -1495,7 +1495,7 @@ impl Agent {
         if matches!(callable, Callable::Core(Tool::Bash))
             && out.is_error
             && let Some(sb) = self.ctx.sandbox.clone()
-            && let Some(path) = blocked_path(&out.text, &sb.writable())
+            && let Some(path) = sb.blocked(&out.text)
         {
             let dir = dir_to_add(&path);
             let req = BlockedRequest {

@@ -8,8 +8,9 @@ What asks, what can be undone, and the sandbox.
 - Always-ask: irreversible commands such as git push or publishing ask in every mode,
   wherever they appear in a command, and so does removing or moving .git in any form
   ("rm .git": checkpoints can't undo it). Add or remove entries with always_ask settings.
-- Sandbox: bash runs in bubblewrap; it can write the workspace, its git directories,
-  cache_dirs and its TMPDIR, and /tmp is private to each call. A blocked write offers to
-  rerun outside the sandbox or to make the directory writable. network: off cuts bash off.
+- Sandbox: bash runs in bubblewrap (Linux) or Seatbelt (macOS); it can write the workspace,
+  its git directories, cache_dirs and its TMPDIR. On Linux /tmp is private to each call; on
+  macOS /tmp is shared. A blocked write offers to rerun outside the sandbox or to make the
+  directory writable. network: off cuts bash off.
 - Headless runs (-p) never ask: what would ask is denied, unless --allow <entry> allows it.
 - psi refuses file-tool writes to .psi/ directories, so a model can't change its own settings.

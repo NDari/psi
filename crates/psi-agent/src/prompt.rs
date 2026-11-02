@@ -11,7 +11,8 @@ const MAX_CONTEXT_FILE: usize = 32 * 1024;
 pub struct PromptFacts {
     /// Checkpoints are on, so changes in the workspace can be undone.
     pub checkpoints: bool,
-    /// bash runs under bubblewrap, with a private /tmp per call.
+    /// bash runs under bubblewrap, with a private /tmp per call (Seatbelt
+    /// on macOS shares /tmp, so this is false there).
     pub sandboxed: bool,
 }
 

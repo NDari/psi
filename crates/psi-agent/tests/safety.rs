@@ -125,8 +125,8 @@ impl Fx {
                 tmpdir: self.tmpdir.clone(),
                 network: true,
             };
-            let Isolation::Bwrap(sb) = choose(true, cfg, Some(&self.home)) else {
-                panic!("bubblewrap must work for the local check");
+            let Isolation::On(sb) = choose(true, cfg, Some(&self.home)) else {
+                panic!("the sandbox must work for the local check");
             };
             ctx.sandbox = Some(sb);
         }

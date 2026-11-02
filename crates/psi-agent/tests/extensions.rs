@@ -129,8 +129,8 @@ async fn extension_tools_gates_rewrites_and_results() {
         tmpdir: tmpdir.clone(),
         network: true,
     };
-    let Isolation::Bwrap(sb) = choose(true, cfg, None) else {
-        panic!("bubblewrap must work")
+    let Isolation::On(sb) = choose(true, cfg, None) else {
+        panic!("the sandbox must work")
     };
     // The script lives outside the workspace; the sandbox reads it.
     ctx.sandbox = Some(sb);
