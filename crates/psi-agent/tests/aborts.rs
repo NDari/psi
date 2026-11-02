@@ -173,10 +173,16 @@ fn results(a: &Agent) -> Vec<(String, bool)> {
         .collect()
 }
 
-/// A process with this id is gone (killed, not left running).
+/// A process with this id is gone (killed, not left running). ps works on
+/// Linux and macOS; /proc is Linux only.
 fn gone(pid: &str) -> bool {
     for _ in 0..50 {
-        if !Path::new(&format!("/proc/{}", pid.trim())).exists() {
+        let ps = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", pid.trim()])
+            .output()
+            .unwrap();
+        let stat = String::from_utf8_lossy(&ps.stdout);
+        if !ps.status.success() || stat.trim().is_empty() || stat.trim().starts_with('Z') {
             return true;
         }
         std::thread::sleep(Duration::from_millis(20));

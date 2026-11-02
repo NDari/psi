@@ -334,6 +334,32 @@ fn resize_redraws_only_the_live_region() {
     t.quit();
 }
 
+/// A resize whose event never arrives (crossterm drops one that comes with
+/// input, seen on macOS) is caught at the next key.
+#[test]
+fn a_lost_resize_is_caught_at_the_next_key() {
+    let (mut t, _s) = Tui::start(vec![], |_| {});
+    t.wait_for("› ", SLOW);
+    let ws = rustix::termios::Winsize {
+        ws_row: 20,
+        ws_col: 120,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // No SIGWINCH: psi isn't in the pty's session, so none is sent.
+    rustix::termios::tcsetwinsize(&t.master, ws).unwrap();
+    t.screen
+        .lock()
+        .unwrap()
+        .screen_mut()
+        .set_size(nz(20), nz(120));
+    let long = "x".repeat(110);
+    t.typ(&long);
+    t.wait_screen(&format!("› {long}"), SLOW);
+    t.send(b"\x15");
+    t.quit();
+}
+
 /// §11.3: cold start to interactive under 100 ms (excluding the model) and
 /// keystroke to screen under 16 ms. Debug builds get more room; the
 /// release numbers are the targets.
@@ -816,7 +842,13 @@ fn a_slow_bang_command_keeps_the_screen_live_and_esc_stops_it() {
     t.wait_for("[stopped]", SLOW);
     let gone = (0..50).any(|_| {
         std::thread::sleep(Duration::from_millis(20));
-        !std::path::Path::new(&format!("/proc/{}", pid.trim())).exists()
+        // ps, not /proc: macOS has no /proc. A zombie counts as gone.
+        let ps = Command::new("ps")
+            .args(["-o", "stat=", "-p", pid.trim()])
+            .output()
+            .unwrap();
+        let stat = String::from_utf8_lossy(&ps.stdout);
+        !ps.status.success() || stat.trim().is_empty() || stat.trim().starts_with('Z')
     });
     assert!(gone, "the command was left running");
     t.typ("\x03"); // Ctrl+C clears the typed text, so Ctrl+D quits

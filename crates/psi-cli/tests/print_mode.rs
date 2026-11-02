@@ -102,9 +102,10 @@ fn print_mode_writes_session_and_wire_log() {
             .unwrap()
             .contains("Tools: read, write, edit, bash")
     );
+    // Resolved: /var is /private/var on macOS.
     assert!(sys.as_str().unwrap().ends_with(&format!(
         "Current working directory: {}",
-        e.project.display()
+        e.project.canonicalize().unwrap().display()
     )));
 }
 
@@ -792,7 +793,11 @@ fn the_eval_runner_classifies_real_psi_output() {
         (Outcome::ModelFail, "checks: 0 passed of 3".into())
     );
 
-    // A trial past its time: the runner wraps psi in `timeout -s INT`.
+    // A trial past its time: the runner wraps psi in `timeout -s INT`
+    // (GNU coreutils, in the Linux eval image; macOS has no `timeout`).
+    if !cfg!(target_os = "linux") {
+        return;
+    }
     let server = ReplayServer::start(vec![Reply::hang("thinking")]).unwrap();
     let e = env_for(&server);
     let out = Command::new("timeout")

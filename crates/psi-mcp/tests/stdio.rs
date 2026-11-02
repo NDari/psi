@@ -144,6 +144,18 @@ async fn esc_during_a_call_returns_at_once() {
     );
 }
 
+/// The process exists and isn't a zombie (ps works on Linux and macOS;
+/// /proc is Linux only).
+fn running(pid: &str) -> bool {
+    std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", pid.trim()])
+        .output()
+        .is_ok_and(|o| {
+            let s = String::from_utf8_lossy(&o.stdout);
+            o.status.success() && !s.trim().is_empty() && !s.trim().starts_with('Z')
+        })
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_process_stops_when_psi_lets_go() {
     let dir = tempfile::tempdir().unwrap();
@@ -155,13 +167,11 @@ async fn the_process_stops_when_psi_lets_go() {
     ))
     .await;
     let pid = std::fs::read_to_string(&pid_file).unwrap();
-    assert!(Path::new(&format!("/proc/{pid}")).exists());
+    assert!(running(&pid));
     drop(m);
     let gone = (0..100).any(|_| {
         std::thread::sleep(Duration::from_millis(20));
-        // A zombie still has a /proc entry; its state is Z.
-        std::fs::read_to_string(format!("/proc/{pid}/stat"))
-            .map_or(true, |s| s.split_whitespace().nth(2) == Some("Z"))
+        !running(&pid)
     });
     assert!(gone, "the server process outlived its manager");
 }

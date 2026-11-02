@@ -361,6 +361,13 @@ impl<W: Write> App<W> {
                         break;
                     }
                 }
+                // crossterm drops a resize that wakes it together with input
+                // (seen on macOS), so check the size after every batch.
+                if let Ok((w, h)) = crossterm::terminal::size()
+                    && (w.max(1), h.max(1)) != (self.r.width(), self.r.height())
+                {
+                    self.r.resize(w, h);
+                }
             }
             while let Ok(m) = rx.try_recv() {
                 self.on_msg(m);
