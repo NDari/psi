@@ -324,9 +324,10 @@ mod tests {
         let c = ToolCtx::new(d.path(), &d.path().join("t"), 10_000);
         let a = json!({"command": "pwd; echo $TMPDIR; echo ${TERM}"});
         let out = run(a.as_object().unwrap().clone(), &c, false).await;
+        // pwd prints the resolved path: /var is /private/var on macOS.
         let want = format!(
             "{}\n{}\ndumb",
-            d.path().display(),
+            d.path().canonicalize().unwrap().display(),
             d.path().join("t").display()
         );
         assert_eq!(out.text, want);
