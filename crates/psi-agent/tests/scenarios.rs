@@ -533,8 +533,9 @@ async fn old_tool_results_are_cleared_past_the_trigger() {
     let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
     let out = a.run("read the files").await;
     assert_eq!(out.stop, Stop::Done, "{:?}", out.stop);
-    // One batch, once past the trigger; no summary was needed.
-    assert_eq!(kinds(&a)[7], "cleared 3", "{:?}", kinds(&a));
+    // One batch, once past the trigger, down to 30% of the window (four
+    // of the five older results); no summary was needed.
+    assert_eq!(kinds(&a)[7], "cleared 4", "{:?}", kinds(&a));
     assert!(!kinds(&a).contains(&"compaction".to_owned()));
     let freed: Vec<u64> = a
         .session()

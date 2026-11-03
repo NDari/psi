@@ -32,6 +32,16 @@ pub(super) enum Compacted {
 /// What the summary instruction adds to a request, in tokens (generous).
 const INSTRUCTION_TOKENS: u64 = 400;
 
+/// The size clearing brings the context down to: 30% of the window, or a
+/// fifth of the window below the trigger when that is lower. Each clearing
+/// makes the server read again everything after the first cleared result,
+/// nearly the whole context, however much it frees; so it frees a lot, and
+/// the next one comes later (2026-11-03: down to a fifth below the trigger,
+/// a 64K review cleared 4 times in 30 requests and spent 114 s re-reading).
+pub(crate) fn clear_target(n_ctx: u64, trigger: u64) -> u64 {
+    (n_ctx * 3 / 10).min(trigger.saturating_sub(n_ctx / 5))
+}
+
 impl Agent {
     /// Past the trigger, clear old tool results if that frees enough;
     /// otherwise summarize, and clear in what is left if still needed.
@@ -146,9 +156,9 @@ impl Agent {
         Ok(held)
     }
 
-    /// How much to free: down to a fifth of the window below the trigger.
+    /// How much to free: down to [`clear_target`].
     fn room_needed(&self, tokens: u64, at: u64) -> u64 {
-        tokens - at.saturating_sub(self.cfg.n_ctx / 5)
+        tokens.saturating_sub(clear_target(self.cfg.n_ctx, at))
     }
 
     fn plan_clearing(&self, tokens: u64, at: u64) -> Option<(Vec<String>, u64)> {
@@ -383,4 +393,24 @@ fn extends_request(last: &ChatRequest, new: &ChatRequest) -> bool {
         && last.model == new.model
         && new.messages.len() >= last.messages.len()
         && new.messages[..last.messages.len()] == last.messages[..]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clear_target;
+    use crate::compact::trigger;
+
+    #[test]
+    fn clearing_frees_room_for_many_steps() {
+        // 64K: the trigger is at 45,875; clearing goes down to about 19.7K,
+        // leaving about 26K before the next one (13K before).
+        let at = trigger(65_536, 8192, 9830);
+        assert_eq!(clear_target(65_536, at), 19_660);
+        // 16K: 30% of the window, a little below the old 6,555.
+        let at = trigger(16_384, 4096, 2457);
+        assert_eq!(clear_target(16_384, at), 4915);
+        // Tiny windows: never above a fifth below the trigger, as before.
+        let at = trigger(8192, 8192, 1000);
+        assert_eq!(clear_target(8192, at), 2048 - 1638);
+    }
 }
