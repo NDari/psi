@@ -1219,6 +1219,33 @@ fn mark_color(t: &Tui, head: &str) -> vt100::Color {
 }
 
 #[test]
+fn the_stats_sit_under_the_input_box_and_user_text_is_white() {
+    let (mut t, _s) = Tui::start(vec![text("ok")], |_| {});
+    t.wait_for("› ", SLOW);
+    t.typ("hi there\r");
+    t.wait_for("ok", SLOW);
+    t.wait_screen("local", SLOW);
+    let screen = t.contents();
+    let rows: Vec<&str> = screen.lines().collect();
+    let input = rows
+        .iter()
+        .position(|r| r.starts_with("› "))
+        .expect("the input");
+    // A line above and below the box, then the stats.
+    assert!(rows[input - 1].starts_with("───"), "{screen}");
+    assert!(rows[input + 1].starts_with("───"), "{screen}");
+    assert!(rows[input + 2].starts_with("local"), "{screen}");
+    let tall = t.tall.lock().unwrap();
+    let s = tall.screen();
+    let row = (0..200)
+        .find(|r| s.contents_between(*r, 0, *r, 12).starts_with("▌ hi there"))
+        .expect("the committed prompt");
+    // The words are bright white and bold.
+    assert_eq!(s.cell(row, 2).unwrap().fgcolor(), vt100::Color::Idx(15));
+    assert!(s.cell(row, 2).unwrap().bold());
+}
+
+#[test]
 fn call_marks_show_how_each_call_went() {
     let (mut t, _s) = Tui::start(
         vec![

@@ -17,7 +17,7 @@ use psi_session::{Entry, EntryBody, Role, text_of};
 use psi_tui::term::{Activity, Term, title_for};
 use psi_tui::theme::{self, Token};
 use psi_tui::{
-    Action, Editor, EditorEvent, Keymap, Line, MdStream, Renderer, Style, render_block,
+    Action, Color, Editor, EditorEvent, Keymap, Line, MdStream, Renderer, Style, render_block,
     render_blocks,
 };
 use serde_json::Value;
@@ -1178,7 +1178,8 @@ impl<W: Write> App<W> {
             let mut line = Line::default();
             // A bar down the left of every line marks the user's own words.
             line.push("▌ ", theme::style(Token::UserMessageText).bold());
-            line.push(l, Style::default().bold());
+            // Bright white, so the user's words stand out from the model's.
+            line.push(l, Style::fg(Color::BrightWhite).bold());
             lines.push(line);
         }
         self.commit(lines);
@@ -2149,14 +2150,14 @@ impl<W: Write> App<W> {
         for (k, v) in &self.ext_status {
             status.push(format!("  {k}: {v}"), dim());
         }
-        live.push(status.truncate(w));
-        live.push(Line::styled(
-            "─".repeat(w),
-            theme::style(Token::BorderMuted),
-        ));
+        // A line above and below the input box, then cards and lists,
+        // then the stats at the very bottom, as in pi.
+        let border = Line::styled("─".repeat(w), theme::style(Token::BorderMuted));
+        live.push(border.clone());
         let top = live.len();
         let (rows, (cr, cc)) = self.editor.render(w, "› ", Style::default());
         live.extend(rows);
+        live.push(border);
         let mut cursor = Some((top + cr, cc));
         if let Some(c) = &self.card {
             live.extend(approval_card(&c.req, c.typing.as_deref(), w));
@@ -2277,6 +2278,7 @@ impl<W: Write> App<W> {
                 .collect();
             live.extend(list(&items, self.drop_sel, 8, w));
         }
+        live.push(status.truncate(w));
         if self.debug {
             live.push(Line::styled(
                 format!("draw {:?}", self.r.last_draw()),

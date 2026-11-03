@@ -642,12 +642,13 @@ A custom line-based differential renderer on crossterm, **inline** (no alternate
 An inline TUI can't redraw the past, so each piece is committed once, in a form that stays useful:
 - Commit text a paragraph at a time, and code blocks whole.
 - Commit a tool call as a header, a one-line summary, up to 4 output lines and up to 20 diff lines. `/show <n>` displays the full call.
-- Keep who did what easy to follow (2026-11-03, after pi's colored blocks): the mark before a call is dim while it runs, green when it worked and red when it failed; the user's own messages have a bar (`▌`) down the left in the user color; each step of the model starts after a blank line; and a resumed session shows its tool calls as they were committed, so `/show <n>` works for them too. Markers in the 16 colors, not background bands.
+- Keep who did what easy to follow (2026-11-03, after pi's colored blocks): the mark before a call is dim while it runs, green when it worked and red when it failed; the user's own messages have a bar (`▌`) down the left in the user color, and their words are bright white and bold; each step of the model starts after a blank line; and a resumed session shows its tool calls as they were committed, so `/show <n>` works for them too. Markers in the 16 colors, not background bands.
 - Never commit thinking.
 - Don't redraw committed lines on resize.
 - Start on a cleared screen by printing one newline per row, so earlier content scrolls into scrollback instead of being erased.
 - The output of `/inspect`, `/diff`, `/show` and `/help` opens in `$PAGER` (`less` with `LESS=R` when unset) instead of being committed, however short; the pager's own screen leaves the scrollback as it was (2026-11-02). If the pager can't run, the output is committed with a note.
 - Dropdowns and modals go **under** the input box, never in its place.
+- The input box has a line above and below it; dropdowns and cards come next, and the status line is last, at the bottom of the screen (2026-11-03, as in pi).
 - **What the box shows is what Enter runs.** Moving through a dropdown puts the selection in the box.
 - Use the terminal's 16 ANSI colors so the user's theme decides. Fenced code keeps dimmed fence lines, so a copy from the terminal is the code.
 - BEL when a turn ends or an approval appears while the terminal is unfocused. A "waiting for the model…" spinner before the first token.
