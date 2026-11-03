@@ -132,7 +132,7 @@ mod tests {
             "{out:?}"
         );
         assert!(
-            out.text.ends_with("\n1\told"),
+            out.text.ends_with("\nold"),
             "the refusal shows the content: {out:?}"
         );
         assert_eq!(std::fs::read_to_string(d.path().join("f")).unwrap(), "old");
@@ -148,7 +148,7 @@ mod tests {
             out.is_error && out.text.contains("changed since you last read it"),
             "{out:?}"
         );
-        assert!(out.text.ends_with("\n1\tchanged outside"), "{out:?}");
+        assert!(out.text.ends_with("\nchanged outside"), "{out:?}");
         assert_eq!(
             std::fs::read_to_string(d.path().join("f")).unwrap(),
             "changed outside"

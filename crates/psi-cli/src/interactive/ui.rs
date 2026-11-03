@@ -30,7 +30,8 @@ use tokio_util::sync::CancellationToken;
 use super::complete::Completer;
 use super::paste::{Pastes, strip_invisible};
 use super::view::{
-    self, Status, approval_card, call_block, call_header, dim, git_diff_lines, list, status_line,
+    self, CallState, Status, approval_card, call_block, call_header, dim, git_diff_lines, list,
+    status_line,
 };
 use super::worker::Cmd;
 
@@ -1173,12 +1174,10 @@ impl<W: Write> App<W> {
     fn commit_user(&mut self, t: &str) {
         let t = &shown_user_text(t);
         let mut lines = vec![Line::default()];
-        for (i, l) in t.lines().enumerate() {
+        for l in t.lines() {
             let mut line = Line::default();
-            line.push(
-                if i == 0 { "› " } else { "  " },
-                theme::style(Token::UserMessageText).bold(),
-            );
+            // A bar down the left of every line marks the user's own words.
+            line.push("▌ ", theme::style(Token::UserMessageText).bold());
             line.push(l, Style::default().bold());
             lines.push(line);
         }
@@ -1339,7 +1338,17 @@ impl<W: Write> App<W> {
                 };
                 let mut lines = vec![
                     Line::default(),
-                    call_header(n, &s.name, &s.args, self.width(), None),
+                    call_header(
+                        n,
+                        &s.name,
+                        &s.args,
+                        self.width(),
+                        if s.is_error {
+                            CallState::Failed
+                        } else {
+                            CallState::Done
+                        },
+                    ),
                 ];
                 let args = serde_json::to_string_pretty(&s.args).unwrap_or_default();
                 lines.extend(args.lines().map(|l| Line::styled(format!("  {l}"), dim())));
@@ -1651,17 +1660,43 @@ impl<W: Write> App<W> {
             {
                 plan = Some(PlanState::from_json(data));
             }
+            // The tool calls too, so a resumed session shows who did what.
+            for (id, name, args) in e.tool_calls() {
+                self.calls_by_id
+                    .push((id.to_owned(), name.to_owned(), args.clone()));
+            }
+            if let EntryBody::ToolResult {
+                tool_call_id,
+                tool_name,
+                content,
+                is_error,
+            } = &e.body
+            {
+                let args = self
+                    .calls_by_id
+                    .iter()
+                    .rev()
+                    .find(|(id, _, _)| id == tool_call_id)
+                    .map(|(_, _, a)| a.clone())
+                    .unwrap_or(Value::Null);
+                self.commit_tool_result(tool_name, args, &text_of(content), *is_error);
+            }
             if let EntryBody::Message { role, content, .. } = &e.body {
                 let t = text_of(content);
                 match role {
                     Role::User => self.commit_user(&t),
-                    Role::Assistant if !t.is_empty() => {
-                        self.last_answer = t.clone();
-                        let w = self.width();
-                        let mut md = MdStream::new();
-                        let mut blocks = md.push(&t);
-                        blocks.extend(md.finish());
-                        self.commit(render_blocks(&blocks, w));
+                    Role::Assistant => {
+                        // A blank line before each step, as when it ran.
+                        let mut lines = vec![Line::default()];
+                        if !t.is_empty() {
+                            self.last_answer = t.clone();
+                            let w = self.width();
+                            let mut md = MdStream::new();
+                            let mut blocks = md.push(&t);
+                            blocks.extend(md.finish());
+                            lines.extend(render_blocks(&blocks, w));
+                        }
+                        self.commit(lines);
                     }
                     _ => {}
                 }
@@ -1823,13 +1858,8 @@ impl<W: Write> App<W> {
             }
             AgentEvent::TextDelta { text } => {
                 let w = self.width();
-                let first = !self.md.started() && self.md.pending().is_empty();
-                let done = self.md.push(&text);
-                let mut lines = Vec::new();
-                if first && !done.is_empty() {
-                    lines.push(Line::default());
-                }
-                lines.extend(render_blocks(&done, w));
+                // TurnStart has put the blank line before this step's text.
+                let lines = render_blocks(&self.md.push(&text), w);
                 if !lines.is_empty() {
                     self.commit(lines);
                 }
@@ -1885,8 +1915,25 @@ impl<W: Write> App<W> {
         }
     }
 
-    fn on_entry(&mut self, e: &Entry) {
+    /// A finished call, committed and kept for `/show`.
+    fn commit_tool_result(&mut self, tool_name: &str, args: Value, result: &str, is_error: bool) {
         let w = self.width();
+        self.shown.push(Shown {
+            name: tool_name.to_owned(),
+            args: args.clone(),
+            result: result.to_owned(),
+            is_error,
+        });
+        let n = self.shown.len();
+        let call = serde_json::json!({"name": tool_name, "args": args,
+                                      "result": result, "is_error": is_error});
+        match self.ext.render_tool(tool_name, call, w, EXT_FRAME) {
+            Some(lines) => self.commit(lines.iter().map(|l| Line::from_ansi(l)).collect()),
+            None => self.commit(call_block(n, tool_name, &args, result, is_error, w)),
+        }
+    }
+
+    fn on_entry(&mut self, e: &Entry) {
         if let EntryBody::Message {
             role: Role::Assistant,
             content,
@@ -1917,20 +1964,7 @@ impl<W: Write> App<W> {
                 {
                     r.tools.remove(i);
                 }
-                let result = text_of(content);
-                self.shown.push(Shown {
-                    name: tool_name.clone(),
-                    args: args.clone(),
-                    result: result.clone(),
-                    is_error: *is_error,
-                });
-                let n = self.shown.len();
-                let call = serde_json::json!({"name": tool_name, "args": args,
-                                              "result": result, "is_error": is_error});
-                match self.ext.render_tool(tool_name, call, w, EXT_FRAME) {
-                    Some(lines) => self.commit(lines.iter().map(|l| Line::from_ansi(l)).collect()),
-                    None => self.commit(call_block(n, tool_name, &args, &result, *is_error, w)),
-                }
+                self.commit_tool_result(tool_name, args, &text_of(content), *is_error);
             }
             EntryBody::Message {
                 role: Role::User,
@@ -2084,7 +2118,7 @@ impl<W: Write> App<W> {
                     name,
                     args,
                     w,
-                    Some(started.elapsed().as_secs_f64()),
+                    CallState::Running(started.elapsed().as_secs_f64()),
                 ));
             }
             if r.tools.is_empty() && pending.is_empty() && self.card.is_none() {

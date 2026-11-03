@@ -171,6 +171,19 @@ Flags worth sweeping: `-fa`, `-b`/`-ub`, `-ctk`/`-ctv` (KV cache type), `-t`, `-
 - Whether the per-message `model` should stay the alias or become the file name; what pi records there is unchecked.
 - `psi inspect` and the eval reports could show it once it's recorded.
 
+### Clear more at once, so the cache breaks less often (added 2026-11-03)
+
+**Question:** each clearing of old tool results breaks the prompt cache from the first cleared result, near the start of the conversation, so the server re-reads almost everything. Would freeing more per clearing (so it happens once or twice instead of every few steps) save most of that time without hurting the model?
+
+**Context:** the owner found Psi slower than pi on the 35B. In the docs-steer rerun (64K, `~/.psi/sessions/-tmp-claude-1000--home-ndari-projects-psi-50906382-555d-433d-8d13-7de8a3abd078-scratchpad-cog-/2026-11-03-1329_40c98505.*`), clearing ran 4 times in 30 requests (at about 50K, each freeing about 20K, §7.4: down to 20% of the window under the 70% trigger). Each was followed by a re-read of 24K to 31K tokens from depth 2.3K, 114 s of the 232 s the server spent reading. The context then refilled in a few steps of whole-file reads and cleared again. Pi compacted once in its run (it triggers at the window less 16K). Asking for prompt progress costs nothing: read speeds match with and without it at the same depth. One run each, so this shows the mechanism, not how much slower Psi is.
+
+**How:** the cost of a clearing is the re-read after the first cleared result, almost independent of how much is cleared, so clear further down per batch: for example to 40% of the window (about 26K at 64K) instead of 20% under the trigger. Count the clearings and the re-read seconds on the same rerun, and check at 16K that the step budget and the re-read loop fixes still hold. It changes what the model sees, so an eval run (D-32), on the owner's go.
+
+**Open:**
+- Clearing more removes results the model may still need; the placeholders say how to get them back, and re-reading one file is cheaper than re-reading the context.
+
+**Line numbers cost a third more tokens (found 2026-11-03).** The owner noticed the slowness from the start too, before any clearing. Early steps reuse the cache fully, so the reading is the new tool output, and Psi's `read` numbers every line (§5, "line-numbered output"). Qwen's tokenizer splits numbers into single digits, so `1023\t` is 5 tokens before the code. The same seven files read in both runs (fn.go, env.go, parser.go, lexer.go, README.md, semantics.md, known-issues.md) took 31,559 tokens in Psi and 23,229 in pi, 35% more (20% to 49% by file). Pi's read has no line numbers. That slows every step that reads and fills the window sooner, which brings the clearing sooner. Built 2026-11-03: read shows lines without numbers, as pi does (offsets still come from the truncation notice; edit matches text, and still ignores numbers a model copies in). Plan §5 updated. Model-facing, so an eval run is still owed (D-32), on the owner's go; the clearing change waits for it.
+
 ## Done
 
 ### A faster 35B on the Mac for development (added 2026-11-01)

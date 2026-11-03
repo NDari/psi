@@ -1,4 +1,6 @@
-//! read: line-numbered file contents, cut relative to the context window.
+//! read: file contents as they are, cut relative to the context window. No
+//! line numbers, as in pi: with Qwen's one-token digits they cost about a
+//! third more tokens for the same file.
 
 use std::path::Path;
 
@@ -15,7 +17,7 @@ pub(crate) fn schema() -> ToolSchema {
     ToolSchema {
         name: "read",
         description: format!(
-            "Read a text file. Lines are numbered. Long files are shown in parts (up to {MAX_LINES} lines); the result says which offset to read next."
+            "Read a text file. Long files are shown in parts (up to {MAX_LINES} lines); the result says which offset to read next."
         ),
         params: vec![
             Param::new(
@@ -78,15 +80,11 @@ pub(crate) fn run(args: &Map<String, Value>, ctx: &ToolCtx) -> ToolOutput {
     let mut out = String::new();
     let mut last = offset - 1;
     for (i, line) in lines.iter().enumerate().skip(offset - 1).take(limit) {
-        let numbered = format!(
-            "{}\t{}\n",
-            i + 1,
-            cut_line(line.strip_suffix('\r').unwrap_or(line))
-        );
-        if out.len() + numbered.len() > ctx.max_result_chars && last >= offset {
+        let shown = format!("{}\n", cut_line(line.strip_suffix('\r').unwrap_or(line)));
+        if out.len() + shown.len() > ctx.max_result_chars && last >= offset {
             break;
         }
-        out.push_str(&numbered);
+        out.push_str(&shown);
         last = i + 1;
     }
     if last < total {
@@ -154,12 +152,12 @@ mod tests {
     }
 
     #[test]
-    fn numbers_lines_and_records_the_read() {
+    fn shows_lines_as_they_are_and_records_the_read() {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("a.py"), "x = 1\r\ny = 2\n").unwrap();
         let c = ctx(d.path());
         let out = read(&c, json!({"path": "a.py"}));
-        assert_eq!(out, ToolOutput::ok("1\tx = 1\n2\ty = 2"));
+        assert_eq!(out, ToolOutput::ok("x = 1\ny = 2"));
         assert!(c.files.lock().unwrap().was_read(&d.path().join("a.py")));
     }
 
@@ -174,12 +172,12 @@ mod tests {
         );
         assert_eq!(
             out.text,
-            "10\tline 10\n11\tline 11\n12\tline 12\n13\tline 13\n14\tline 14\n[Showing lines 10-14 of 50. Call read with offset=15 to continue.]"
+            "line 10\nline 11\nline 12\nline 13\nline 14\n[Showing lines 10-14 of 50. Call read with offset=15 to continue.]"
         );
         let small = ToolCtx::new(d.path(), d.path(), 40);
         let out = read(&small, json!({"path": "big.txt"}));
         assert!(
-            out.text.ends_with("Call read with offset=5 to continue.]"),
+            out.text.ends_with("Call read with offset=6 to continue.]"),
             "{}",
             out.text
         );

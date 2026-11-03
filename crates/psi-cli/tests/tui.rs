@@ -297,7 +297,7 @@ fn a_prompt_streams_an_answer_and_tool_calls_commit_once() {
     // The code block comes last (and loads the grammars on first use).
     t.wait_for("cat hello.txt", SLOW);
     let all = t.all();
-    assert!(all.contains("› make hello.txt"), "{all}");
+    assert!(all.contains("▌ make hello.txt"), "{all}");
     assert!(all.contains("● write  hello.txt"), "{all}");
     assert!(all.contains("Created hello.txt (1 line)."), "{all}");
     assert!(all.contains("cat hello.txt"), "{all}");
@@ -576,8 +576,9 @@ fn fork_starts_a_new_session_before_a_prompt() {
     t.wait_for("↑↓ choose", SLOW);
     t.typ("\r"); // the newest prompt
     t.wait_for("forked: ", SLOW);
-    // The prompt is back in the editor: printed a second time.
-    t.wait_count("› second question", 2, SLOW);
+    // The prompt is back in the editor, under the committed one.
+    t.wait_for("▌ second question", SLOW);
+    t.wait_screen("› second question", SLOW);
     t.typ(" again\r");
     t.wait_for("three", SLOW);
     let reqs = s.chat_requests();
@@ -713,7 +714,7 @@ fn prompt_templates_and_skill_commands() {
     t.wait_for("read it", SLOW);
     let all = t.all();
     assert!(all.contains("prompt /greet"), "{all}");
-    assert!(all.contains("› [skill pdf] the report"), "{all}");
+    assert!(all.contains("▌ [skill pdf] the report"), "{all}");
     assert!(
         !all.contains("Use pdftotext"),
         "the skill body isn't shown:\n{all}"
@@ -933,9 +934,9 @@ fn ctrl_r_finds_an_earlier_prompt_and_ctrl_s_stashes_the_draft() {
     t.wait_for("history: pars", SLOW);
     // The committed prompt is on screen once; the box makes it twice.
     let count = |t: &Tui| {
-        t.contents()
-            .matches("› first question about parsers")
-            .count()
+        let c = t.contents();
+        c.matches("▌ first question about parsers").count()
+            + c.matches("› first question about parsers").count()
     };
     let wait_count = |t: &Tui, n: usize| {
         let start = Instant::now();
@@ -1013,7 +1014,7 @@ fn themes_color_the_screen() {
         let tall = t.tall.lock().unwrap();
         let screen = tall.screen();
         let row = (0..200)
-            .find(|r| screen.contents_between(*r, 0, *r, 10).starts_with("› hi"))
+            .find(|r| screen.contents_between(*r, 0, *r, 10).starts_with("▌ hi"))
             .expect("the prompt line");
         assert_eq!(
             screen.cell(row, 0).unwrap().fgcolor(),
@@ -1082,7 +1083,12 @@ fn a_slow_bang_command_keeps_the_screen_live_and_esc_stops_it() {
 /// Runs `psi -p <prompt>` in `tmp`'s home and project (sessions for `-c`
 /// and `/resume`), against its own replay server.
 fn print_run(tmp: &std::path::Path, prompt: &str, answer: &str) {
-    let server = ReplayServer::start(vec![text(answer)]).unwrap();
+    print_run_with(tmp, prompt, vec![text(answer)]);
+}
+
+/// As [`print_run`], with the model's replies scripted.
+fn print_run_with(tmp: &std::path::Path, prompt: &str, replies: Vec<Reply>) {
+    let server = ReplayServer::start(replies).unwrap();
     let home = tmp.join("home");
     let project = tmp.join("project");
     std::fs::create_dir_all(home.join(".psi")).unwrap();
@@ -1184,7 +1190,7 @@ fn continue_and_resume_bring_back_a_session() {
     print_run(tmp.path(), "alpha question", "alpha answer");
     let (mut t, s) = Tui::start_at(tmp, vec![text("more")], |_| {}, &["-c"]);
     // -c replays the history and continues from it.
-    t.wait_for("› alpha question", SLOW);
+    t.wait_for("▌ alpha question", SLOW);
     t.wait_for("alpha answer", SLOW);
     t.typ("and then?\r");
     t.wait_for("more", SLOW);
@@ -1198,7 +1204,76 @@ fn continue_and_resume_bring_back_a_session() {
     t.wait_for("↑↓ choose", SLOW);
     t.typ("\r");
     t.wait_for("resumed", SLOW);
-    t.wait_count("› alpha question", 2, SLOW);
+    t.wait_count("▌ alpha question", 2, SLOW);
+    t.quit();
+}
+
+/// The color of the `●` before the committed call whose line starts with `head`.
+fn mark_color(t: &Tui, head: &str) -> vt100::Color {
+    let tall = t.tall.lock().unwrap();
+    let screen = tall.screen();
+    let row = (0..5000)
+        .find(|r| screen.contents_between(*r, 0, *r, 60).starts_with(head))
+        .unwrap_or_else(|| panic!("no line starting {head:?}:\n{}", screen.contents()));
+    screen.cell(row, 0).unwrap().fgcolor()
+}
+
+#[test]
+fn call_marks_show_how_each_call_went() {
+    let (mut t, _s) = Tui::start(
+        vec![
+            call("read", json!({"path": "here.txt"})),
+            call("read", json!({"path": "missing.txt"})),
+            text("done"),
+        ],
+        |p| std::fs::write(p.join("here.txt"), "x\n").unwrap(),
+    );
+    t.wait_for("› ", SLOW);
+    t.typ("read them\r");
+    t.wait_for("done", SLOW);
+    // Green when the call worked, red when it failed (the 16 colors).
+    assert_eq!(mark_color(&t, "● read  here.txt"), vt100::Color::Idx(2));
+    assert_eq!(mark_color(&t, "● read  missing.txt"), vt100::Color::Idx(1));
+    t.quit();
+}
+
+#[test]
+fn a_resumed_session_shows_its_tool_calls() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("project")).unwrap();
+    std::fs::write(tmp.path().join("project/notes.txt"), "a\nb\n").unwrap();
+    print_run_with(
+        tmp.path(),
+        "read the notes",
+        vec![
+            call("read", json!({"path": "notes.txt"})),
+            call("read", json!({"path": "gone.txt"})),
+            text("The notes say a and b."),
+        ],
+    );
+    let (mut t, _s) = Tui::start_at(tmp, vec![text("more")], |_| {}, &["-c"]);
+    t.wait_for("The notes say a and b.", SLOW);
+    let all = t.all();
+    let at = |s: &str| all.find(s).unwrap_or_else(|| panic!("no {s:?}:\n{all}"));
+    // In order, with the outcome of each call, as when it ran.
+    assert!(
+        at("▌ read the notes") < at("● read  notes.txt  #1"),
+        "{all}"
+    );
+    assert!(
+        at("● read  notes.txt  #1") < at("● read  gone.txt  #2"),
+        "{all}"
+    );
+    assert!(
+        at("● read  gone.txt  #2") < at("The notes say a and b."),
+        "{all}"
+    );
+    assert!(all.contains("└ 2 lines"), "{all}");
+    assert_eq!(mark_color(&t, "● read  notes.txt"), vt100::Color::Idx(2));
+    assert_eq!(mark_color(&t, "● read  gone.txt"), vt100::Color::Idx(1));
+    // /show finds a call from the earlier run by its number.
+    t.typ("/show 1\r");
+    t.wait_paged("notes.txt", SLOW);
     t.quit();
 }
 

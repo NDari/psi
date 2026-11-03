@@ -185,7 +185,8 @@ fn line_of(content: &str, byte: usize) -> usize {
     content[..byte].matches('\n').count() + 1
 }
 
-/// `12\tfoo` lines, as read prints them. Both texts must carry them (or new
+/// `12\tfoo` lines, as read printed them until 2026-11-03 (models still copy
+/// them from older context or habit). Both texts must carry them (or new
 /// may be plain) for this to count as a copy from read.
 fn strip_line_numbers(old: &str, new: &str) -> Option<(String, String)> {
     fn strip(s: &str) -> Option<String> {

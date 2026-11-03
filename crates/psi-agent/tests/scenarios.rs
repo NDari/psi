@@ -154,10 +154,7 @@ async fn parallel_reads_keep_call_order() {
     std::fs::write(f.cwd.join("a"), "A\n").unwrap();
     std::fs::write(f.cwd.join("b"), "B\n").unwrap();
     let (_, a) = f.run("read both").await;
-    assert_eq!(
-        tool_results(&a),
-        [("1\tA".into(), false), ("1\tB".into(), false)]
-    );
+    assert_eq!(tool_results(&a), [("A".into(), false), ("B".into(), false)]);
 }
 
 #[tokio::test]
@@ -275,7 +272,7 @@ async fn write_after_a_bash_rewrite_reads_for_the_model() {
         "{}",
         r[2].0
     );
-    assert!(r[2].0.ends_with("\n1\tv2"), "{}", r[2].0);
+    assert!(r[2].0.ends_with("\nv2"), "{}", r[2].0);
     assert_eq!(r[3], ("Replaced r.sh (1 line).".into(), false));
     assert_eq!(std::fs::read_to_string(f.cwd.join("r.sh")).unwrap(), "v3\n");
 }
@@ -530,7 +527,9 @@ async fn old_tool_results_are_cleared_past_the_trigger() {
     let mut replies = reads(8);
     replies.push(text("done"));
     let f = Fixture::new(replies);
-    write_files(&f.cwd, 8, 200);
+    // 250 lines: about the size 200 numbered lines were before read
+    // dropped its line numbers, so the trigger falls at the same step.
+    write_files(&f.cwd, 8, 250);
     let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
     let out = a.run("read the files").await;
     assert_eq!(out.stop, Stop::Done, "{:?}", out.stop);
@@ -557,13 +556,13 @@ async fn old_tool_results_are_cleared_past_the_trigger() {
     assert_eq!(results.len(), 8);
     assert_eq!(
         results[0],
-        "(Result cleared to save context: read f0.txt, 200 lines. Run it again if you need it.)"
+        "(Result cleared to save context: read f0.txt, 250 lines. Run it again if you need it.)"
     );
     // The most recent are sent whole, and the session keeps them all.
     for r in &results[5..] {
-        assert!(r.contains("line 199"), "{r}");
+        assert!(r.contains("line 249"), "{r}");
     }
-    assert!(tool_results(&a).iter().all(|(t, _)| t.contains("line 199")));
+    assert!(tool_results(&a).iter().all(|(t, _)| t.contains("line 249")));
 }
 
 #[tokio::test]
@@ -1204,7 +1203,7 @@ async fn post_edit_check_once_per_turn_with_edits() {
     let out = a.run("go").await;
     assert_eq!(out.stop, Stop::Done);
     let r = tool_results(&a);
-    assert_eq!(r[0], ("1\tA".into(), false));
+    assert_eq!(r[0], ("A".into(), false));
     assert!(!r[1].0.contains("post-edit"), "{}", r[1].0);
     assert!(
         r[2].0.ends_with(

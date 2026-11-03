@@ -61,14 +61,24 @@ pub fn call_summary(name: &str, args: &Value) -> String {
     }
 }
 
-/// The header shown while a call runs, and when it is committed.
-pub fn call_header(n: usize, name: &str, args: &Value, width: usize, running: Option<f64>) -> Line {
+/// Where a call is: running for so many seconds, or finished.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CallState {
+    Running(f64),
+    Done,
+    Failed,
+}
+
+/// The header shown while a call runs, and when it is committed. The mark
+/// says how it went: dim while running, green when done, red when it failed.
+pub fn call_header(n: usize, name: &str, args: &Value, width: usize, state: CallState) -> Line {
     let mut l = Line::default();
-    let mark = match running {
-        Some(_) => "◌ ",
-        None => "● ",
+    let (mark, style) = match state {
+        CallState::Running(_) => ("◌ ", dim()),
+        CallState::Done => ("● ", theme::style(Token::Success)),
+        CallState::Failed => ("● ", theme::style(Token::Error)),
     };
-    l.push(mark, theme::style(Token::Accent));
+    l.push(mark, style);
     l.push(name, Style::default().bold());
     l.push("  ", Style::default());
     let summary = call_summary(name, args);
@@ -82,7 +92,7 @@ pub fn call_header(n: usize, name: &str, args: &Value, width: usize, running: Op
         Some(url) => l.push_link(cut(&summary, room), Style::default(), &url),
         None => l.push(cut(&summary, room), Style::default()),
     };
-    if let Some(secs) = running {
+    if let CallState::Running(secs) = state {
         l.push(format!("  {secs:.1}s"), dim());
     } else {
         l.push(format!("  #{n}"), dim());
@@ -100,7 +110,12 @@ pub fn call_block(
     is_error: bool,
     width: usize,
 ) -> Vec<Line> {
-    let mut out = vec![call_header(n, name, args, width, None)];
+    let state = if is_error {
+        CallState::Failed
+    } else {
+        CallState::Done
+    };
+    let mut out = vec![call_header(n, name, args, width, state)];
     let lines: Vec<&str> = result.lines().collect();
     let tail = if is_error {
         theme::style(Token::Error)

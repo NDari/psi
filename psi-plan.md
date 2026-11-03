@@ -239,7 +239,7 @@ Pi's default four, plus optional structured helpers.
 
 | Tool | Asks? | Behavior |
 |---|---|---|
-| `read(path, offset?, limit?)` | Never | Line-numbered output. The truncation notice says exactly how to continue ("call read with offset=201"). Results are capped **relative to the context window**, not a fixed byte count (`max_tool_result_size`, default 15% of the window, configurable). |
+| `read(path, offset?, limit?)` | Never | The lines as they are, without numbers (Superseded 2026-11-03, line-numbered output: Qwen's tokenizer makes each digit a token, so the numbers cost about a third more tokens for the same file, 35% over seven files of the cog review; pi's read has none, and edit matches text, so nothing needed them). The truncation notice says exactly how to continue ("call read with offset=201"). Results are capped **relative to the context window**, not a fixed byte count (`max_tool_result_size`, default 15% of the window, configurable). |
 | `write(path, content)` | Gitignored paths only | Overwriting an existing file requires that it was read this session and hasn't changed since. **No override flag** (D-24). Writes to gitignored paths ask, since checkpoints can't recover them. |
 | `edit(path, old_text, new_text)` | Gitignored paths only | See edit matching below. An edit that changes nothing **fails**. Edits to gitignored paths ask, as for write. |
 | `bash(command, timeout?)` | Always-ask list only (§8.3) | Runs inside the isolation boundary (§8.4), in a fresh process each time. Output truncated head+tail to `max_tool_result_size`, with a notice. Non-zero exit status reported clearly. |
@@ -642,6 +642,7 @@ A custom line-based differential renderer on crossterm, **inline** (no alternate
 An inline TUI can't redraw the past, so each piece is committed once, in a form that stays useful:
 - Commit text a paragraph at a time, and code blocks whole.
 - Commit a tool call as a header, a one-line summary, up to 4 output lines and up to 20 diff lines. `/show <n>` displays the full call.
+- Keep who did what easy to follow (2026-11-03, after pi's colored blocks): the mark before a call is dim while it runs, green when it worked and red when it failed; the user's own messages have a bar (`▌`) down the left in the user color; each step of the model starts after a blank line; and a resumed session shows its tool calls as they were committed, so `/show <n>` works for them too. Markers in the 16 colors, not background bands.
 - Never commit thinking.
 - Don't redraw committed lines on resize.
 - Start on a cleared screen by printing one newline per row, so earlier content scrolls into scrollback instead of being erased.
