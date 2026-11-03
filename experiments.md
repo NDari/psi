@@ -106,6 +106,58 @@ Flags worth sweeping: `-fa`, `-b`/`-ub`, `-ctk`/`-ctv` (KV cache type), `-t`, `-
 
 **Still open:** whether one system-prompt line naming the MCP tools and what they are for changes that (pi lists MCP servers in its system prompt); model-facing text, so a separate run. Projects big enough that grep misleads (many same-named symbols) would be the case where these tools should matter.
 
+### Prompt cache lost after a long final answer (added 2026-11-02)
+
+**Question:** why does the next turn re-read a long final answer instead of reusing it from the prompt cache, and can Psi avoid it?
+
+**Context:** in a hands-on session in `../cog` (the 35B on the Mac, `~/.psi/sessions/-home-ndari-projects-cog-/2026-11-03-0334_408b21c4.*`), two long answers that ended a turn (about 1,900 and 2,000 tokens) were each reprocessed whole on the next user prompt: `cache_n` fell about 1,905 and 2,030 tokens short of the previous request's prompt plus output. That put first token at about 3.5 to 4 s against about 0.3 s. Short final answers ("Done - ...", about 50 tokens) and assistant messages with tool calls were reused fully. The text Psi sent back is byte-identical to what was streamed, so the history itself is right. The divergence starts about 4 tokens before the answer's text, which suggests the model emitted something at the start (perhaps an empty think block) that llama-server stripped from the content, so the re-rendered history no longer matches. Unverified.
+
+Pi doesn't have the problem: the same questions in pi against the same server (`~/.pi/agent/sessions/--home-ndari-projects-cog--/2026-11-03T04-19-23-534Z_*.jsonl`, thinking level medium) reused the cache fully after both long answers (1,364 and 2,035 tokens). So the cause is in how Psi builds its requests, not something every client hits. Start by comparing a pi request with a Psi one (`chat_template_kwargs`, reasoning fields, how the assistant message is sent back).
+
+**How:**
+1. Render the next request with llama-server's `/apply-template` and compare it with the tokens of the earlier prompt plus the raw output (`/completion` with `n_probs` or the server's verbose log shows the raw tokens) to find the exact divergence.
+2. If it's a stripped empty think block: check whether `chat_template_kwargs.enable_thinking: false` or `--reasoning off` on the server stops the model emitting it, or whether `--reasoning-format none` keeps it in the content so the history matches (§4.2 "render prompts exactly as the server would").
+3. Check whether Gemma shows the same.
+
+**Open:**
+- Costs a few seconds per turn after a long answer, not correctness; worth it if long answers are common in daily use.
+- Keeping a think block in the content means Psi has to hide it in the TUI.
+
+### Does Psi's prompt steer the model to code over docs? (added 2026-11-02)
+
+**Question:** asked to review a project, why does the model in Psi read only source files while in pi it reads the README, docs and plans first?
+
+**Context:** the same review in `../cog` in both harnesses, the 35B on the Mac, with llama-server restarted between them so no cache carried over (sessions: Psi `~/.psi/sessions/-home-ndari-projects-cog-/2026-11-03-0334_408b21c4.jsonl`, pi `~/.pi/agent/sessions/--home-ndari-projects-cog--/2026-11-03T04-19-23-534Z_*.jsonl`).
+- Psi: `find`, `wc -l`, `ls -la`, then 19 `.go` files read whole, then `go test`, `go vet`, `go test -race`. It never opened `README.md`, `docs/`, `plan/` or `examples/`, though `ls -la` listed them and cog's CLAUDE.md (in the system prompt) says the semantics are documented in README.md and docs/. Asked about the language itself, it answered with no tool calls and began "I've read through the language docs, semantics, stdlib", which it hadn't.
+- Pi: `cat README.md` in its first step, listed `docs/`, `plan/` and `examples/`, read `plan/known-issues.md`, `plan/design-review.md` and `plan/semantic-foundation.md`, then a few source files (some with `limit`). For the language question it read `docs/words.md`, `semantics.md`, `modules.md`, `dictionaries.md`, `metaprogramming.md`, `embedding.md` and the examples.
+
+**Candidate causes in Psi's prompt:**
+- "Understand before you change: read the relevant code first, and look for existing helpers, conventions and tests." It names code, never docs.
+- Pi's prompt has a "Pi documentation" section ("read the docs and examples, and follow .md cross-references", "Always read pi .md files completely"). It's about pi's own docs, but it may prime the model to read `.md` files in general. Psi has nothing like it.
+- The CLAUDE.md "Implementation map" lists source files; both harnesses load it (pi reads CLAUDE.md too), so it doesn't explain the difference alone.
+
+**Confounds:** the prompts weren't word-for-word the same. Psi's first was "What are the biggest issues that you see with the way it is implemented?", which points at code; pi's was "What improvements would you suggest to it?". Psi's language question ("what do you think of the language itself?") didn't say to look, while pi's did ("now take a look at the language itself"). Pi's session also began with "hi", and ran at thinking level medium (no thinking blocks were recorded). One run each, so this is a lead, not a finding.
+
+**How:**
+1. Rerun both with identical prompts, pasted from one file, the server restarted before each, and compare which files each reads.
+2. If Psi still skips the docs, change the line to name docs too (for example "read the relevant docs and code first: README, docs/, and the files the task touches") and rerun once.
+3. Model-facing text, so an eval run after the change (D-32); check that it doesn't make the model read docs on small fix tasks where they don't help.
+
+**Open:**
+- The made-up "I've read the docs" claim is a separate model habit; a prompt line won't stop it, and catching it in the harness (a claim of reading files that no tool call read) is a bigger idea.
+
+### Record the model in the session (added 2026-11-02)
+
+**Question:** should a session record which model it ran with? Every entry and request now says `"model":"local"` (the llama-server alias), so a session file can't tell the 35B from Gemma afterwards.
+
+**Context:** Psi already reads `model_path` from `/props` for the status line (`crates/psi-ai/src/client.rs`), but doesn't write it to the session. The `../cog` session above only shows the 35B through the wire log's server reply and the Mac's `/props`. Pi has the same gap: its session's `model_change` entry says `"modelId":"local"`.
+
+**How:** put the `/props` model file name (and maybe `n_ctx` and the server build, `system_fingerprint`) in `session_info`, and a new entry when the poll sees the server's model change mid-session. Not model-facing, so no eval run; a test with the replay server.
+
+**Open:**
+- Whether the per-message `model` should stay the alias or become the file name; what pi records there is unchecked.
+- `psi inspect` and the eval reports could show it once it's recorded.
+
 ## Done
 
 ### A faster 35B on the Mac for development (added 2026-11-01)
