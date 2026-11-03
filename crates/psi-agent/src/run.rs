@@ -610,6 +610,22 @@ impl Agent {
         self
     }
 
+    /// The model server came up after the agent was made without it (the
+    /// TUI starts with none running): its window, the result cap that
+    /// follows from it, its record, and whether to ask for progress.
+    pub fn connect(
+        &mut self,
+        n_ctx: u64,
+        max_result_chars: usize,
+        server: Option<Value>,
+        progress: bool,
+    ) {
+        self.cfg.n_ctx = n_ctx;
+        self.ctx.max_result_chars = max_result_chars;
+        self.server = server;
+        self.client = self.client.clone().with_progress(progress);
+    }
+
     /// The server as the session last recorded it.
     fn recorded_server(&self) -> Option<&Value> {
         self.session

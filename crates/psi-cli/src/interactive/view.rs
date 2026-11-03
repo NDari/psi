@@ -268,6 +268,8 @@ pub struct Status {
     pub busy: Option<String>,
     /// "plan", or the steps done while a plan is carried out.
     pub plan: Option<String>,
+    /// The model server's address while it isn't up.
+    pub offline: Option<String>,
 }
 
 pub fn status_line(s: &Status, width: usize) -> Line {
@@ -281,7 +283,10 @@ pub fn status_line(s: &Status, width: usize) -> Line {
         l.push("  ", Style::default());
     }
     l.push(&s.model, dim());
-    if let Some(pct) = (s.prompt_tokens * 100).checked_div(s.n_ctx) {
+    if s.offline.is_some() {
+        l.push(" · ", dim());
+        l.push("no model server", theme::style(Token::Warning));
+    } else if let Some(pct) = (s.prompt_tokens * 100).checked_div(s.n_ctx) {
         // Like pi-powerline-footer: a warning from 70%, an error from 90%.
         let style = match pct {
             90.. => theme::style(Token::Error),

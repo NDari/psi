@@ -17,6 +17,12 @@ use super::ui::UiMsg;
 #[derive(Debug)]
 pub enum Cmd {
     Prompt(String),
+    /// The model server is up (the TUI started without one).
+    Connect {
+        n_ctx: u64,
+        server: Option<serde_json::Value>,
+        progress: bool,
+    },
     /// `!cmd` output to add to the context of the next prompt.
     Context(String),
     Undo,
@@ -70,6 +76,15 @@ impl Worker {
                 Cmd::Prompt(p) => {
                     let out: RunOutcome = self.agent.run(&p).await;
                     UiMsg::RunDone(out)
+                }
+                Cmd::Connect {
+                    n_ctx,
+                    server,
+                    progress,
+                } => {
+                    let chars = crate::run_mode::result_chars(n_ctx);
+                    self.agent.connect(n_ctx, chars, server, progress);
+                    continue;
                 }
                 Cmd::Context(text) => match self.agent.add_context("bash", &text) {
                     Ok(()) => continue,

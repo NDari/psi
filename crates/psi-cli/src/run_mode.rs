@@ -153,6 +153,8 @@ pub struct Prepared {
     pub agent: Agent,
     pub profile: ModelProfile,
     pub n_ctx: u64,
+    /// The model server wasn't up (the TUI only): connect when it is.
+    pub offline: bool,
     pub tmpdir: PathBuf,
     pub cwd: PathBuf,
     pub home: Option<PathBuf>,
@@ -303,38 +305,17 @@ pub async fn prepare(args: &RunArgs, approver: Arc<dyn Approver>) -> Result<Prep
 
     // D-09: the template must support tool calls; take the window from /props.
     let props = client.props().await;
-    // For the session record: requests name only the alias.
-    let server = props.as_ref().ok().map(|p| {
-        let file = p
-            .model_path
-            .as_deref()
-            .and_then(|m| Path::new(m).file_name())
-            .map(|f| f.to_string_lossy().into_owned());
-        serde_json::json!({"model_file": file, "model_path": p.model_path,
-                           "n_ctx": p.n_ctx, "build": p.build_info})
-    });
-    // A server with /props is llama-server: in the TUI, ask it for
-    // prompt-processing progress (other servers may refuse the field).
-    let client = client.with_progress(props.is_ok() && mode == "interactive");
-    let n_ctx = match props {
-        Ok(p) => {
-            if p.supports_tool_calls == Some(false) {
-                bail!("{}", AiError::NoToolSupport);
-            }
-            match profile.context_window {
-                ContextWindow::Tokens(n) => n,
-                ContextWindow::Auto => p.n_ctx.unwrap_or(FALLBACK_CONTEXT),
-            }
+    // The TUI starts without a server and connects when it comes up; the
+    // other modes need it now.
+    let offline = matches!(props, Err(AiError::Connect { .. })) && mode == "interactive";
+    let (n_ctx, server, progress) = match props {
+        Err(e @ AiError::Connect { .. }) if !offline => {
+            bail!("{e}. Is llama-server running? (just llm-up)")
         }
-        Err(e @ AiError::Connect { .. }) => bail!("{e}. Is llama-server running? (just llm-up)"),
-        Err(e) => {
-            tracing::warn!("could not read /props: {e}");
-            match profile.context_window {
-                ContextWindow::Tokens(n) => n,
-                ContextWindow::Auto => FALLBACK_CONTEXT,
-            }
-        }
+        Err(AiError::Connect { .. }) => (profile_window(&profile, None), None, false),
+        props => server_facts(&profile, props, mode == "interactive")?,
     };
+    let client = client.with_progress(progress);
 
     let sessions = home
         .as_deref()
@@ -406,8 +387,7 @@ pub async fn prepare(args: &RunArgs, approver: Arc<dyn Approver>) -> Result<Prep
         &resources.prompt_skills(),
         facts,
     );
-    let max_chars = (n_ctx as f64 * RESULT_SHARE * CHARS_PER_TOKEN) as usize;
-    let mut ctx = ToolCtx::new(&cwd, &tmpdir, max_chars);
+    let mut ctx = ToolCtx::new(&cwd, &tmpdir, result_chars(n_ctx));
     ctx.sandbox = sandbox;
     let mut budgets = Budgets::default();
     if let Some(n) = args.max_turns {
@@ -453,6 +433,7 @@ pub async fn prepare(args: &RunArgs, approver: Arc<dyn Approver>) -> Result<Prep
         agent,
         profile,
         n_ctx,
+        offline,
         tmpdir,
         cwd,
         home,
@@ -463,6 +444,49 @@ pub async fn prepare(args: &RunArgs, approver: Arc<dyn Approver>) -> Result<Prep
         ext_sources,
         resources,
     })
+}
+
+/// The window: the profile's, or the server's, or a fallback.
+fn profile_window(profile: &ModelProfile, server: Option<u64>) -> u64 {
+    match profile.context_window {
+        ContextWindow::Tokens(n) => n,
+        ContextWindow::Auto => server.unwrap_or(FALLBACK_CONTEXT),
+    }
+}
+
+/// The cap on one tool result, in characters, for a window.
+pub fn result_chars(n_ctx: u64) -> usize {
+    (n_ctx as f64 * RESULT_SHARE * CHARS_PER_TOKEN) as usize
+}
+
+/// What `/props` tells: the window, the server's record for the session,
+/// and whether to ask for prompt progress (llama-server in the TUI; other
+/// servers may refuse the field). Fails when the template can't call tools.
+pub fn server_facts(
+    profile: &ModelProfile,
+    props: Result<psi_ai::Props, AiError>,
+    interactive: bool,
+) -> Result<(u64, Option<Value>, bool)> {
+    match props {
+        Ok(p) => {
+            if p.supports_tool_calls == Some(false) {
+                bail!("{}", AiError::NoToolSupport);
+            }
+            let file = p
+                .model_path
+                .as_deref()
+                .and_then(|m| Path::new(m).file_name())
+                .map(|f| f.to_string_lossy().into_owned());
+            // For the session record: requests name only the alias.
+            let server = serde_json::json!({"model_file": file, "model_path": p.model_path,
+                                            "n_ctx": p.n_ctx, "build": p.build_info});
+            Ok((profile_window(profile, p.n_ctx), Some(server), interactive))
+        }
+        Err(e) => {
+            tracing::warn!("could not read /props: {e}");
+            Ok((profile_window(profile, None), None, false))
+        }
+    }
 }
 
 /// A warning when opening the session skipped lines it couldn't read.

@@ -1246,6 +1246,47 @@ fn the_stats_sit_under_the_input_box_and_user_text_is_white() {
 }
 
 #[test]
+fn starts_without_a_model_server_and_connects_when_it_is_up() {
+    // A port nothing listens on yet.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let (mut t, _unused) = Tui::start(vec![], move |p| {
+        let models = json!({"models": [{"id": "local", "base_url": format!("http://127.0.0.1:{port}"), "max_output": 256}]});
+        std::fs::write(
+            p.parent().unwrap().join("home/.psi/models.jsonc"),
+            models.to_string(),
+        )
+        .unwrap();
+    });
+    t.wait_for("no model server at http://127.0.0.1", SLOW);
+    t.wait_screen("no model server", SLOW);
+    // Commands work; a prompt stays in the box instead of being sent.
+    t.typ("/help\r");
+    t.wait_paged("/resume", SLOW);
+    t.typ("hello there\r");
+    t.wait_for("send again", SLOW);
+    t.wait_screen("› hello there", SLOW);
+    assert!(!t.all().contains("▌ hello there"), "{}", t.all());
+    // The server comes up: Psi connects, and the prompt goes through.
+    let server = psi_ai::replay::ReplayServer::start_on(port, vec![text("hi back")]).unwrap();
+    t.wait_for("connected to the model server", SLOW);
+    t.typ("\r");
+    t.wait_for("hi back", SLOW);
+    assert!(t.all().contains("▌ hello there"), "{}", t.all());
+    let screen = t.contents();
+    let status = screen
+        .lines()
+        .rfind(|l| l.starts_with("local"))
+        .unwrap_or("");
+    assert!(!status.contains("no model server"), "{screen}");
+    assert_eq!(server.chat_requests().len(), 1);
+    t.quit();
+}
+
+#[test]
 fn the_input_box_is_pinned_to_the_bottom() {
     let (mut t, _s) = Tui::start(
         vec![call("read", json!({"path": "a.txt"})), text("ok")],

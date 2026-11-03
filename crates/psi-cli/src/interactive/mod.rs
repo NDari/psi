@@ -152,6 +152,32 @@ fn clear_terminal_status() {
     let _ = out.write_all(&bytes);
 }
 
+/// Asks the model server for its facts every two seconds until it answers,
+/// then tells the UI (the TUI started without one).
+async fn wait_for_server(
+    profile: psi_ai::profile::ModelProfile,
+    ui: tokio::sync::mpsc::UnboundedSender<ui::UiMsg>,
+) {
+    let client = psi_ai::Client::new(&profile.base_url).with_headers(&profile.headers);
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let props = client.props().await;
+        if matches!(props, Err(psi_ai::AiError::Connect { .. })) {
+            continue;
+        }
+        let msg = match crate::run_mode::server_facts(&profile, props, true) {
+            Ok((n_ctx, server, progress)) => ui::UiMsg::Connected {
+                n_ctx,
+                server,
+                progress,
+            },
+            Err(e) => ui::UiMsg::Error(format!("  {e:#}")),
+        };
+        let _ = ui.send(msg);
+        return;
+    }
+}
+
 fn restore_terminal() {
     let mut out = std::io::stdout();
     let _ = execute!(
@@ -175,6 +201,7 @@ pub fn run(args: RunArgs) -> Result<ExitCode> {
         agent,
         profile,
         n_ctx,
+        offline,
         tmpdir,
         cwd,
         home,
@@ -230,6 +257,7 @@ pub fn run(args: RunArgs) -> Result<ExitCode> {
     let status = Status {
         model: profile.id.clone(),
         n_ctx,
+        offline: offline.then(|| profile.base_url.clone()),
         mode: info["mode"].as_str().unwrap_or("auto").into(),
         network: info["network"].as_str().unwrap_or("on").into(),
         unisolated: info["isolation"] == "unavailable",
@@ -238,6 +266,13 @@ pub fn run(args: RunArgs) -> Result<ExitCode> {
     };
 
     let mut warnings = warnings;
+    if offline {
+        warnings.push(format!(
+            "no model server at {} yet: sessions, settings and commands work, and Psi connects when it is up (just llm-up)",
+            profile.base_url
+        ));
+        rt.spawn(wait_for_server(profile.clone(), ui_tx.clone()));
+    }
     if let Some(w) = missing_search_tools(on_path) {
         warnings.push(w);
     }

@@ -169,6 +169,7 @@ evals/              # Task sets, graders, adapters (not embedded)
   - `chat_template_caps.supports_tool_calls`: refuse to start with a clear message if false.
   - `default_generation_settings.n_ctx`: the per-slot context window.
   - The model file name, for the status line. Poll every few seconds so a server restart shows up.
+  - No server answering: print runs and evals stop with a clear message; the TUI starts anyway (2026-11-03), so sessions, settings and slash commands work. The status line says "no model server", a prompt stays in the box with a note to start the server, and Psi checks every two seconds and connects when it answers (window, result cap, the session's server record, prompt progress). A server that goes away mid-session is not covered: its requests fail as before.
 - **Render prompts exactly as the server would** (for example, how text blocks are joined). Differences change scores and break the prompt cache.
 - **Keep requests append-only**, so the prompt cache hits.
 - **Template errors are deterministic 500s:** don't retry them. Only one system message, at the start.

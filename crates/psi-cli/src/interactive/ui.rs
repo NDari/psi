@@ -42,6 +42,12 @@ pub enum UiMsg {
     Blocked(BlockedRequest, oneshot::Sender<BlockedChoice>),
     Pause(String, oneshot::Sender<bool>),
     RunDone(RunOutcome),
+    /// The model server is up (the TUI started without one).
+    Connected {
+        n_ctx: u64,
+        server: Option<serde_json::Value>,
+        progress: bool,
+    },
     Info(String),
     Error(String),
     /// The `input` event's answer: the text to send on, or None when a
@@ -1165,6 +1171,15 @@ impl<W: Write> App<W> {
             self.queued.push_back((t, follow_up));
             return;
         }
+        // No model server yet: the prompt stays in the box until it is up.
+        if let Some(url) = &self.status.offline {
+            let msg =
+                format!("  no model server at {url} yet; start it (just llm-up) and send again");
+            if self.editor.text().is_empty() {
+                self.editor.set_text(&t);
+            }
+            return self.error(&msg);
+        }
         self.commit_user(&t);
         self.running = Some(Running {
             started: Instant::now(),
@@ -1455,6 +1470,25 @@ impl<W: Write> App<W> {
                 self.flush_text();
                 self.pause = Some((reason, tx));
                 self.bell("paused: waiting for you");
+            }
+            UiMsg::Connected {
+                n_ctx,
+                server,
+                progress,
+            } => {
+                self.status.offline = None;
+                self.status.n_ctx = n_ctx;
+                let file = server
+                    .as_ref()
+                    .and_then(|s| s["model_file"].as_str())
+                    .map(|f| format!(" ({f})"))
+                    .unwrap_or_default();
+                self.send(Cmd::Connect {
+                    n_ctx,
+                    server,
+                    progress,
+                });
+                self.info(&format!("  connected to the model server{file}"));
             }
             UiMsg::RunDone(out) => {
                 self.flush_text();
