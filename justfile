@@ -18,8 +18,9 @@ qwen := "-hf bartowski/Qwen_Qwen3.5-4B-GGUF:Q4_K_M --temp 0.7 --top-p 0.8 --top-
 gemma := "-hf google/gemma-4-12B-it-qat-q4_0-gguf:Q4_0 --temp 1.0 --top-p 0.95 --top-k 64 --min-p 0"
 # A larger model, not yet a reference model: the owner's command on the Mac,
 # with thinking off since H-09 (as well on the quick set, a third less output).
-# Sampling is the server's default.
-qwen35b := '-hf unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL -fa on -np 1 --spec-draft-n-max 3 --chat-template-kwargs {"preserve_thinking":true}'
+# Sampling is the server's default. -ub 2048 reads prompts about 8% faster up
+# to 16K of context than the default 512 (1% at 40K; llama-bench, 2026-11-03).
+qwen35b := '-hf unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL -fa on -np 1 --spec-draft-n-max 3 -ub 2048 --chat-template-kwargs {"preserve_thinking":true}'
 
 # List the recipes
 default:

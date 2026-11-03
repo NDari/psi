@@ -24,6 +24,17 @@ Flags worth sweeping: `-fa`, `-b`/`-ub`, `-ctk`/`-ctv` (KV cache type), `-t`, `-
 - Run it when the GPU is otherwise idle, or both it and anything else running are skewed.
 - Maybe a `just bench <model>` recipe once the useful flag set is known.
 
+**Run 2026-11-03, prompt batch size for the 35B on the Mac** (llama-bench, build 8642541b2, the UD-Q4_K_XL file, `-fa 1 -ngl 99 -b 4096`, reading 4,096 new tokens on top of 0, 16K and 40K already in context, 2 repetitions; tok/s):
+
+| `-ub` | depth 0 | depth 16K | depth 40K |
+|---|---|---|---|
+| 512 (default) | 1554 | 994 | 656 |
+| 1024 | 1605 | 1052 | 666 |
+| 2048 | 1681 | 1082 | 665 |
+| 4096 | 1707 | 1075 | 617 |
+
+2048 is about 8% faster up to 16K and the same at 40K; 4096 is slower deep in the context. Adopted: `-ub 2048` in the `qwen35b` recipe, and the Mac server restarted with it. The batch size isn't what slows reading late in a session: the speed falls with depth at every size (attention over the whole context), so the levers there are fewer tokens read (no line numbers, clearing less often) rather than server flags.
+
 ### Speculative decoding for Gemma (added 2026-11-01)
 
 **Question:** can Gemma 4 12B generate faster with speculative decoding, the way Qwen does with MTP (about 1.8x)? Gemma's GGUF has no MTP layers, so `llm-up gemma` runs with `--spec-type none`: about 58 tok/s generation and 2,500 tok/s prompt on the 4070 Ti SUPER (2026-11-01 eval run).
