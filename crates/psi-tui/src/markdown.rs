@@ -519,8 +519,11 @@ impl Prose {
                     let plain = self.cur.plain();
                     let text = plain.get(at..).unwrap_or("");
                     let same = url == text || url.strip_prefix("mailto:") == Some(text);
+                    // The text is clickable where the terminal knows OSC 8;
+                    // the URL stays visible for the rest and for copying.
+                    self.cur.link_from(at, &url);
                     if !url.is_empty() && !same {
-                        self.cur.push(format!(" ({url})"), muted());
+                        self.cur.push_link(format!(" ({url})"), muted(), &url);
                     }
                 }
             }
@@ -860,6 +863,18 @@ mod tests {
                 .iter()
                 .any(|s| s.text == "docs" && s.style.underline)
         );
+        // The text, its URL and an autolink open in the terminal (OSC 8).
+        let link = |t: &str| {
+            ls[0]
+                .spans
+                .iter()
+                .find(|s| s.text.contains(t))
+                .and_then(|s| s.link.clone())
+        };
+        assert_eq!(link("docs").as_deref(), Some("https://x.dev"));
+        assert_eq!(link("(https://x.dev)").as_deref(), Some("https://x.dev"));
+        assert_eq!(link("https://y.dev").as_deref(), Some("https://y.dev"));
+        assert_eq!(link("see"), None);
         let ls = render_block("~~gone~~ kept", 80);
         assert!(ls[0].spans[0].style.strike);
         assert_eq!(

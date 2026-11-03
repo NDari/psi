@@ -73,7 +73,15 @@ pub fn call_header(n: usize, name: &str, args: &Value, width: usize, running: Op
     l.push("  ", Style::default());
     let summary = call_summary(name, args);
     let room = width.saturating_sub(name.len() + 14);
-    l.push(cut(&summary, room), Style::default());
+    // A file the call touched is a link (OSC 8) the terminal can open.
+    let file = matches!(name, "read" | "write" | "edit")
+        .then(|| args.get("path").and_then(Value::as_str))
+        .flatten()
+        .and_then(|p| psi_tui::style::file_url(std::path::Path::new(p)));
+    match file {
+        Some(url) => l.push_link(cut(&summary, room), Style::default(), &url),
+        None => l.push(cut(&summary, room), Style::default()),
+    };
     if let Some(secs) = running {
         l.push(format!("  {secs:.1}s"), dim());
     } else {

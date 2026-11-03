@@ -19,6 +19,7 @@ yours.
 - [ ] A tool call is committed once: header, a one-line summary, up to 4 output lines, and up to 20 diff lines for an edit. (auto)
 - [ ] `/show <n>` prints the whole call. (auto)
 - [ ] Code blocks keep their fence lines (dimmed); copying a block from the terminal gives the exact code.
+- [ ] Ctrl+click (ghostty) on a read/edit/write path opens the file; on a markdown link opens the URL; also inside tmux with `terminal-features ',*:hyperlinks'`. (auto: the sequences)
 - [ ] Thinking is never shown.
 - [ ] BEL rings when a run ends or an approval appears while the terminal window is unfocused (switch away, then back).
 - [ ] In ghostty inside tmux (`focus-events on`, `allow-passthrough on`): switching to another pane during a run gives a desktop notification when it ends or an approval appears; the tab shows progress while working; the pane title reads `ψ <dir> · working` / `· waiting`, and the old title is back after quitting. (auto: the sequences)

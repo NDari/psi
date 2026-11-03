@@ -303,14 +303,17 @@ pub fn str_width(s: &str) -> usize {
     s.graphemes(true).map(UnicodeWidthStr::width).sum()
 }
 
-/// One grapheme of a line, with its style and display width.
-type Cell<'a> = (&'a str, Style, usize);
+/// One grapheme of a line, with its style, display width and link.
+type Cell<'a> = (&'a str, Style, usize, Option<&'a String>);
 
 /// A run of text in one style.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Span {
     pub text: String,
     pub style: Style,
+    /// A hyperlink (OSC 8) around the text. Only Psi sets one; text from
+    /// tools and models has its escapes stripped.
+    pub link: Option<String>,
 }
 
 impl Span {
@@ -319,6 +322,7 @@ impl Span {
         Span {
             text: sanitize(text.as_ref()),
             style,
+            link: None,
         }
     }
 }
@@ -417,21 +421,57 @@ impl Line {
         self
     }
 
+    /// Appends text that is a hyperlink to `url` (OSC 8). A URL that isn't
+    /// http, https, mailto or file, or holds control characters, is left out
+    /// and the text is plain.
+    pub fn push_link(&mut self, s: impl AsRef<str>, style: Style, url: &str) -> &mut Self {
+        let text = sanitize(s.as_ref());
+        self.push_span(text, style, link_target(url));
+        self
+    }
+
+    /// Makes the text from byte `at` of [`Line::plain`] to the end a link.
+    pub fn link_from(&mut self, at: usize, url: &str) {
+        let Some(url) = link_target(url) else { return };
+        let mut start = 0;
+        let mut out = Vec::with_capacity(self.spans.len() + 1);
+        for mut span in std::mem::take(&mut self.spans) {
+            let end = start + span.text.len();
+            if end > at && start < at && span.text.is_char_boundary(at - start) {
+                let tail = span.text.split_off(at - start);
+                out.push(span.clone());
+                span.text = tail;
+            }
+            if end > at {
+                span.link = Some(url.clone());
+            }
+            start = end;
+            out.push(span);
+        }
+        for s in out {
+            self.push_span(s.text, s.style, s.link);
+        }
+    }
+
     /// Appends all spans of `other`.
     pub fn append(&mut self, other: Line) -> &mut Self {
         for span in other.spans {
-            self.push_clean(span.text, span.style);
+            self.push_span(span.text, span.style, span.link);
         }
         self
     }
 
     fn push_clean(&mut self, text: String, style: Style) {
+        self.push_span(text, style, None);
+    }
+
+    fn push_span(&mut self, text: String, style: Style, link: Option<String>) {
         if text.is_empty() {
             return;
         }
         match self.spans.last_mut() {
-            Some(last) if last.style == style => last.text.push_str(&text),
-            _ => self.spans.push(Span { text, style }),
+            Some(last) if last.style == style && last.link == link => last.text.push_str(&text),
+            _ => self.spans.push(Span { text, style, link }),
         }
     }
 
@@ -458,7 +498,7 @@ impl Line {
             let w = str_width(&span.text);
             if used + w <= width {
                 used += w;
-                out.push_clean(span.text.clone(), span.style);
+                out.push_span(span.text.clone(), span.style, span.link.clone());
                 continue;
             }
             let mut text = String::new();
@@ -470,7 +510,7 @@ impl Line {
                 used += gw;
                 text.push_str(g);
             }
-            out.push_clean(text, span.style);
+            out.push_span(text, span.style, span.link.clone());
             break;
         }
         out
@@ -487,7 +527,11 @@ impl Line {
         let cells: Vec<Cell<'_>> = self
             .spans
             .iter()
-            .flat_map(|s| s.text.graphemes(true).map(move |g| (g, s.style, g.width())))
+            .flat_map(|s| {
+                s.text
+                    .graphemes(true)
+                    .map(move |g| (g, s.style, g.width(), s.link.as_ref()))
+            })
             .collect();
         let mut tokens: Vec<(bool, &[Cell<'_>])> = Vec::new();
         let mut start = 0;
@@ -504,8 +548,8 @@ impl Line {
         let mut cur_w = 0;
         let mut pending_space: &[Cell<'_>] = &[];
         let put = |line: &mut Line, cells: &[Cell<'_>]| {
-            for (g, st, _) in cells {
-                line.push_clean((*g).to_string(), *st);
+            for (g, st, _, link) in cells {
+                line.push_span((*g).to_string(), *st, link.cloned());
             }
         };
         for (is_space, toks) in tokens {
@@ -558,9 +602,19 @@ impl Line {
     /// Control characters are skipped even if a span was built by hand.
     pub fn write_ansi(&self, out: &mut impl Write) -> io::Result<()> {
         let mut current = Style::new();
+        let mut link: Option<&String> = None;
         for span in &self.spans {
             if span.text.is_empty() {
                 continue;
+            }
+            if span.link.as_ref() != link {
+                if link.is_some() {
+                    out.write_all(b"\x1b]8;;\x1b\\")?;
+                }
+                if let Some(url) = &span.link {
+                    write!(out, "\x1b]8;;{url}\x1b\\")?;
+                }
+                link = span.link.as_ref();
             }
             if span.style != current {
                 if span.style.is_plain() {
@@ -576,6 +630,9 @@ impl Line {
                 out.write_all(span.text.as_bytes())?;
             }
         }
+        if link.is_some() {
+            out.write_all(b"\x1b]8;;\x1b\\")?;
+        }
         if !current.is_plain() {
             out.write_all(b"\x1b[0m")?;
         }
@@ -583,9 +640,83 @@ impl Line {
     }
 }
 
+/// A URL fit for an OSC 8 link: a known scheme, no control characters or
+/// spaces, not absurdly long.
+fn link_target(url: &str) -> Option<String> {
+    let known = ["http://", "https://", "mailto:", "file://"]
+        .iter()
+        .any(|p| {
+            url.len() > p.len()
+                && url
+                    .get(..p.len())
+                    .is_some_and(|s| s.eq_ignore_ascii_case(p))
+        });
+    let clean = !url.chars().any(|c| c.is_control() || c.is_whitespace());
+    (known && clean && url.len() <= 2048).then(|| url.to_owned())
+}
+
+/// A `file://` URL for a local path (OSC 8), with the bytes a URL can't hold
+/// percent-encoded.
+pub fn file_url(path: &std::path::Path) -> Option<String> {
+    let abs = std::path::absolute(path).ok()?;
+    let mut url = String::from("file://");
+    for b in abs.to_string_lossy().bytes() {
+        if b.is_ascii_alphanumeric() || b"/-._~".contains(&b) {
+            url.push(b as char);
+        } else {
+            url.push_str(&format!("%{b:02X}"));
+        }
+    }
+    Some(url)
+}
+
 #[cfg(test)]
 mod ansi_tests {
     use super::*;
+
+    #[test]
+    fn links_open_and_close_around_their_text() {
+        let mut l = Line::raw("see ");
+        l.push_link("docs", Style::new().underline(), "https://example.com/a");
+        l.push(" now", Style::new());
+        let mut out = Vec::new();
+        l.write_ansi(&mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert_eq!(
+            s,
+            "see \x1b]8;;https://example.com/a\x1b\\\x1b[0;4mdocs\x1b]8;;\x1b\\\x1b[0m now"
+        );
+        // Truncating and wrapping keep the link.
+        assert_eq!(
+            l.truncate(6).spans[1].link.as_deref(),
+            Some("https://example.com/a")
+        );
+        let wrapped = l.wrap(5);
+        assert!(
+            wrapped
+                .iter()
+                .any(|w| w.spans.iter().any(|s| s.link.is_some()))
+        );
+    }
+
+    #[test]
+    fn only_known_schemes_become_links() {
+        let mut l = Line::new();
+        l.push_link("x", Style::new(), "javascript:alert(1)");
+        l.push_link("y", Style::new(), "https://a b");
+        assert!(l.spans.iter().all(|s| s.link.is_none()));
+        let mut m = Line::raw("text link");
+        m.link_from(5, "https://example.com");
+        assert_eq!(m.spans.len(), 2);
+        assert_eq!(m.spans[1].text, "link");
+        assert_eq!(m.spans[1].link.as_deref(), Some("https://example.com"));
+    }
+
+    #[test]
+    fn file_urls_are_absolute_and_encoded() {
+        let u = file_url(std::path::Path::new("/tmp/a b/ü.rs")).unwrap();
+        assert_eq!(u, "file:///tmp/a%20b/%C3%BC.rs");
+    }
 
     #[test]
     fn sgr_becomes_styles_and_other_escapes_drop() {
@@ -699,6 +830,7 @@ mod tests {
             spans: vec![Span {
                 text: "x\x1b[2Jy".into(),
                 style: Style::new(),
+                link: None,
             }],
         };
         assert_eq!(ansi(&hand), "xy");

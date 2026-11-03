@@ -890,7 +890,7 @@ Each phase ends with its acceptance criteria passing in the local check, where a
 2. Notifications when a turn ends or an approval waits while unfocused (OSC 9/777/99, tmux passthrough), with progress (OSC 9;4) and a title status. Done 2026-11-02: `psi_tui::term`; the `notify` setting (`auto`, `bell`, `off`); title `ψ <dir> · working`/`· waiting`, pushed and popped on the title stack; tmux needs `focus-events on` and `allow-passthrough on`.
 3. The `@` file list: refresh it (it is built once per session), walk off the UI path, rank with `nucleo-matcher` or `frizbee`. Done 2026-11-02: walked in a background thread each time the list opens (the previous list serves meanwhile), ranked by `nucleo-matcher` 0.3 (MPL-2.0) with fzf syntax.
 4. Word-level diff highlighting (`similar`'s inline changes). Done 2026-11-02: changed words in reverse video in the line's diff color; a line that changed by more than 60% stays color-only; a 50 ms deadline.
-5. Clickable `file:line` links and URLs (OSC 8, Psi's own links only).
+5. Clickable `file:line` links and URLs (OSC 8, Psi's own links only). Done 2026-11-02: a `link` on spans, written as OSC 8; read/write/edit headers link the file (`file://`, percent-encoded), markdown links link their text and URL; only http, https, mailto and file; tool and model text still has escapes stripped. No line numbers: OSC 8 has no convention for them.
 6. Ctrl+R prompt history search and a draft stash.
 7. Paste collapse (`[Pasted text #1 +120 lines]`) and an invisible-Unicode strip.
 8. `/copy` the last answer or a code block (OSC 52, `arboard` fallback).

@@ -811,6 +811,7 @@ fn ctrl_g_edits_the_prompt_in_the_editor() {
         std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
     });
+    t.wait_for("› ", SLOW);
     t.typ("draft");
     t.wait_for("draft", SLOW);
     t.send(b"\x07"); // Ctrl+G
@@ -849,6 +850,25 @@ fn title_progress_and_a_notification_when_unfocused() {
     t.send(b"\x1b[I");
     let all = t.quit();
     assert!(all.contains("all done"));
+}
+
+#[test]
+fn file_paths_and_markdown_links_are_clickable() {
+    let (mut t, _s) = Tui::start(
+        vec![
+            call("read", json!({"path": "notes.txt"})),
+            text("See [the docs](https://example.com/docs)."),
+        ],
+        |p| std::fs::write(p.join("notes.txt"), "hello\n").unwrap(),
+    );
+    t.wait_for("› ", SLOW);
+    t.typ("read it\r");
+    t.wait_for("the docs", SLOW);
+    let raw = t.raw();
+    let file = format!("\x1b]8;;file://{}/notes.txt\x1b\\", t.project.display());
+    assert!(raw.contains(&file), "no file link in {raw:?}");
+    assert!(raw.contains("\x1b]8;;https://example.com/docs\x1b\\"));
+    t.quit();
 }
 
 #[test]
