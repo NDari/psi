@@ -32,6 +32,7 @@ pub enum Action {
     Exit,
     FollowUp,
     PlanToggle,
+    ExternalEditor,
 }
 
 const ALL: &[(Action, &str, &[&str], &str)] = &[
@@ -154,6 +155,12 @@ const ALL: &[(Action, &str, &[&str], &str)] = &[
         "app.plan.toggle",
         &["ctrl+alt+p"],
         "plan mode on or off",
+    ),
+    (
+        Action::ExternalEditor,
+        "app.editor.external",
+        &["ctrl+g"],
+        "edit the prompt in $VISUAL or $EDITOR",
     ),
 ];
 

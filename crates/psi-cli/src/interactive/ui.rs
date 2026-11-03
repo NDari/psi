@@ -476,6 +476,9 @@ impl<W: Write> App<W> {
             }
             return self.send(Cmd::Plan);
         }
+        if self.keymap.is(Action::ExternalEditor, &k) {
+            return self.external_editor();
+        }
         if self.keymap.is(Action::Interrupt, &k) {
             if self.completer.active() {
                 self.completer.close();
@@ -558,6 +561,52 @@ impl<W: Write> App<W> {
             }
             EditorEvent::Changed => self.refresh_completion(),
             EditorEvent::None => {}
+        }
+    }
+
+    /// Ctrl+G (pi's `app.editor.external`): the prompt goes to a temporary
+    /// markdown file, `$VISUAL` (or `$EDITOR`) edits it, and the result
+    /// comes back into the input. A run keeps going meanwhile; its output
+    /// shows when the editor closes.
+    fn external_editor(&mut self) {
+        let Some(cmd) = ["VISUAL", "EDITOR"]
+            .iter()
+            .find_map(|v| std::env::var(v).ok().filter(|s| !s.trim().is_empty()))
+        else {
+            return self.error("set $VISUAL or $EDITOR to edit the prompt in an editor");
+        };
+        let file = tempfile::Builder::new()
+            .prefix("psi-prompt-")
+            .suffix(".md")
+            .tempfile()
+            .and_then(|f| std::fs::write(f.path(), self.editor.text()).map(|()| f));
+        let file = match file {
+            Ok(f) => f,
+            Err(e) => return self.error(&format!("could not write the prompt to a file: {e}")),
+        };
+        self.completer.close();
+        let _ = self.r.finish(false);
+        // The command may carry arguments (`code --wait`), so a shell runs it.
+        let status = super::with_terminal_released(|| {
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("{cmd} \"$1\""))
+                .arg("sh")
+                .arg(file.path())
+                .status()
+        });
+        let _ = self.r.start(false);
+        match status {
+            Ok(s) if s.success() => match std::fs::read_to_string(file.path()) {
+                Ok(text) => {
+                    // Editors end the file with a newline the prompt didn't have.
+                    self.editor.set_text(text.trim_end_matches('\n'));
+                    self.refresh_completion();
+                }
+                Err(e) => self.error(&format!("could not read the edited prompt: {e}")),
+            },
+            Ok(s) => self.error(&format!("{cmd} exited with {s}; the prompt is unchanged")),
+            Err(e) => self.error(&format!("could not run {cmd}: {e}")),
         }
     }
 

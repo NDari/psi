@@ -77,6 +77,30 @@ fn load_keymap(home: Option<&Path>, warnings: &mut Vec<String>) -> Keymap {
 }
 
 /// Puts the terminal back, also when psi panics.
+/// Raw mode, bracketed paste, focus events and the kitty keyboard flags.
+fn enter_terminal() -> std::io::Result<()> {
+    terminal::enable_raw_mode()?;
+    let mut out = std::io::stdout();
+    let _ = execute!(out, EnableBracketedPaste, EnableFocusChange);
+    // Shift+Enter needs the kitty keyboard protocol; terminals without it
+    // ignore the request. Asking first would wait for an answer some
+    // terminals never send (up to 2 s of startup).
+    let _ = execute!(
+        out,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    );
+    Ok(())
+}
+
+/// Hands the terminal to another program (an editor) until it exits, then
+/// takes it back. The caller clears and redraws the live region around it.
+fn with_terminal_released<T>(f: impl FnOnce() -> T) -> T {
+    restore_terminal();
+    let out = f();
+    let _ = enter_terminal();
+    out
+}
+
 fn restore_terminal() {
     let mut out = std::io::stdout();
     let _ = execute!(
@@ -172,16 +196,7 @@ pub fn run(args: RunArgs) -> Result<ExitCode> {
         )),
     }
     let (w, h) = terminal::size().unwrap_or((80, 24));
-    terminal::enable_raw_mode().context("the terminal can't go into raw mode")?;
-    let mut out = std::io::stdout();
-    let _ = execute!(out, EnableBracketedPaste, EnableFocusChange);
-    // Shift+Enter needs the kitty keyboard protocol; terminals without it
-    // ignore the request. Asking first would wait for an answer some
-    // terminals never send (up to 2 s of startup).
-    let _ = execute!(
-        out,
-        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-    );
+    enter_terminal().context("the terminal can't go into raw mode")?;
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |p| {
         restore_terminal();

@@ -886,7 +886,7 @@ Each phase ends with its acceptance criteria passing in the local check, where a
 **Phase 8 (optional): stricter safety and public readiness.** §13.
 
 **Next: daily-use quick wins** (agreed 2026-11-02, in this order; details in `qol-survey.md` §4 to §9; each tested in ghostty through tmux):
-1. Ctrl+G edits the prompt in `$VISUAL`/`$EDITOR` (pi's `app.editor.external` id).
+1. Ctrl+G edits the prompt in `$VISUAL`/`$EDITOR` (pi's `app.editor.external` id). Done 2026-11-02: the draft goes to a temporary `.md` file, the editor runs through `sh -c` (so `code --wait` works), a failed editor leaves the prompt as it was.
 2. Notifications when a turn ends or an approval waits while unfocused (OSC 9/777/99, tmux passthrough), with progress (OSC 9;4) and a title status.
 3. The `@` file list: refresh it (it is built once per session), walk off the UI path, rank with `nucleo-matcher` or `frizbee`.
 4. Word-level diff highlighting (`similar`'s inline changes).

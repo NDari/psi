@@ -91,6 +91,9 @@ impl Tui {
             .args(args)
             .env("HOME", &home)
             .env("TERM", "xterm-256color")
+            // Ctrl+G's editor: a script a test may write, never the developer's own.
+            .env("VISUAL", home.join("editor.sh"))
+            .env_remove("EDITOR")
             .env_remove("PSI_LOG")
             .current_dir(&project)
             .stdin(Stdio::from(slave.try_clone().unwrap()))
@@ -770,6 +773,31 @@ fn keybindings_file_rebinds_actions() {
     // The key list comes after the commands (one of which also says "plan
     // mode on or off"), and can arrive later.
     t.wait_for("Ctrl+g", SLOW);
+    t.quit();
+}
+
+#[test]
+fn ctrl_g_edits_the_prompt_in_the_editor() {
+    let (mut t, _s) = Tui::start(vec![text("got it")], |p| {
+        let script = p.parent().unwrap().join("home/editor.sh");
+        std::fs::write(&script, "#!/bin/sh\nprintf ' and more\\n' >> \"$1\"\n").unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+    });
+    t.typ("draft");
+    t.wait_for("draft", SLOW);
+    t.send(b"\x07"); // Ctrl+G
+    t.wait_for("draft and more", SLOW);
+    t.typ("\r");
+    t.wait_for("got it", SLOW);
+    // A failing editor leaves the prompt as it was.
+    let script = t.project.parent().unwrap().join("home/editor.sh");
+    std::fs::write(&script, "#!/bin/sh\nexit 3\n").unwrap();
+    t.typ("keep me");
+    t.send(b"\x07");
+    t.wait_for("exit status: 3; the prompt is unchanged", SLOW);
+    assert!(t.contents().contains("keep me"));
+    t.send(b"\x03"); // clear the input so Ctrl+D quits
     t.quit();
 }
 
