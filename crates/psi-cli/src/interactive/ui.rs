@@ -124,6 +124,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "summarize the earlier conversation now: /compact [what to keep]",
     ),
     ("/stats", "tokens, timing, guards and asks this session"),
+    (
+        "/copy",
+        "copy the last answer to the clipboard; /copy code: its last code block",
+    ),
     ("/todos", "the todo list on this branch"),
     ("/mode", "auto or strict: /mode strict"),
     ("/plan", "plan mode on or off: read-only, ends with a plan"),
@@ -263,6 +267,8 @@ pub struct App<W: Write> {
     stash: Option<String>,
     /// Long pastes, shown in the box as placeholders.
     pastes: Pastes,
+    /// The last answer's text, for /copy.
+    last_answer: String,
     term: Term,
     notify: Notify,
     /// The working directory's name, for the title and notifications.
@@ -345,6 +351,7 @@ impl<W: Write> App<W> {
             keymap: p.keymap,
             stash: None,
             pastes: Pastes::default(),
+            last_answer: String::new(),
             term: p.term,
             notify: p.notify,
             dir: p.dir,
@@ -911,6 +918,32 @@ impl<W: Write> App<W> {
         }
     }
 
+    /// /copy: the last answer, or with `code` its last fenced code block,
+    /// to the clipboard through the terminal (OSC 52).
+    fn copy(&mut self, arg: &str) {
+        let (text, what) = match arg {
+            "" => (self.last_answer.clone(), "the last answer"),
+            "code" => match last_code_block(&self.last_answer) {
+                Some(c) => (c, "the last code block"),
+                None => return self.error("  the last answer has no code block"),
+            },
+            _ => return self.error("  /copy, or /copy code"),
+        };
+        if text.trim().is_empty() {
+            return self.error("  nothing to copy yet");
+        }
+        if text.len() > 1_000_000 {
+            return self.error("  too long to copy through the terminal (over 1 MB)");
+        }
+        let bytes = self.term.clipboard(&text);
+        self.write_raw(&bytes);
+        let n = text.lines().count();
+        self.info(&format!(
+            "  copied {what} ({n} line{}) to the clipboard",
+            if n == 1 { "" } else { "s" }
+        ));
+    }
+
     /// Ctrl+S: the draft goes aside and the box empties; again brings it
     /// back. With text in both, they swap.
     fn stash_draft(&mut self) {
@@ -1216,6 +1249,7 @@ impl<W: Write> App<W> {
             "undo" => self.send(Cmd::Undo),
             "compact" => self.send(Cmd::Compact(arg.to_owned())),
             "diff" => self.send(Cmd::Diff),
+            "copy" => self.copy(arg),
             "mcp" => self.send(Cmd::Mcp),
             "rewind" | "tree" | "fork" | "stats" | "inspect" | "todos" => {
                 self.pending_entries = Some(match name {
@@ -1572,6 +1606,7 @@ impl<W: Write> App<W> {
                 match role {
                     Role::User => self.commit_user(&t),
                     Role::Assistant if !t.is_empty() => {
+                        self.last_answer = t.clone();
                         let w = self.width();
                         let mut md = MdStream::new();
                         let mut blocks = md.push(&t);
@@ -1789,6 +1824,17 @@ impl<W: Write> App<W> {
 
     fn on_entry(&mut self, e: &Entry) {
         let w = self.width();
+        if let EntryBody::Message {
+            role: Role::Assistant,
+            content,
+            ..
+        } = &e.body
+        {
+            let t = text_of(content);
+            if !t.trim().is_empty() {
+                self.last_answer = t;
+            }
+        }
         match &e.body {
             EntryBody::ToolResult {
                 tool_call_id,
@@ -2242,4 +2288,50 @@ fn stats(branch: &[&Entry]) -> Vec<String> {
         ),
         format!("asks {asks} ({denied} denied), blocked writes {blocked}, guard events {guards}"),
     ]
+}
+
+/// The contents of the last fenced code block in markdown, without its
+/// fence lines.
+fn last_code_block(md: &str) -> Option<String> {
+    let mut last = None;
+    let mut open: Option<(String, Vec<&str>)> = None;
+    for line in md.lines() {
+        let t = line.trim_start();
+        let fence: String = t.chars().take_while(|c| *c == '`' || *c == '~').collect();
+        match &mut open {
+            Some((f, body)) => {
+                if t.starts_with(f.as_str()) && t.trim_end().len() == fence.len() {
+                    last = Some(body.join("\n"));
+                    open = None;
+                } else {
+                    body.push(line);
+                }
+            }
+            None if fence.len() >= 3
+                && fence
+                    .chars()
+                    .all(|c| c == fence.chars().next().unwrap_or('`')) =>
+            {
+                open = Some((fence, Vec::new()));
+            }
+            None => {}
+        }
+    }
+    last
+}
+
+#[cfg(test)]
+mod tests {
+    use super::last_code_block;
+
+    #[test]
+    fn the_last_fenced_block_is_found_without_its_fences() {
+        let md = "Try:\n\n```sh\nls -l\n```\n\nthen\n\n~~~python\nprint(1)\n# ``` inside\n~~~\n";
+        assert_eq!(
+            last_code_block(md).as_deref(),
+            Some("print(1)\n# ``` inside")
+        );
+        assert_eq!(last_code_block("no code"), None);
+        assert_eq!(last_code_block("```\nunclosed"), None);
+    }
 }

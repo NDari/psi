@@ -80,6 +80,12 @@ impl Term {
         format!("\x1b]2;{}\x1b\\", clean(title)).into_bytes()
     }
 
+    /// OSC 52: puts `text` on the system clipboard, through the terminal
+    /// (works over SSH too). ghostty and kitty allow writes by default.
+    pub fn clipboard(&self, text: &str) -> Vec<u8> {
+        self.outer(format!("\x1b]52;c;{}\x1b\\", base64(text.as_bytes())).as_bytes())
+    }
+
     /// Saves the title on the terminal's title stack, to put back on exit.
     pub fn push_title(&self) -> Vec<u8> {
         b"\x1b[22;0t".to_vec()
@@ -113,6 +119,28 @@ pub fn title_for(dir: &str, a: Activity) -> String {
         Activity::Working => format!("ψ {dir} · working"),
         Activity::Waiting => format!("ψ {dir} · waiting"),
     }
+}
+
+/// Standard base64 with padding (OSC 52's encoding).
+fn base64(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(T[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }
 
 /// Text safe inside an OSC string: no control characters, one line, short.
@@ -176,6 +204,15 @@ mod tests {
         );
         // The title goes to tmux itself.
         assert_eq!(t.title("ψ psi"), "\x1b]2;ψ psi\x1b\\".as_bytes().to_vec());
+    }
+
+    #[test]
+    fn the_clipboard_gets_base64() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+        assert_eq!(term(&[]).clipboard("hi"), b"\x1b]52;c;aGk=\x1b\\".to_vec());
     }
 
     #[test]

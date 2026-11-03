@@ -933,6 +933,20 @@ fn a_long_paste_shows_as_a_placeholder_and_is_sent_whole() {
 }
 
 #[test]
+fn copy_puts_the_answer_or_its_code_on_the_clipboard() {
+    let (mut t, _s) = Tui::start(vec![text("Run this:\n\n```sh\nls\n```")], |_| {});
+    t.wait_for("› ", SLOW);
+    t.typ("how?\r");
+    t.wait_for("Run this", SLOW);
+    t.typ("/copy code\r");
+    t.wait_for("copied the last code block (1 line)", SLOW);
+    t.wait_raw("\x1b]52;c;bHM=\x1b\\", SLOW); // "ls"
+    t.typ("/copy\r");
+    t.wait_for("copied the last answer (5 lines)", SLOW);
+    t.quit();
+}
+
+#[test]
 fn themes_color_the_screen() {
     let (mut t, _s) = Tui::start(vec![text("ok")], |p| {
         let home = p.parent().unwrap().join("home/.psi");
