@@ -894,7 +894,7 @@ Each phase ends with its acceptance criteria passing in the local check, where a
 6. Ctrl+R prompt history search and a draft stash. Done 2026-11-02: Ctrl+R (`app.history.search`) lists earlier prompts newest first, filtered by every typed word, and Enter puts one in the box unsent; Ctrl+S (`app.editor.stash`) puts the draft aside and back, swapping when both hold text.
 7. Paste collapse (`[Pasted text #1 +120 lines]`) and an invisible-Unicode strip. Done 2026-11-02: over 10 lines or 1,000 characters (higher than Claude Code's 3 lines or 800, so short snippets stay visible); expanded on send, in history and for Ctrl+G; tag characters and bidi controls removed from pastes with a note.
 8. `/copy` the last answer or a code block (OSC 52, `arboard` fallback). Done 2026-11-02: `/copy` and `/copy code` (the last fenced block) through OSC 52, wrapped for tmux; no `arboard` fallback yet (it brings X11 and Wayland dependencies, and OSC 52 covers ghostty and tmux).
-9. rg and fd startup check with the install hint; `fd-find` in the eval image.
+9. rg and fd startup check with the install hint; `fd-find` in the eval image. Done 2026-11-02: one banner line naming what is missing and this system's install command (pacman, apt or brew); Debian's `fdfind` counts. The eval image gained `fd-find` (Debian's binary name is `fdfind`).
 
 **Then** (agreed 2026-11-02):
 10. Lua batteries (D-45, §9.4): `psi.json`, `psi.exec` (removing `io.popen` and `os.execute`), `psi.http`, `psi.re`, then `psi.fs`/`psi.path` and the small bundle.

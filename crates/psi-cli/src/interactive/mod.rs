@@ -78,6 +78,46 @@ fn load_keymap(home: Option<&Path>, warnings: &mut Vec<String>) -> Keymap {
 }
 
 /// Puts the terminal back, also when psi panics.
+/// Whether an executable called `name` is on PATH.
+fn on_path(name: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::var_os("PATH").is_some_and(|p| {
+        std::env::split_paths(&p).any(|d| {
+            std::fs::metadata(d.join(name))
+                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
+    })
+}
+
+/// A startup line when rg or fd is missing: models search with them through
+/// bash (Debian names fd `fdfind`), and slower `grep -r` walks ignored
+/// directories. Says how to install them on this system.
+fn missing_search_tools(found: impl Fn(&str) -> bool) -> Option<String> {
+    let mut missing = Vec::new();
+    if !found("rg") {
+        missing.push("rg (ripgrep)");
+    }
+    if !found("fd") && !found("fdfind") {
+        missing.push("fd");
+    }
+    if missing.is_empty() {
+        return None;
+    }
+    let install = if cfg!(target_os = "macos") {
+        "brew install ripgrep fd"
+    } else if Path::new("/usr/bin/pacman").exists() {
+        "sudo pacman -S ripgrep fd"
+    } else if Path::new("/usr/bin/apt-get").exists() {
+        "sudo apt install ripgrep fd-find"
+    } else {
+        "install ripgrep and fd"
+    };
+    Some(format!(
+        "not found on PATH: {}; searches will be slower ({install})",
+        missing.join(", ")
+    ))
+}
+
 /// Raw mode, bracketed paste, focus events and the kitty keyboard flags.
 fn enter_terminal() -> std::io::Result<()> {
     terminal::enable_raw_mode()?;
@@ -198,6 +238,9 @@ pub fn run(args: RunArgs) -> Result<ExitCode> {
     };
 
     let mut warnings = warnings;
+    if let Some(w) = missing_search_tools(on_path) {
+        warnings.push(w);
+    }
     let keymap = load_keymap(home.as_deref(), &mut warnings);
     let wanted = args.settings["theme"].as_str().unwrap_or("default");
     match resources.theme(wanted) {
@@ -275,4 +318,20 @@ pub fn run(args: RunArgs) -> Result<ExitCode> {
     result.context("the terminal failed")?;
     println!("session: {}", session_path.display());
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::missing_search_tools;
+
+    #[test]
+    fn missing_rg_or_fd_gives_one_line_with_the_fix() {
+        assert_eq!(missing_search_tools(|_| true), None);
+        // Debian's fd is fdfind.
+        assert_eq!(missing_search_tools(|n| n != "fd"), None);
+        let w = missing_search_tools(|n| n == "fd").unwrap();
+        assert!(w.starts_with("not found on PATH: rg (ripgrep);"), "{w}");
+        let w = missing_search_tools(|_| false).unwrap();
+        assert!(w.contains("rg (ripgrep), fd"), "{w}");
+    }
 }
