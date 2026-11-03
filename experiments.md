@@ -117,6 +117,17 @@ Flags worth sweeping: `-fa`, `-b`/`-ub`, `-ctk`/`-ctv` (KV cache type), `-t`, `-
 
 **Still open:** whether one system-prompt line naming the MCP tools and what they are for changes that (pi lists MCP servers in its system prompt); model-facing text, so a separate run. Projects big enough that grep misleads (many same-named symbols) would be the case where these tools should matter.
 
+### The model card's sampling for the 35B (added 2026-11-03)
+
+**Question:** do the model card's non-thinking settings (`--temp 0.7 --top-p 0.8 --top-k 20 --min-p 0 --presence-penalty 1.5`) beat the server's defaults (temp 1.0, top-p 0.95, min-p 0.05)? Sharper sampling should mean fewer odd token splits (the cache losses after long answers) and higher MTP draft acceptance (a server log line on 2026-11-03 showed 0.45, against 0.84 on average on 2026-11-01).
+
+**How:** replay a fixed set of recorded requests against llama-server with each setting, as in the 2026-11-01 speed runs, and read generation tok/s and draft acceptance; count answers whose generated token count exceeds their re-tokenized length (the odd splits). Not pass rates: one run can't compare those.
+
+**Open:**
+- Presence penalty may hurt code (repeated identifiers); watch for it in the transcripts.
+
+## Done
+
 ### The small reference models without line numbers (added 2026-11-03)
 
 **Question:** do Qwen3.5 4B and Gemma 4 12B cope with read output that has no line numbers (built 2026-11-03)? The eval after the change ran on the 35B only, and small models may lean on the numbers more: picking `offset`, or copying text for an edit.
@@ -125,6 +136,8 @@ Flags worth sweeping: `-fa`, `-b`/`-ub`, `-ctk`/`-ctv` (KV cache type), `-t`, `-
 
 **Open:**
 - If a small model needs them, numbers could come back as a per-model setting rather than for every model.
+
+**Gemma run 2026-11-03** (`~/.psi/evals/2026-11-03-2119-quick-noline-gemma4-12b`, the Mac, 128K, one run, correctness only): 8 pass, 2 model failures (`multi_sqlite_migration` at the step cap, `feat_logstats_jsonl` 8 of 10), no harness failures. No sign it missed the numbers: no `cat -n`, `nl` or `grep -n` (one `grep -n` in the Phase 6 run), and no read used an offset. Its edits fail as often as before: 35 of 64 against 32 of 54 (Phase 6) and 12 of 23 (Phase 3), the same "old_text was not found" with the closest lines shown; it was Gemma's weak spot with numbers too. **Qwen 4B: won't do** (owner, 2026-11-03): a run takes over an hour on the Mac for little information, and the owner accepts that it, like Gemma and the 35B, does without the numbers.
 
 ### A quantized KV cache for reading deep in the context (added 2026-11-03)
 
@@ -136,16 +149,17 @@ Flags worth sweeping: `-fa`, `-b`/`-ub`, `-ctk`/`-ctv` (KV cache type), `-t`, `-
 - A quantized cache can change output; if it reads faster, check quality with an eval run before adopting it.
 - Whether MTP drafting works with a quantized cache on this build.
 
-### The model card's sampling for the 35B (added 2026-11-03)
+**Run 2026-11-03** (llama-bench, build 8642541b2, `-fa 1 -ngl 99 -b 4096 -ub 2048`, reading 4,096 tokens and generating 128 at depth 0, 16K and 40K, 2 repetitions; tok/s; generation without MTP):
 
-**Question:** do the model card's non-thinking settings (`--temp 0.7 --top-p 0.8 --top-k 20 --min-p 0 --presence-penalty 1.5`) beat the server's defaults (temp 1.0, top-p 0.95, min-p 0.05)? Sharper sampling should mean fewer odd token splits (the cache losses after long answers) and higher MTP draft acceptance (a server log line on 2026-11-03 showed 0.45, against 0.84 on average on 2026-11-01).
+| K / V cache | read @0 | @16K | @40K | generate @0 | @16K | @40K |
+|---|---|---|---|---|---|---|
+| f16 / f16 (now) | 1779 | 1107 | 670 | 89.6 | 79.7 | 69.2 |
+| q8_0 / q8_0 | 1598 | 1031 | 566 | 84.8 | 71.5 | 60.3 |
+| f16 / q8_0 | 316 | 45 | 19 | 78.1 | 19.5 | 10.1 |
+| q8_0 / f16 | 669 | 125 | 52 | 74.5 | 28.7 | 13.0 |
 
-**How:** replay a fixed set of recorded requests against llama-server with each setting, as in the 2026-11-01 speed runs, and read generation tok/s and draft acceptance; count answers whose generated token count exceeds their re-tokenized length (the odd splits). Not pass rates: one run can't compare those.
+**Outcome:** no. An 8-bit cache is slower everywhere on Metal (reading 10 to 15% slower, generating 5 to 13%), and mixed types fall off a cliff (no fused kernel for them). The f16 cache stays; nothing changed. Memory isn't the constraint for this model at 64K, so the 8-bit cache has nothing to offer here.
 
-**Open:**
-- Presence penalty may hurt code (repeated identifiers); watch for it in the transcripts.
-
-## Done
 
 ### What the transcripts say about checking work and reading (added 2026-11-03)
 
