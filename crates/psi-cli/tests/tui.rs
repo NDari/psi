@@ -84,6 +84,12 @@ impl Tui {
         let project = tmp.path().join("project");
         std::fs::create_dir_all(home.join(".psi")).unwrap();
         std::fs::create_dir_all(&project).unwrap();
+        // The pager for long command output keeps what it was given in
+        // home/paged.txt; a test may rewrite the script.
+        let pager = home.join("pager.sh");
+        std::fs::write(&pager, "#!/bin/sh\ncat > \"$HOME/paged.txt\"\n").unwrap();
+        std::fs::set_permissions(&pager, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
         let models =
             json!({"models": [{"id": "local", "base_url": server.base_url(), "max_output": 256}]});
         std::fs::write(home.join(".psi/models.jsonc"), models.to_string()).unwrap();
@@ -97,6 +103,8 @@ impl Tui {
             // Ctrl+G's editor: a script a test may write, never the developer's own.
             .env("VISUAL", home.join("editor.sh"))
             .env_remove("EDITOR")
+            .env("PAGER", home.join("pager.sh"))
+            .env_remove("LESS")
             // The terminal is the test's, not the one the tests run in.
             .env_remove("TMUX")
             .env_remove("KITTY_WINDOW_ID")
@@ -141,6 +149,26 @@ impl Tui {
             started,
         };
         (tui, server)
+    }
+
+    /// What the pager was given last (home/paged.txt).
+    fn paged(&self) -> String {
+        std::fs::read_to_string(self.project.parent().unwrap().join("home/paged.txt"))
+            .unwrap_or_default()
+    }
+
+    fn wait_paged(&self, what: &str, max: Duration) {
+        let start = Instant::now();
+        while start.elapsed() < max {
+            if self.paged().contains(what) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!(
+            "{what:?} never reached the pager; it got:\n{}",
+            self.paged()
+        );
     }
 
     fn contents(&self) -> String {
@@ -486,10 +514,10 @@ fn undo_diff_show_stats_and_mode() {
     t.wait_for("wrote it", SLOW);
     assert!(t.project.join("notes.md").exists());
     t.typ("/diff\r");
-    t.wait_for("▌ by write call 1", SLOW);
-    t.wait_for("+two", SLOW);
+    t.wait_paged("▌ by write call 1", SLOW);
+    t.wait_paged("+two", SLOW);
     t.typ("/show 1\r");
-    t.wait_for("\"text\": \"one\\ntwo\\n\"", SLOW);
+    t.wait_paged("\"text\": \"one\\ntwo\\n\"", SLOW);
     t.typ("/stats\r");
     t.wait_for("model requests 2, tool calls 1 (0 failed)", SLOW);
     t.typ("/undo\r");
@@ -797,9 +825,29 @@ fn keybindings_file_rebinds_actions() {
     t.send(b"\x07"); // Ctrl+G
     t.wait_for("plan mode: read-only", SLOW);
     t.typ("/help\r");
-    // The key list comes after the commands (one of which also says "plan
-    // mode on or off"), and can arrive later.
-    t.wait_for("Ctrl+g", SLOW);
+    t.wait_paged("Ctrl+g", SLOW);
+    t.quit();
+}
+
+#[test]
+fn command_output_goes_to_the_pager() {
+    let (mut t, _s) = Tui::start(vec![], |_| {});
+    t.wait_for("› ", SLOW);
+    t.typ("/help\r");
+    t.wait_paged("the session as an inspection timeline", SLOW);
+    // The colors go to the pager too, and nothing reaches the scrollback.
+    assert!(t.paged().contains("\x1b["));
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(!t.all().contains("the session as an inspection timeline"));
+    // Other commands' output is committed as before.
+    t.typ("/todos\r");
+    t.wait_for("no todos on this branch", SLOW);
+    // A pager that can't run: the output is committed, with a note.
+    let pager = t.project.parent().unwrap().join("home/pager.sh");
+    std::fs::write(&pager, "#!/bin/sh\nexit 127\n").unwrap();
+    t.typ("/help\r");
+    t.wait_for("could not run the pager", SLOW);
+    assert!(t.all().contains("the session as an inspection timeline"));
     t.quit();
 }
 
@@ -1169,7 +1217,7 @@ fn session_commands_answer() {
     t.typ("/todos\r");
     t.wait_for("todo", SLOW);
     t.typ("/inspect\r");
-    t.wait_for("step 1", SLOW);
+    t.wait_paged("step 1", SLOW);
     t.typ("/tree\r");
     t.wait_for("↑↓ choose", SLOW);
     t.esc();

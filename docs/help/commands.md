@@ -6,6 +6,7 @@ Slash commands and keys in the interactive mode.
 - /tree: move to another point in the conversation (files stay).
 - /diff: the session's file changes, by source. /show <n>: tool call n in full.
 - /stats: tokens, timing, guards and asks. /inspect: the session as a timeline.
+- /help, /inspect, /diff and /show open in $PAGER (less if unset).
 - /copy: the last answer to the clipboard; /copy code: its last code block (OSC 52;
   in tmux, set -g allow-passthrough on).
 - /mode auto|strict, /plan, /todos, /mcp, /theme, /label <text>, /new, /resume, /fork, /reload, /quit.

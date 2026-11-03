@@ -746,6 +746,49 @@ impl<W: Write> App<W> {
         }
     }
 
+    /// Command output goes to `$PAGER` (`less` when unset) rather than the
+    /// scrollback, as git does.
+    fn page(&mut self, lines: Vec<Line>) {
+        let mut text = Vec::new();
+        for l in &lines {
+            let _ = l.write_ansi(&mut text);
+            text.push(b'\n');
+        }
+        let cmd = std::env::var("PAGER")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "less".into());
+        self.completer.close();
+        let _ = self.r.finish(false);
+        let status = super::with_terminal_released(|| {
+            let mut c = std::process::Command::new("sh");
+            c.arg("-c").arg(&cmd).stdin(std::process::Stdio::piped());
+            // Colors through less, as git does.
+            if std::env::var_os("LESS").is_none() {
+                c.env("LESS", "R");
+            }
+            let mut child = c.spawn()?;
+            if let Some(mut stdin) = child.stdin.take() {
+                // The pager may quit before reading it all.
+                let _ = stdin.write_all(&text);
+            }
+            child.wait()
+        });
+        let _ = self.r.start(false);
+        // The shell's codes for a command it couldn't find or run.
+        let failed = match status {
+            Ok(s) if matches!(s.code(), Some(126 | 127)) => Some(s.to_string()),
+            Ok(_) => None,
+            Err(e) => Some(e.to_string()),
+        };
+        if let Some(why) = failed {
+            self.commit(lines);
+            self.error(&format!(
+                "could not run the pager {cmd} ({why}); set $PAGER"
+            ));
+        }
+    }
+
     fn refresh_completion(&mut self) {
         let (col, word) = self.editor.current_word();
         let first = self.editor.cursor().0 == 0 && col == 0;
@@ -1247,7 +1290,7 @@ impl<W: Write> App<W> {
                     l.push(d, dim());
                     lines.push(l);
                 }
-                self.commit(lines);
+                self.page(lines);
             }
             "quit" | "exit" | "q" => self.quit = true,
             "undo" => self.send(Cmd::Undo),
@@ -1307,7 +1350,7 @@ impl<W: Write> App<W> {
                         .lines()
                         .map(|l| Line::styled(format!("  {l}"), style)),
                 );
-                self.commit(lines);
+                self.page(lines);
             }
             "label" => {
                 if arg.is_empty() {
@@ -1454,7 +1497,7 @@ impl<W: Write> App<W> {
                     ));
                     lines.extend(git_diff_lines(&c.diff));
                 }
-                self.commit(lines);
+                self.page(lines);
             }
             UiMsg::Entries { entries, leaf } => self.with_entries(entries, leaf),
             UiMsg::Switched {
@@ -1745,7 +1788,7 @@ impl<W: Write> App<W> {
                 };
                 let t = psi_lab::inspect::timeline(&rec);
                 let text = psi_lab::inspect::render_text(&t, false);
-                self.commit(text.lines().map(Line::raw).collect());
+                self.page(text.lines().map(Line::raw).collect());
             }
         }
     }

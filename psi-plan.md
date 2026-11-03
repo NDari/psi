@@ -645,6 +645,7 @@ An inline TUI can't redraw the past, so each piece is committed once, in a form 
 - Never commit thinking.
 - Don't redraw committed lines on resize.
 - Start on a cleared screen by printing one newline per row, so earlier content scrolls into scrollback instead of being erased.
+- The output of `/inspect`, `/diff`, `/show` and `/help` opens in `$PAGER` (`less` with `LESS=R` when unset) instead of being committed, however short; the pager's own screen leaves the scrollback as it was (2026-11-02). If the pager can't run, the output is committed with a note.
 - Dropdowns and modals go **under** the input box, never in its place.
 - **What the box shows is what Enter runs.** Moving through a dropdown puts the selection in the box.
 - Use the terminal's 16 ANSI colors so the user's theme decides. Fenced code keeps dimmed fence lines, so a copy from the terminal is the code.
