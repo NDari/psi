@@ -110,18 +110,19 @@ Flags worth sweeping: `-fa`, `-b`/`-ub`, `-ctk`/`-ctv` (KV cache type), `-t`, `-
 
 **Question:** why does the next turn re-read a long final answer instead of reusing it from the prompt cache, and can Psi avoid it?
 
-**Context:** in a hands-on session in `../cog` (the 35B on the Mac, `~/.psi/sessions/-home-ndari-projects-cog-/2026-11-03-0334_408b21c4.*`), two long answers that ended a turn (about 1,900 and 2,000 tokens) were each reprocessed whole on the next user prompt: `cache_n` fell about 1,905 and 2,030 tokens short of the previous request's prompt plus output. That put first token at about 3.5 to 4 s against about 0.3 s. Short final answers ("Done - ...", about 50 tokens) and assistant messages with tool calls were reused fully. The text Psi sent back is byte-identical to what was streamed, so the history itself is right. The divergence starts about 4 tokens before the answer's text, which suggests the model emitted something at the start (perhaps an empty think block) that llama-server stripped from the content, so the re-rendered history no longer matches. Unverified.
+**Context:** in a hands-on session in `../cog` (the 35B on the Mac, `~/.psi/sessions/-home-ndari-projects-cog-/2026-11-03-0334_408b21c4.*`), two long answers that ended a turn (about 1,900 and 2,000 tokens) were each reprocessed whole on the next user prompt: `cache_n` fell about 1,905 and 2,030 tokens short of the previous request's prompt plus output. That put first token at about 3.5 to 4 s against about 0.3 s. Short final answers ("Done - ...", about 50 tokens) and assistant messages with tool calls were reused fully. The text Psi sent back is byte-identical to what was streamed. Pi, against the same server (`~/.pi/agent/sessions/--home-ndari-projects-cog--/2026-11-03T04-19-23-534Z_*.jsonl`), reused the cache fully after both its long answers (1,364 and 2,035 tokens).
 
-Pi doesn't have the problem: the same questions in pi against the same server (`~/.pi/agent/sessions/--home-ndari-projects-cog--/2026-11-03T04-19-23-534Z_*.jsonl`, thinking level medium) reused the cache fully after both long answers (1,364 and 2,035 tokens). So the cause is in how Psi builds its requests, not something every client hits. Start by comparing a pi request with a Psi one (`chat_template_kwargs`, reasoning fields, how the assistant message is sent back).
+**Findings (2026-11-03, from the wire log plus the server's `/apply-template` and `/tokenize`, no generation):**
+- Psi's requests are right. The next request, rendered by the server's own template (with the server's `preserve_thinking: true`), starts with exactly the earlier prompt's tokens plus the answer's text re-tokenized, through to `<|im_end|>`. No think block or field goes missing.
+- The model's own tokens differ from that re-tokenization. Each long answer took one token more than its text re-tokenizes to (1,900 against 1,899, 2,025 against 2,024), while every short answer, and all of pi's answers, match. So each long answer had one spot where the model wrote one usual token as two. The streamed chunks point to `Module/import` in the first and ` |>` in the second (code-like text). Most likely, not proven: that needs the raw token ids.
+- Why one odd token costs the whole answer: the 35B is a hybrid model, so llama-server can't cut its cache back to the exact point of difference; it restores the last checkpoint, which here sits 4 tokens before the end of the previous prompt (the "4 tokens" seen). As far as I know from llama.cpp, checkpoints are taken only while reading a prompt, not during generation (not checked in its source); the server's checkpoint flags (`--ctx-checkpoints`, `--checkpoint-min-step`) offer nothing for generation.
+- Pi isn't doing anything different (no sampling fields; its llama.cpp extension adds only thinking settings). Its answers happened to contain no such split. It's chance per answer, more likely in long and code-heavy answers.
 
-**How:**
-1. Render the next request with llama-server's `/apply-template` and compare it with the tokens of the earlier prompt plus the raw output (`/completion` with `n_probs` or the server's verbose log shows the raw tokens) to find the exact divergence.
-2. If it's a stripped empty think block: check whether `chat_template_kwargs.enable_thinking: false` or `--reasoning off` on the server stops the model emitting it, or whether `--reasoning-format none` keeps it in the content so the history matches (§4.2 "render prompts exactly as the server would").
-3. Check whether Gemma shows the same.
-
-**Open:**
-- Costs a few seconds per turn after a long answer, not correctness; worth it if long answers are common in daily use.
-- Keeping a think block in the content means Psi has to hide it in the TUI.
+**Options, none built:**
+1. Accept it: about 3.5 s once after some long answers, no correctness cost.
+2. Server sampling: the model card's non-thinking settings (`--temp 0.7 --top-p 0.8`, the server uses temp 1.0 now) make rare token choices less likely. Fewer cases, not none. Overlaps with the "faster 35B" sampling candidate.
+3. Psi re-reads the answer in the background: after a final answer, compare the answer's `/tokenize` count with the generated count, and on a mismatch send the history through the answer (raw prompt to `/completion`, no output) while the user reads, so the next turn finds a checkpoint near the end. llama-server only; needs a check that it doesn't slow a prompt the user sends straight away (`-np 1`).
+4. Check whether Gemma shows it. Its sliding-window attention also limits how far llama-server can cut the cache back, so it may behave the same.
 
 ### Does Psi's prompt steer the model to code over docs? (added 2026-11-02)
 
@@ -142,6 +143,18 @@ Pi doesn't have the problem: the same questions in pi against the same server (`
 1. Rerun both with identical prompts, pasted from one file, the server restarted before each, and compare which files each reads.
 2. If Psi still skips the docs, change the line to name docs too (for example "read the relevant docs and code first: README, docs/, and the files the task touches") and rerun once.
 3. Model-facing text, so an eval run after the change (D-32); check that it doesn't make the model read docs on small fix tasks where they don't help.
+
+**Rerun 2026-11-03** (one run each, the 35B on the Mac, `-p` then `-c -p` in a fresh copy of cog at HEAD without the earlier `qwen-*.md` outputs; the server wasn't restarted, since it can't drop its cache without `--slot-save-path`, and the two system prompts share only their first few tokens). Prompts, identical in both: "Take a look at this project. What improvements would you suggest to it?", then "Now take a look at the language itself. What do you suggest to make it better?". Sessions: `~/.psi/sessions/-tmp-claude-1000--home-ndari-projects-psi-50906382-555d-433d-8d13-7de8a3abd078-scratchpad-cog-/2026-11-03-1329_40c98505.*`, `~/.pi/agent/sessions/--tmp-claude-1000--home-ndari-projects-psi-50906382-555d-433d-8d13-7de8a3abd078-scratchpad-cog--/2026-11-03T13-35-35-478Z_*.jsonl`.
+- First prompt: Psi read `README.md`, `go.mod` and `plan/known-issues.md` before any source, then the `.go` files, later `plan/semantic-foundation.md` and two examples. Pi read 13 `.go` files, then `README.md`, and only listed `docs/` and `examples/`.
+- Language prompt: both read most of `docs/`, the examples and `plan/known-issues.md` and `plan/design-review.md`. Psi also read the README again; it tried `docs/metaprog.md`, which is `plan/metaprog.md`.
+- **Outcome:** with the same prompts, Psi read the docs earlier than pi did. The difference in the cog session came from the prompt wording, not Psi's system prompt. No prompt change.
+
+**Markdown in the answers** (owner noticed pi's looked better): neither system prompt says anything about formatting, and both models used headings, bold, code blocks and tables. Pi's answers used more of them (`###` per item, more tables), which is variance between runs. The rendering differs too: the same answer (pi's second one) opened in each TUI at 110 columns:
+- Psi prints no blank lines between blocks; pi keeps one between paragraphs, headings, code blocks and rules. This is the biggest difference. `MdStream` drops blank lines and the UI commits blocks with nothing between them, and §11.5 doesn't ask for that.
+- A `---` rule: Psi prints `---` dim, pi draws a line across.
+- Headings: Psi shows the `##` dim before bold text (§11.5 "heading `#`s dim"), pi shows the text only, styled.
+- Tables: Psi draws aligned columns with a line under the header; pi draws a full box with a line between rows. Psi's is more compact.
+- Code blocks: both keep the fence lines; pi indents the block.
 
 **Open:**
 - The made-up "I've read the docs" claim is a separate model habit; a prompt line won't stop it, and catching it in the harness (a claim of reading files that no tool call read) is a bigger idea.
