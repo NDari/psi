@@ -526,6 +526,14 @@ return {
 
 **Composition semantics** (pi parity): notification, mutation, chain or gate. Handler errors are reported and never crash the host; a failing `tool_call` gate fails closed.
 
+**Batteries (planned, D-45).** Rust-backed modules, declared in `psi.toml` like the rest (D-14), so stubs, docs and `psi ext check` cover them. Calls yield and look synchronous. Order: `psi.json`, `psi.exec`, `psi.http`, `psi.re`, then `psi.fs`/`psi.path`, then a small bundle (time, hash, base64, toml, env). Sketch in `qol-survey.md` §6.
+- `psi.exec(argv, opts)` runs inside the same boundary as bash (bubblewrap or Seatbelt, `network` honored, the bash environment). Its argv is matched against the always-ask list; `{"sh", "-c", script}` is classified like bash. A match shows the approval card labelled with the extension's name; headless runs deny it. It takes a timeout, a size cap and Esc.
+- `io.popen` and `os.execute` are removed from the Lua state when `psi.exec` lands; `psi ext check` names `psi.exec` as the fix.
+- An extension that must run outside the sandbox gets it from the user's settings (`"extensions": {"<name>": {"unsandboxed": true}}`), never from its own manifest.
+- `psi.http` fails with a one-line error when `network` is off, with a default timeout, a response cap and cancellation.
+- File writes through `io`/`os` stay for now (checkpoints capture workspace changes); revisit them with `psi.fs`.
+- Not planned: LuaRocks and C modules, YAML, SQLite, templating.
+
 **Argument rewriting in `tool_call`** happens **before** classification, so a rewritten call is classified as rewritten. Rewrites are recorded in the policy decision. (Heimdall found this the riskiest hook and the least used; keep it, but make it visible.)
 
 ### 9.5 Single-source API definition (D-14)
@@ -877,6 +885,27 @@ Each phase ends with its acceptance criteria passing in the local check, where a
 
 **Phase 8 (optional): stricter safety and public readiness.** §13.
 
+**Next: daily-use quick wins** (agreed 2026-11-02, in this order; details in `qol-survey.md` §4 to §9; each tested in ghostty through tmux):
+1. Ctrl+G edits the prompt in `$VISUAL`/`$EDITOR` (pi's `app.editor.external` id).
+2. Notifications when a turn ends or an approval waits while unfocused (OSC 9/777/99, tmux passthrough), with progress (OSC 9;4) and a title status.
+3. The `@` file list: refresh it (it is built once per session), walk off the UI path, rank with `nucleo-matcher` or `frizbee`.
+4. Word-level diff highlighting (`similar`'s inline changes).
+5. Clickable `file:line` links and URLs (OSC 8, Psi's own links only).
+6. Ctrl+R prompt history search and a draft stash.
+7. Paste collapse (`[Pasted text #1 +120 lines]`) and an invisible-Unicode strip.
+8. `/copy` the last answer or a code block (OSC 52, `arboard` fallback).
+9. rg and fd startup check with the install hint; `fd-find` in the eval image.
+
+**Then** (agreed 2026-11-02):
+10. Lua batteries (D-45, §9.4): `psi.json`, `psi.exec` (removing `io.popen` and `os.execute`), `psi.http`, `psi.re`, then `psi.fs`/`psi.path` and the small bundle.
+11. Fish completions (`clap_complete`'s `CompleteEnv`): help topics, models, sessions and eval tasks completed dynamically; `COMPLETE=fish psi | source` in `config.fish`.
+12. Status line: tokens per second, prompt-processing progress, context used and cache reuse from llama-server's timings, plus a Lua hook for extra segments (built after the batteries, so it can follow their conventions).
+
+**Backlog: daily-use ideas to pick up later** (from `qol-survey.md`, 2026-11-02; the owner works in ghostty inside tmux, with Neovim in a pane next to Psi):
+- **Inline stays** (decided 2026-11-02). Revisit later: a `/transcript` view that opens a temporary fullscreen screen to browse, search and expand the session, then returns to scrollback; or a fullscreen option.
+- **Neovim bridge.** Speak Claude Code's editor-bridge protocol as a client (claudecode.nvim's `PROTOCOL.md`: a WebSocket MCP server in Neovim, a lock file in `~/.claude/ide/`, tools such as `openDiff` and `getCurrentSelection`), so the plugin works with Psi unchanged, if it accepts other clients (unverified). It would show Psi's edits as diffs in Neovim to accept or reject, and send selections and `@` mentions from Neovim into Psi's input. A smaller first step: open a `file:line` from Psi in the Neovim pane next to it (`nvim --server <socket> --remote`).
+- **RPC mode, then ACP**, for Zed and Neovim plugins such as codecompanion.nvim (already "wanted, not built" at the Phase 7 close).
+
 ---
 
 ## 16. Testing strategy
@@ -943,6 +972,7 @@ Each phase ends with its acceptance criteria passing in the local check, where a
 | D-42 | **MCP tools are all declared up front and approved by their read-only hint** (§10.2) | A local model at 64K meets few servers, and doesn't search for tools it can't see (H-15), so tool search and pi's codemode wait; the user trims with `tools`/`disabledTools` and a size warning. A tool list that changes mid-run breaks the prefix cache, so it changes only between prompts. MCP servers act outside the project, beyond checkpoints, so a call asks unless the server marks the tool read-only (Codex's default), with a per-server or per-tool override (2026-11-01) |
 | D-43 | **Markdown through `pulldown-cmark`, code highlighting through `syntect`, colors from pi's theme tokens** (§11.5) | The hand-written subset printed tables as raw rows and code uncolored. Both crates are the common Rust choice (bat, delta, mdbook); rendering stays per complete block, so streaming and commit-once don't change; scopes map onto pi's `syntax*` tokens, so pi themes work and the 16-color default keeps the terminal's palette (2026-11-01) |
 | D-44 | **macOS isolation is a Seatbelt profile with a shared `/tmp`** (§8.4) | Keeps the host's tools, as Codex and Claude Code do on macOS. No boundary works the same on both platforms without running bash in a Linux container or VM, which loses the Mac's tools and mixes Linux binaries into the workspace (`node_modules`, `.venv`, `target`). `/tmp` and `/private/var/folders` stay writable because macOS tools write there regardless of `TMPDIR` (Heimdall). `sandbox-exec` is deprecated but still the only option for command-line tools. |
+| D-45 | **Lua batteries are Rust-backed `psi.*` modules; `psi.exec` runs inside the boundary and the always-ask rules, and replaces `io.popen` and `os.execute`** (§9.4) | An extension tool is a path for the model's arguments into commands, so it shouldn't be a side door around the approval policy (principle: the harness absorbs model mistakes). `psi.exec` also takes a timeout and Esc, which a hung `io.popen` can't (the instruction hook doesn't interrupt a blocking C call). An extension that must leave the sandbox gets it only from the user's settings, never from its own manifest. Rust crates over LuaRocks: no C toolchain, no ABI pinning, and most crates are already in the binary (`qol-survey.md` §6, 2026-11-02). |
 
 ---
 
