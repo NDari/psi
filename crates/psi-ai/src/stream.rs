@@ -100,6 +100,16 @@ impl Accumulator {
                 prompt_ms: t["prompt_ms"].as_f64().unwrap_or(0.0),
                 predicted_ms: t["predicted_ms"].as_f64().unwrap_or(0.0),
                 predicted_per_second: t["predicted_per_second"].as_f64().unwrap_or(0.0),
+                prompt_per_second: t["prompt_per_second"].as_f64().unwrap_or(0.0),
+                prompt_n: t["prompt_n"].as_u64().unwrap_or(0),
+                cache_n: t["cache_n"].as_u64().unwrap_or(0),
+            });
+        }
+        if let Some(p) = v.get("prompt_progress").filter(|p| p.is_object()) {
+            out.push(Delta::PromptProgress {
+                total: p["total"].as_u64().unwrap_or(0),
+                cache: p["cache"].as_u64().unwrap_or(0),
+                processed: p["processed"].as_u64().unwrap_or(0),
             });
         }
         Ok(out)
@@ -122,5 +132,47 @@ impl Accumulator {
             timings: self.timings,
             first_token_ms,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prompt_progress_and_full_timings_are_read() {
+        let mut a = Accumulator::default();
+        let progress = r#"{"choices":[{"index":0,"delta":{"role":"assistant","content":null}}],
+            "prompt_progress":{"total":3000,"cache":1000,"processed":2000,"time_ms":120}}"#;
+        let d = a.apply(progress).ok().unwrap_or_default();
+        assert_eq!(
+            d,
+            [Delta::PromptProgress {
+                total: 3000,
+                cache: 1000,
+                processed: 2000
+            }]
+        );
+        let last = r#"{"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}],
+            "timings":{"cache_n":1000,"prompt_n":2000,"prompt_ms":400.0,"prompt_per_second":5000.0,
+                       "predicted_n":1,"predicted_ms":10.0,"predicted_per_second":100.0}}"#;
+        assert_eq!(
+            a.apply(last).ok().unwrap_or_default(),
+            [Delta::Text("hi".into())]
+        );
+        let t = a.finish(None).timings.unwrap_or_default();
+        assert_eq!(
+            (t.prompt_n, t.cache_n, t.prompt_per_second),
+            (2000, 1000, 5000.0)
+        );
+    }
+
+    #[test]
+    fn recorded_timings_without_the_new_fields_still_read() {
+        let t: Timings = serde_json::from_str(
+            r#"{"prompt_ms":1.0,"predicted_ms":2.0,"predicted_per_second":3.0}"#,
+        )
+        .unwrap_or_default();
+        assert_eq!((t.predicted_per_second, t.prompt_n), (3.0, 0));
     }
 }

@@ -84,6 +84,19 @@ Rust-backed modules for what Lua lacks (D-45; every signature is in
   `psi.fs.read/write/exists/stat/list/glob` (glob skips gitignored files).
 - `psi.time.now/format/parse`.
 
+A status line segment: `model_stats` fires after each model response
+with its tokens and speeds (nil when the server didn't say), and
+`psi.ui.status(key, text)` shows text on the status line:
+
+```lua
+psi.on("model_stats", function(ev)
+  if ev.output_tokens then
+    total = (total or 0) + ev.output_tokens  -- a local declared above, in real code
+    psi.ui.status("out", psi.time.format(nil, "%H:%M") .. " " .. total .. " tokens out")
+  end
+end)
+```
+
 In `psi ext test`, script what commands and requests return with
 `test.ui.answer("exec", { code = 0, stdout = "..." })` and
 `test.ui.answer("http", { status = 200, body = "..." })`; each call takes

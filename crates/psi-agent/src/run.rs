@@ -915,6 +915,10 @@ impl Agent {
                 )
                 .await;
             }
+            if self.ext_listens("model_stats") {
+                self.ext_notify("model_stats", self.model_stats(&resp))
+                    .await;
+            }
 
             if resp.tool_calls.is_empty() {
                 self.emit(AgentEvent::TurnEnd { turn });
@@ -1052,8 +1056,8 @@ impl Agent {
             tx
         });
         let events = self.events.clone();
-        let mut on_delta = move |d: Delta| {
-            if let Delta::Text(t) = d {
+        let mut on_delta = move |d: Delta| match d {
+            Delta::Text(t) => {
                 if let Some(u) = &updates {
                     let _ = u.send(t.clone());
                 }
@@ -1061,6 +1065,20 @@ impl Agent {
                     let _ = tx.send(AgentEvent::TextDelta { text: t });
                 }
             }
+            Delta::PromptProgress {
+                total,
+                cache,
+                processed,
+            } => {
+                if let Some(tx) = &events {
+                    let _ = tx.send(AgentEvent::PromptProgress {
+                        total,
+                        cache,
+                        processed,
+                    });
+                }
+            }
+            _ => {}
         };
         let mut retried = false;
         loop {
@@ -1091,6 +1109,26 @@ impl Agent {
                 () = self.ctx.cancel.cancelled() => return Err(AiError::Aborted),
             }
         }
+    }
+
+    /// The `model_stats` payload: what one response cost and how fast it
+    /// came, for extensions' status line segments.
+    fn model_stats(&self, resp: &Response) -> Value {
+        let mut v = json!({"model": self.cfg.model, "context_window": self.cfg.n_ctx});
+        if let Some(u) = resp.usage {
+            v["context_tokens"] = json!(u.prompt_total() + u.output);
+            v["input_tokens"] = json!(u.input);
+            v["cached_tokens"] = json!(u.cache_read);
+            v["output_tokens"] = json!(u.output);
+        }
+        if let Some(t) = resp.timings {
+            v["tok_s"] = json!(t.predicted_per_second);
+            v["prompt_tok_s"] = json!(t.prompt_per_second);
+        }
+        if let Some(ms) = resp.first_token_ms {
+            v["first_token_ms"] = json!(ms);
+        }
+        v
     }
 
     fn record_assistant(&mut self, resp: &Response) -> Result<(), String> {

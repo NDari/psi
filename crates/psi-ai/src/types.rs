@@ -66,6 +66,12 @@ pub struct ChatRequest {
 impl ChatRequest {
     /// The exact bytes sent. No sampling fields: the server's settings apply.
     pub fn to_bytes(&self) -> Vec<u8> {
+        self.body(false)
+    }
+
+    /// The bytes, asking llama-server to stream prompt-processing progress
+    /// when `progress` (other servers may refuse the field).
+    pub fn body(&self, progress: bool) -> Vec<u8> {
         let mut body = json!({
             "model": self.model,
             "messages": self.messages.iter().map(ChatMessage::to_json).collect::<Vec<_>>(),
@@ -78,6 +84,9 @@ impl ChatRequest {
         }
         if let Some(t) = self.enable_thinking {
             body["chat_template_kwargs"] = json!({"enable_thinking": t});
+        }
+        if progress {
+            body["return_progress"] = json!(true);
         }
         // A Value always serializes.
         serde_json::to_vec(&body).unwrap_or_default()
@@ -116,6 +125,14 @@ pub struct Timings {
     pub prompt_ms: f64,
     pub predicted_ms: f64,
     pub predicted_per_second: f64,
+    /// Prompt tokens processed per second (the ones not from the cache).
+    #[serde(default)]
+    pub prompt_per_second: f64,
+    /// Prompt tokens processed now, and reused from the cache.
+    #[serde(default)]
+    pub prompt_n: u64,
+    #[serde(default)]
+    pub cache_n: u64,
 }
 
 /// A finished model response.
@@ -136,7 +153,17 @@ pub struct Response {
 pub enum Delta {
     Text(String),
     Reasoning(String),
-    ToolCallStart { index: usize, name: String },
+    ToolCallStart {
+        index: usize,
+        name: String,
+    },
+    /// llama-server reading the prompt (`return_progress`): tokens done of
+    /// `total`, `cache` of them reused.
+    PromptProgress {
+        total: u64,
+        cache: u64,
+        processed: u64,
+    },
 }
 
 #[cfg(test)]
@@ -179,5 +206,8 @@ mod tests {
             json!({"role": "tool", "tool_call_id": "c1", "content": "x"})
         );
         assert_eq!(v["stream_options"]["include_usage"], true);
+        assert!(v.get("return_progress").is_none());
+        let with: Value = serde_json::from_slice(&req.body(true)).unwrap();
+        assert_eq!(with["return_progress"], true);
     }
 }

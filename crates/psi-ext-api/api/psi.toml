@@ -317,6 +317,12 @@ doc = "The model's answer is complete."
 payload = "MessageEndEvent"
 
 [[event]]
+name = "model_stats"
+kind = "notify"
+doc = "A model response finished: its tokens and speed, for a status line segment (psi.ui.status)."
+payload = "ModelStatsEvent"
+
+[[event]]
 name = "tool_call"
 kind = "gate"
 doc = "A tool call is about to be checked and run. Return { block = true, reason = ... } to refuse it, or { args = {...} } to rewrite its arguments (the rewrite is checked by the policy and recorded)."
@@ -520,6 +526,21 @@ name = "MessageEndEvent"
 fields = [
   { name = "text", type = "string", doc = "" },
   { name = "tool_calls", type = "table[]", doc = "" },
+]
+
+[[type]]
+name = "ModelStatsEvent"
+doc = "Fields the server didn't report are nil."
+fields = [
+  { name = "model", type = "string", doc = "" },
+  { name = "context_window", type = "integer", doc = "In tokens" },
+  { name = "context_tokens", type = "integer?", doc = "The conversation's size after this response" },
+  { name = "input_tokens", type = "integer?", doc = "Prompt tokens the server read now" },
+  { name = "cached_tokens", type = "integer?", doc = "Prompt tokens reused from the server's cache" },
+  { name = "output_tokens", type = "integer?", doc = "" },
+  { name = "tok_s", type = "number?", doc = "Output tokens per second" },
+  { name = "prompt_tok_s", type = "number?", doc = "Prompt tokens read per second" },
+  { name = "first_token_ms", type = "integer?", doc = "From sending the request to the first token" },
 ]
 
 [[type]]

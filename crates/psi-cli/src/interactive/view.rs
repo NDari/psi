@@ -241,6 +241,10 @@ pub struct Status {
     pub n_ctx: u64,
     pub prompt_tokens: u64,
     pub tok_s: Option<f64>,
+    /// Prompt tokens read per second, last response.
+    pub prompt_tok_s: Option<f64>,
+    /// The share of the last prompt reused from the server's cache.
+    pub cache_pct: Option<u64>,
     pub ttft_ms: Option<u64>,
     pub mode: String,
     pub network: String,
@@ -261,12 +265,27 @@ pub fn status_line(s: &Status, width: usize) -> Line {
         l.push(p, theme::style(Token::Warning).bold());
         l.push("  ", Style::default());
     }
-    let mut parts = vec![s.model.clone()];
+    l.push(&s.model, dim());
     if let Some(pct) = (s.prompt_tokens * 100).checked_div(s.n_ctx) {
-        parts.push(format!("ctx {pct}%"));
+        // Like pi-powerline-footer: a warning from 70%, an error from 90%.
+        let style = match pct {
+            90.. => theme::style(Token::Error),
+            70.. => theme::style(Token::Warning),
+            _ => dim(),
+        };
+        l.push(" · ", dim());
+        l.push(format!("ctx {pct}% of {}", short_tokens(s.n_ctx)), style);
     }
+    // Joined with " · ", after the model and context.
+    let mut parts = vec![String::new()];
     if let Some(t) = s.tok_s {
         parts.push(format!("{t:.0} tok/s"));
+    }
+    if let Some(t) = s.prompt_tok_s {
+        parts.push(format!("read {t:.0} tok/s"));
+    }
+    if let Some(c) = s.cache_pct {
+        parts.push(format!("cache {c}%"));
     }
     if let Some(t) = s.ttft_ms {
         parts.push(format!("ttft {t}ms"));
@@ -281,6 +300,28 @@ pub fn status_line(s: &Status, width: usize) -> Line {
         l.push("  UNISOLATED", theme::style(Token::Error).bold());
     }
     l.truncate(width)
+}
+
+/// 65536 reads "64K", 900 "900".
+pub fn short_tokens(n: u64) -> String {
+    match n {
+        0..1000 => n.to_string(),
+        1000..10_000 => format!("{:.1}K", n as f64 / 1024.0).replace(".0K", "K"),
+        _ => format!("{}K", (n + 512) / 1024),
+    }
+}
+
+/// The spinner's text while the server reads the prompt: the share of
+/// the new tokens done (cached ones take no time).
+pub fn prompt_progress((total, cache, processed): (u64, u64, u64)) -> String {
+    let new = total.saturating_sub(cache);
+    let done = processed.saturating_sub(cache);
+    let pct = (done * 100).checked_div(new).unwrap_or(100);
+    let mut s = format!("reading the prompt: {pct}% of {} tokens", short_tokens(new));
+    if cache > 0 {
+        s.push_str(&format!(", {} from the cache", short_tokens(cache)));
+    }
+    s
 }
 
 /// The approval card under the input box (§8.7).
@@ -364,6 +405,57 @@ pub fn list(items: &[String], sel: usize, max: usize, width: usize) -> Vec<Line>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn text(l: &Line) -> String {
+        l.spans.iter().map(|s| s.text.as_str()).collect()
+    }
+
+    #[test]
+    fn the_status_line_shows_speeds_cache_and_a_colored_context() {
+        let mut s = Status {
+            model: "qwen".into(),
+            n_ctx: 65536,
+            prompt_tokens: 32768,
+            tok_s: Some(41.6),
+            prompt_tok_s: Some(812.0),
+            cache_pct: Some(93),
+            ttft_ms: Some(240),
+            mode: "auto".into(),
+            ..Status::default()
+        };
+        let l = status_line(&s, 200);
+        assert_eq!(
+            text(&l),
+            "qwen · ctx 50% of 64K · 42 tok/s · read 812 tok/s · cache 93% · ttft 240ms · auto · 0 checkpoints"
+        );
+        let ctx = |s: &Status| {
+            let l = status_line(s, 200);
+            l.spans
+                .iter()
+                .find(|x| x.text.contains("ctx"))
+                .map(|x| x.style)
+                .unwrap()
+        };
+        assert_eq!(ctx(&s), dim());
+        s.prompt_tokens = 48000;
+        assert_eq!(ctx(&s), theme::style(Token::Warning));
+        s.prompt_tokens = 60000;
+        assert_eq!(ctx(&s), theme::style(Token::Error));
+    }
+
+    #[test]
+    fn prompt_progress_counts_only_the_new_tokens() {
+        assert_eq!(
+            prompt_progress((30000, 20000, 25000)),
+            "reading the prompt: 50% of 10K tokens, 20K from the cache"
+        );
+        assert_eq!(
+            prompt_progress((800, 0, 200)),
+            "reading the prompt: 25% of 800 tokens"
+        );
+        assert_eq!(short_tokens(65536), "64K");
+        assert_eq!(short_tokens(1024), "1K");
+    }
 
     /// The words shown in reverse video on each line.
     fn emphasized(lines: &[Line]) -> Vec<Vec<String>> {

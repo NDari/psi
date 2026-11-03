@@ -56,6 +56,7 @@ yours.
 - [ ] `!cmd` runs a command as you; its output goes to the model with the next prompt. `!!cmd` doesn't send it. (auto: `!`)
 - [ ] `/undo`, `/diff`, `/stats`, `/mode strict` (the status line shows strict) work. (auto)
 - [ ] The status line shows model, context use, tok/s, time to first token, mode, checkpoints, and `UNISOLATED` in red when bubblewrap doesn't work.
+- [ ] Against llama-server: `ctx N% of 64K` turns yellow from 70% and red from 90%; after an answer, `read N tok/s` and `cache N%` show; on a long prompt the spinner reads `reading the prompt: N% of ... tokens, ... from the cache` before the answer streams. An extension on `model_stats` can add its own segment with `psi.ui.status`.
 - [ ] After quitting, the terminal is back to normal (cursor shown, no raw mode), and psi prints the session file.
 
 ## Batteries (Phase 6)

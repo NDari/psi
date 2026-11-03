@@ -348,6 +348,7 @@ return {
         return string.format("code=%s out=%s", tostring(r.code), r.stdout)
       end,
     }
+    psi.on("model_stats", function(ev) psi.append_entry("stats", ev) end)
   end,
 }
 "#;
@@ -454,6 +455,21 @@ return {
         "{}",
         results[4]
     );
+    // One model_stats per response, with what the server reported (the
+    // last response's entry lands after the run, between steps).
+    let stats: Vec<Value> = a
+        .session()
+        .entries()
+        .iter()
+        .filter_map(|e| match &e.body {
+            EntryBody::Custom { custom_type, data } if custom_type == "stats" => Some(data.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(stats.len() >= 5, "{stats:?}");
+    assert_eq!(stats[0]["model"], "local");
+    assert_eq!(stats[0]["context_window"], 8192);
+    assert!(stats[0]["output_tokens"].is_u64(), "{}", stats[0]);
     let asked = approver.asked.lock().unwrap();
     assert_eq!(asked.len(), 2);
     assert_eq!(asked[0].args["command"], "git clean -fd");

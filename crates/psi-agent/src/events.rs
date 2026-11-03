@@ -14,6 +14,13 @@ pub enum AgentEvent {
     TurnStart {
         turn: u32,
     },
+    /// The server is reading the prompt: `processed` of `total` tokens,
+    /// `cache` of them reused (llama-server's `return_progress`).
+    PromptProgress {
+        total: u64,
+        cache: u64,
+        processed: u64,
+    },
     /// Streamed answer text.
     TextDelta {
         text: String,

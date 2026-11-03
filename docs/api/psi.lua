@@ -17,6 +17,7 @@
 ---| "message_start" # The model started answering.
 ---| "message_update" # Streamed answer text.
 ---| "message_end" # The model's answer is complete.
+---| "model_stats" # A model response finished: its tokens and speed, for a status line segment (psi.ui.status).
 ---| "tool_call" # A tool call is about to be checked and run. Return { block = true, reason = ... } to refuse it, or { args = {...} } to rewrite its arguments (the rewrite is checked by the policy and recorded).
 ---| "tool_execution_update" # A tool call is running.
 ---| "tool_result" # A tool call finished. Return { text = ..., is_error = ... } to change what the model sees.
@@ -133,6 +134,18 @@
 ---@class MessageEndEvent
 ---@field text string
 ---@field tool_calls table[]
+
+--- Fields the server didn't report are nil.
+---@class ModelStatsEvent
+---@field model string
+---@field context_window integer In tokens
+---@field context_tokens? integer The conversation's size after this response
+---@field input_tokens? integer Prompt tokens the server read now
+---@field cached_tokens? integer Prompt tokens reused from the server's cache
+---@field output_tokens? integer
+---@field tok_s? number Output tokens per second
+---@field prompt_tok_s? number Prompt tokens read per second
+---@field first_token_ms? integer From sending the request to the first token
 
 ---@class ToolCallEvent
 ---@field id string
@@ -272,6 +285,7 @@ psi.time = {}
 ---@overload fun(event: "message_start", handler: fun(ev: TurnEvent, ctx: Context))
 ---@overload fun(event: "message_update", handler: fun(ev: MessageUpdateEvent, ctx: Context))
 ---@overload fun(event: "message_end", handler: fun(ev: MessageEndEvent, ctx: Context))
+---@overload fun(event: "model_stats", handler: fun(ev: ModelStatsEvent, ctx: Context))
 ---@overload fun(event: "tool_call", handler: fun(ev: ToolCallEvent, ctx: Context): ToolCallResult?)
 ---@overload fun(event: "tool_execution_update", handler: fun(ev: ToolCallEvent, ctx: Context))
 ---@overload fun(event: "tool_result", handler: fun(ev: ToolResultEvent, ctx: Context): ToolResult?)

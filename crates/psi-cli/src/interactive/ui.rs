@@ -148,6 +148,8 @@ pub const COMMANDS: &[(&str, &str)] = &[
 struct Running {
     started: Instant,
     tools: Vec<(String, String, Value, Instant)>,
+    /// The server reading the prompt: (total, cache, processed) tokens.
+    progress: Option<(u64, u64, u64)>,
 }
 
 struct Card {
@@ -844,6 +846,7 @@ impl<W: Write> App<W> {
                         self.running = Some(Running {
                             started: Instant::now(),
                             tools: Vec::new(),
+                            progress: None,
                         });
                         self.send(Cmd::ExecutePlan);
                     }
@@ -1116,6 +1119,7 @@ impl<W: Write> App<W> {
         self.running = Some(Running {
             started: Instant::now(),
             tools: Vec::new(),
+            progress: None,
         });
         self.send(Cmd::Prompt(t));
     }
@@ -1757,7 +1761,22 @@ impl<W: Write> App<W> {
     }
 
     fn on_agent(&mut self, ev: AgentEvent) {
+        // The prompt has been read once anything else comes.
+        if !matches!(ev, AgentEvent::PromptProgress { .. })
+            && let Some(r) = &mut self.running
+        {
+            r.progress = None;
+        }
         match ev {
+            AgentEvent::PromptProgress {
+                total,
+                cache,
+                processed,
+            } => {
+                if let Some(r) = &mut self.running {
+                    r.progress = (processed < total).then_some((total, cache, processed));
+                }
+            }
             AgentEvent::TextDelta { text } => {
                 let w = self.width();
                 let first = self.md.pending().is_empty();
@@ -1891,7 +1910,17 @@ impl<W: Write> App<W> {
             }
             EntryBody::Custom { custom_type, data } if custom_type == "timing" => {
                 self.status.ttft_ms = data["first_token_ms"].as_u64();
-                self.status.tok_s = data["timings"]["predicted_per_second"].as_f64();
+                let t = &data["timings"];
+                self.status.tok_s = t["predicted_per_second"].as_f64();
+                // Older entries lack these; a prompt all from the cache has no speed.
+                self.status.prompt_tok_s = t["prompt_per_second"]
+                    .as_f64()
+                    .filter(|_| t["prompt_n"].as_u64().unwrap_or(0) > 0);
+                let (n, cached) = (t["prompt_n"].as_u64(), t["cache_n"].as_u64());
+                self.status.cache_pct = match (n, cached) {
+                    (Some(n), Some(c)) => (c * 100).checked_div(n + c),
+                    _ => None,
+                };
             }
             EntryBody::Custom { custom_type, data } if custom_type == "plan" => {
                 let p = PlanState::from_json(data);
@@ -2017,12 +2046,13 @@ impl<W: Write> App<W> {
             if r.tools.is_empty() && pending.is_empty() && self.card.is_none() {
                 let spin = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
                 let i = (r.started.elapsed().as_millis() / 80) as usize % spin.len();
+                let secs = r.started.elapsed().as_secs_f64();
+                let what = match r.progress {
+                    Some(p) => view::prompt_progress(p),
+                    None => "waiting for the model…".into(),
+                };
                 live.push(Line::styled(
-                    format!(
-                        "{} waiting for the model… ({:.0}s)",
-                        spin[i],
-                        r.started.elapsed().as_secs_f64()
-                    ),
+                    format!("{} {what} ({secs:.0}s)", spin[i]),
                     dim(),
                 ));
             }

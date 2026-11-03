@@ -902,6 +902,7 @@ Subscribe with `psi.on(event, function(ev, ctx) ... end)`; `ev` is the payload a
 | `message_start` | notify | `TurnEvent` |  | The model started answering. |
 | `message_update` | notify | `MessageUpdateEvent` |  | Streamed answer text. |
 | `message_end` | notify | `MessageEndEvent` |  | The model's answer is complete. |
+| `model_stats` | notify | `ModelStatsEvent` |  | A model response finished: its tokens and speed, for a status line segment (psi.ui.status). |
 | `tool_call` | gate | `ToolCallEvent` | `ToolCallResult?` | A tool call is about to be checked and run. Return { block = true, reason = ... } to refuse it, or { args = {...} } to rewrite its arguments (the rewrite is checked by the policy and recorded). |
 | `tool_execution_update` | notify | `ToolCallEvent` |  | A tool call is running. |
 | `tool_result` | chain | `ToolResultEvent` | `ToolResult?` | A tool call finished. Return { text = ..., is_error = ... } to change what the model sees. |
@@ -1098,6 +1099,22 @@ A custom UI component (pi-tui parity), drawn under the input box under a deadlin
 | `text` | `string` |  |
 | `tool_calls` | `table[]` |  |
 
+### ModelStatsEvent
+
+Fields the server didn't report are nil.
+
+| Field | Type | Description |
+|---|---|---|
+| `model` | `string` |  |
+| `context_window` | `integer` | In tokens |
+| `context_tokens` | `integer?` | The conversation's size after this response |
+| `input_tokens` | `integer?` | Prompt tokens the server read now |
+| `cached_tokens` | `integer?` | Prompt tokens reused from the server's cache |
+| `output_tokens` | `integer?` |  |
+| `tok_s` | `number?` | Output tokens per second |
+| `prompt_tok_s` | `number?` | Prompt tokens read per second |
+| `first_token_ms` | `integer?` | From sending the request to the first token |
+
 ### ToolCallEvent
 
 | Field | Type | Description |
@@ -1147,7 +1164,7 @@ A custom UI component (pi-tui parity), drawn under the input box under a deadlin
 
 The name of an event.
 
-One of: `"session_start"`, `"session_shutdown"`, `"session_before_compact"`, `"input"`, `"before_agent_start"`, `"agent_start"`, `"agent_end"`, `"turn_start"`, `"turn_end"`, `"context"`, `"message_start"`, `"message_update"`, `"message_end"`, `"tool_call"`, `"tool_execution_update"`, `"tool_result"`, `"policy_decision"`, `"guard_event"`.
+One of: `"session_start"`, `"session_shutdown"`, `"session_before_compact"`, `"input"`, `"before_agent_start"`, `"agent_start"`, `"agent_end"`, `"turn_start"`, `"turn_end"`, `"context"`, `"message_start"`, `"message_update"`, `"message_end"`, `"model_stats"`, `"tool_call"`, `"tool_execution_update"`, `"tool_result"`, `"policy_decision"`, `"guard_event"`.
 
 ### ExecOptions
 

@@ -302,7 +302,11 @@ pub async fn prepare(args: &RunArgs, approver: Arc<dyn Approver>) -> Result<Prep
     let client = Client::new(&profile.base_url).with_headers(&profile.headers);
 
     // D-09: the template must support tool calls; take the window from /props.
-    let n_ctx = match client.props().await {
+    let props = client.props().await;
+    // A server with /props is llama-server: in the TUI, ask it for
+    // prompt-processing progress (other servers may refuse the field).
+    let client = client.with_progress(props.is_ok() && mode == "interactive");
+    let n_ctx = match props {
         Ok(p) => {
             if p.supports_tool_calls == Some(false) {
                 bail!("{}", AiError::NoToolSupport);

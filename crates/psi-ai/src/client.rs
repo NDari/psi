@@ -49,6 +49,8 @@ pub struct Client {
     root: String,
     http: reqwest::Client,
     wire: Option<Arc<WireLog>>,
+    /// Ask for prompt-processing progress (llama-server's `return_progress`).
+    progress: bool,
 }
 
 impl Client {
@@ -64,6 +66,7 @@ impl Client {
             root,
             http,
             wire: None,
+            progress: false,
         }
     }
 
@@ -87,6 +90,13 @@ impl Client {
         {
             self.http = http;
         }
+        self
+    }
+
+    /// Streams `Delta::PromptProgress` while the server reads the prompt.
+    /// Only for llama-server: other servers may refuse the field.
+    pub fn with_progress(mut self, on: bool) -> Self {
+        self.progress = on;
         self
     }
 
@@ -165,7 +175,8 @@ impl Client {
         cancel: &CancellationToken,
         on_delta: &mut (dyn FnMut(Delta) + Send),
     ) -> Result<Response, AiError> {
-        self.chat_bytes(req.to_bytes(), cancel, on_delta).await
+        self.chat_bytes(req.body(self.progress), cancel, on_delta)
+            .await
     }
 
     /// Sends a chat request body as is (for replay, which resends the
@@ -218,7 +229,8 @@ impl Client {
                 match acc.apply(&data) {
                     Ok(deltas) => {
                         for d in deltas {
-                            if first.is_none() {
+                            // Progress comes before any token.
+                            if first.is_none() && !matches!(d, Delta::PromptProgress { .. }) {
                                 *first = Some(start.elapsed().as_millis() as u64);
                             }
                             on_delta(d);
