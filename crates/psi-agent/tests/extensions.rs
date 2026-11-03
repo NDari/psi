@@ -6,6 +6,8 @@
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
+use futures_util::future::BoxFuture;
+use psi_agent::approval::{Approval, ApprovalRequest, Approver, BlockedChoice, BlockedRequest};
 use psi_agent::{Agent, AgentConfig, Budgets, Safety};
 use psi_ai::Client;
 use psi_ai::replay::{ReplayServer, Reply, ScriptedReply};
@@ -290,4 +292,178 @@ return {
         child_result.contains("blocked for worker after 1 turns"),
         "{child_result}"
     );
+}
+
+/// Answers in order and records what it was asked.
+#[derive(Default)]
+struct Scripted {
+    answers: std::sync::Mutex<Vec<Approval>>,
+    asked: std::sync::Mutex<Vec<ApprovalRequest>>,
+}
+
+impl Approver for Scripted {
+    fn approve(&self, req: ApprovalRequest) -> BoxFuture<'static, Approval> {
+        self.asked.lock().unwrap().push(req);
+        let mut a = self.answers.lock().unwrap();
+        let answer = if a.is_empty() {
+            Approval::Deny
+        } else {
+            a.remove(0)
+        };
+        Box::pin(async move { answer })
+    }
+    fn blocked(&self, _: BlockedRequest) -> BoxFuture<'static, BlockedChoice> {
+        Box::pin(async { BlockedChoice::No })
+    }
+    fn pause(&self, _: String) -> BoxFuture<'static, bool> {
+        Box::pin(async { false })
+    }
+    fn interactive(&self) -> bool {
+        true
+    }
+}
+
+/// psi.exec goes through the always-ask rules and the sandbox, io.popen is
+/// gone, and psi.http honors `network` off (D-45).
+#[tokio::test(flavor = "multi_thread")]
+async fn extension_commands_ask_and_run_inside_the_boundary() {
+    const RUNNER: &str = r#"
+return {
+  name = "runner", version = "0.1.0", description = "Runs commands",
+  setup = function(psi)
+    psi.register_tool{
+      name = "run", description = "Run a command",
+      params = { argv = { type = "array", description = "The command" } },
+      execute = function(args)
+        if args.argv[1] == "popen" then
+          local _, err = pcall(io.popen, "ls")
+          return "popen: " .. tostring(err)
+        end
+        if args.argv[1] == "http" then
+          local _, err = pcall(psi.http.get, "http://127.0.0.1:9/")
+          return "http: " .. tostring(err)
+        end
+        local ok, r = pcall(psi.exec, args.argv)
+        if not ok then return "error: " .. tostring(r) end
+        return string.format("code=%s out=%s", tostring(r.code), r.stdout)
+      end,
+    }
+  end,
+}
+"#;
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+    let tmp = tempfile::tempdir_in(base).unwrap();
+    let cwd = tmp.path().join("project");
+    let exts = tmp.path().join("exts");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::create_dir_all(&exts).unwrap();
+    std::fs::write(exts.join("runner.lua"), RUNNER).unwrap();
+    let sources: Vec<Source> = psi_ext::load::discover(&exts)
+        .into_iter()
+        .map(|r| r.unwrap())
+        .collect();
+    let shared = Arc::new(RwLock::new(Shared {
+        cwd: cwd.display().to_string(),
+        mode: "test".into(),
+        ..Shared::default()
+    }));
+    let (ui, _ui_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (ext, errors) = tokio::task::spawn_blocking(move || {
+        ExtManager::start(&sources, shared, Limits::default(), ui)
+    })
+    .await
+    .unwrap();
+    assert!(errors.is_empty(), "{errors:?}");
+
+    let server = ReplayServer::start(vec![
+        call(
+            "run",
+            json!({"argv": ["sh", "-c", "echo hi; test -w / && echo open; true"]}),
+        ),
+        call("run", json!({"argv": ["git", "clean", "-fd"]})),
+        call(
+            "run",
+            json!({"argv": ["sh", "-c", "git clean -n >/dev/null 2>&1; echo cleaned"]}),
+        ),
+        call("run", json!({"argv": ["popen"]})),
+        call("run", json!({"argv": ["http"]})),
+        text("done"),
+    ])
+    .unwrap();
+    let tmpdir = tmp.path().join("tmp");
+    let mut ctx = ToolCtx::new(&cwd, &tmpdir, 20_000);
+    let cfg = SandboxConfig {
+        root: cwd.clone(),
+        git_dirs: vec![],
+        cache_dirs: vec![],
+        tmpdir: tmpdir.clone(),
+        network: false,
+    };
+    let Isolation::On(sb) = choose(true, cfg, None) else {
+        panic!("the sandbox must work")
+    };
+    ctx.sandbox = Some(sb);
+    let session = SessionFile::create(&tmp.path().join("sessions"), &cwd).unwrap();
+    let cfg = AgentConfig {
+        model: "local".into(),
+        max_output: 256,
+        n_ctx: 8192,
+        enable_thinking: None,
+        budgets: Budgets::default(),
+        system_prompt: "sys".into(),
+        tools: core_tools(false),
+        home: None,
+    };
+    let approver = Arc::new(Scripted {
+        answers: std::sync::Mutex::new(vec![Approval::Deny, Approval::Once]),
+        ..Default::default()
+    });
+    let mut safety = Safety::headless(&cwd, None, &tmpdir);
+    safety.approver = approver.clone();
+    let mut a = Agent::new(Client::new(&server.base_url()), session, cfg, ctx)
+        .with_safety(safety)
+        .with_extensions(ext.clone());
+    let out = a.run("run things").await;
+    assert_eq!(out.text, "done");
+
+    let results: Vec<String> = a
+        .session()
+        .entries()
+        .iter()
+        .filter_map(|e| match &e.body {
+            EntryBody::ToolResult { content, .. } => Some(psi_session::text_of(content)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results[0], "code=0 out=hi\n", "ran inside the sandbox");
+    assert!(
+        results[1].contains(
+            "psi.exec: not run: `git clean` is on the always-ask list, and it was denied"
+        ),
+        "{}",
+        results[1]
+    );
+    assert!(results[2].ends_with("out=cleaned\n"), "{}", results[2]);
+    assert!(
+        results[3].contains("io.popen is not available in psi extensions: use psi.exec"),
+        "{}",
+        results[3]
+    );
+    assert!(
+        results[4].contains("psi.http: the network is off"),
+        "{}",
+        results[4]
+    );
+    let asked = approver.asked.lock().unwrap();
+    assert_eq!(asked.len(), 2);
+    assert_eq!(asked[0].args["command"], "git clean -fd");
+    assert_eq!(
+        asked[0].intent.as_deref(),
+        Some("the runner extension runs it")
+    );
+    assert_eq!(
+        asked[1].args["command"],
+        "git clean -n >/dev/null 2>&1; echo cleaned"
+    );
+    ext.shutdown();
 }

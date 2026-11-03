@@ -20,7 +20,10 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::oneshot;
 
 pub use actor::{Actor, EventOut, Kind};
-pub use host::{ProviderInfo, ProviderModel, Registrations, Request, Shared, ToolInfo};
+pub use host::{
+    ExecCall, ExecOutput, HttpCall, HttpOutput, ProviderInfo, ProviderModel, Registrations,
+    Request, Shared, ToolInfo,
+};
 pub use limits::Limits;
 pub use load::{ScriptTool, Source};
 
@@ -28,6 +31,13 @@ use actor::Msg;
 
 /// Runs a tool for `psi.execute_tool`, through the policy.
 pub type ToolRunner = Arc<dyn Fn(String, Json) -> BoxFuture<'static, (String, bool)> + Send + Sync>;
+
+/// What runs `psi.exec` and `psi.http` for extensions: the agent, with its
+/// policy, approver, sandbox and abort token. `ext` names the extension.
+pub trait Services: Send + Sync {
+    fn exec(&self, ext: String, call: ExecCall) -> BoxFuture<'static, Result<ExecOutput, String>>;
+    fn http(&self, ext: String, call: HttpCall) -> BoxFuture<'static, Result<HttpOutput, String>>;
+}
 
 /// How long psi waits for one extension's answer to an event, at most.
 /// A runaway handler is stopped sooner, by the busy limit.
@@ -55,6 +65,9 @@ pub struct ExtManager {
     pub shared: Arc<RwLock<Shared>>,
     agent: Mutex<VecDeque<AgentRequest>>,
     runner: RwLock<Option<ToolRunner>>,
+    services: RwLock<Option<Arc<dyn Services>>>,
+    /// Extensions whose psi.exec runs outside the sandbox (user settings).
+    unsandboxed: RwLock<Vec<String>>,
     /// UI requests: notify, confirm, select, input, status, widget, custom,
     /// send_user_message.
     ui: UnboundedSender<(String, Request)>,
@@ -95,6 +108,8 @@ impl ExtManager {
             shared,
             agent: Mutex::new(VecDeque::new()),
             runner: RwLock::new(None),
+            services: RwLock::new(None),
+            unsandboxed: RwLock::new(Vec::new()),
             ui,
             requests: tx,
             limits,
@@ -118,6 +133,8 @@ impl ExtManager {
             shared: Arc::new(RwLock::new(Shared::default())),
             agent: Mutex::new(VecDeque::new()),
             runner: RwLock::new(None),
+            services: RwLock::new(None),
+            unsandboxed: RwLock::new(Vec::new()),
             ui,
             requests,
             limits: Limits::default(),
@@ -210,6 +227,25 @@ impl ExtManager {
         if let Ok(mut w) = self.runner.write() {
             *w = Some(r);
         }
+    }
+
+    pub fn set_services(&self, s: Arc<dyn Services>) {
+        if let Ok(mut w) = self.services.write() {
+            *w = Some(s);
+        }
+    }
+
+    /// `"extensions": {"<name>": {"unsandboxed": true}}` in the settings.
+    pub fn set_unsandboxed(&self, names: Vec<String>) {
+        if let Ok(mut w) = self.unsandboxed.write() {
+            *w = names;
+        }
+    }
+
+    pub fn is_unsandboxed(&self, ext: &str) -> bool {
+        self.unsandboxed
+            .read()
+            .is_ok_and(|u| u.iter().any(|n| n == ext))
     }
 
     pub fn actors(&self) -> Vec<Arc<Actor>> {
@@ -580,6 +616,32 @@ async fn route(m: Weak<ExtManager>, mut rx: UnboundedReceiver<(String, Request)>
                     }
                     None => {
                         let _ = reply.send(("Tools can't run here.".into(), true));
+                    }
+                }
+            }
+            Request::Exec { call, reply } => {
+                let services = m.services.read().ok().and_then(|r| r.clone());
+                match services {
+                    Some(s) => {
+                        tokio::spawn(async move {
+                            let _ = reply.send(s.exec(ext, call).await);
+                        });
+                    }
+                    None => {
+                        let _ = reply.send(Err("commands can't run here".into()));
+                    }
+                }
+            }
+            Request::Http { call, reply } => {
+                let services = m.services.read().ok().and_then(|r| r.clone());
+                match services {
+                    Some(s) => {
+                        tokio::spawn(async move {
+                            let _ = reply.send(s.http(ext, call).await);
+                        });
+                    }
+                    None => {
+                        let _ = reply.send(Err("requests can't be made here".into()));
                     }
                 }
             }

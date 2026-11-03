@@ -20,6 +20,8 @@ Keys:
   Psi also shows working or waiting in the title and the tab's progress indicator. In tmux,
   set -g focus-events on (to know about focus) and set -g allow-passthrough on.
 - skills, prompts: more directories of skills or prompt templates.
+- extensions: per extension, by name. {"<name>": {"unsandboxed": true}} lets its psi.exec
+  commands run outside the sandbox (they still ask for always-ask commands).
 - packages: installed packages (psi help packages).
 
 Models are in ~/.psi/models.jsonc (psi help models).

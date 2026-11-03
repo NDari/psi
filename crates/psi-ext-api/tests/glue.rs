@@ -154,6 +154,18 @@ impl ExtHost for Recorder {
         self.record(format!("log {message}"));
         Ok(())
     }
+    async fn exec(&self, _: &Lua, argv: Vec<String>, _: Option<Value>) -> mlua::Result<Value> {
+        self.record(format!("exec {argv:?}"));
+        Ok(Value::Nil)
+    }
+    async fn http_request(&self, _: &Lua, req: Value) -> mlua::Result<Value> {
+        self.record(format!("http_request {}", kind(&req)));
+        Ok(Value::Nil)
+    }
+    async fn http_get(&self, _: &Lua, url: String) -> mlua::Result<Value> {
+        self.record(format!("http_get {url}"));
+        Ok(Value::Nil)
+    }
 }
 
 fn setup(host: Recorder) -> (Lua, Rc<Recorder>) {
@@ -389,4 +401,147 @@ fn check_can_refuse_a_call() {
     );
     lua.load("psi.log('still fine')").exec().unwrap();
     assert_eq!(*host.calls.borrow(), ["log still fine"]);
+}
+
+/// Runs Lua that asserts, with the builtin batteries from `register`.
+fn run(lua: &Lua, code: &str) {
+    if let Err(e) = lua.load(code).exec() {
+        panic!("{e}");
+    }
+}
+
+#[test]
+fn json_round_trips_and_sorts_keys() {
+    let (lua, _) = setup(Recorder::default());
+    run(
+        &lua,
+        r#"
+        local j = psi.json
+        assert(j.encode({ b = 1, a = { 1, 2, "x" }, c = true }) == '{"a":[1,2,"x"],"b":1,"c":true}')
+        assert(j.encode({}) == "{}")
+        assert(j.encode(j.array({})) == "[]")
+        assert(j.encode({ n = j.null() }) == '{"n":null}')
+        local v = j.decode('{"list":[1,null,3],"s":"é","f":1.5}')
+        assert(#v.list == 3 and v.list[2] == j.null())
+        assert(v.s == "é" and v.f == 1.5)
+        assert(j.encode(v.list) == "[1,null,3]")
+        assert(j.encode(j.decode("[]")) == "[]")
+        assert(j.encode({ a = 1 }, { pretty = true }) == '{\n  "a": 1\n}')
+        "#,
+    );
+    assert!(lua_error(&lua, "psi.json.decode('{')").starts_with("psi.json.decode: EOF"));
+    assert!(
+        lua_error(&lua, "psi.json.encode({ f = print })").starts_with("psi.json.encode: "),
+        "{}",
+        lua_error(&lua, "psi.json.encode({ f = print })")
+    );
+}
+
+#[test]
+fn regexes_find_replace_and_split() {
+    let (lua, _) = setup(Recorder::default());
+    run(
+        &lua,
+        r#"
+        local re = psi.re
+        assert(re.is_match("^\\d+$", "123") and not re.is_match("^\\d+$", "12a"))
+        local m = re.find("(?P<k>\\w+)=(\\d+)?", "x: key=")
+        assert(m.text == "key=" and m.start == 4 and m.finish == 7)
+        assert(m.groups[1] == "key" and m.groups[2] == "" and m.named.k == "key")
+        assert(re.find("z", "abc") == nil)
+        local all = re.find_all("\\d", "a1b22")
+        assert(#all == 3 and all[3].start == 5)
+        assert(re.replace("(\\w)(\\d)", "a1 b2", "$2$1") == "1a 2b")
+        assert(re.replace("o", "foo", "0", 1) == "f0o")
+        local parts = re.split(",\\s*", "a, b,c")
+        assert(#parts == 3 and parts[2] == "b")
+        "#,
+    );
+    assert!(
+        lua_error(&lua, "psi.re.is_match('(', 'x')").starts_with("psi.re.is_match: bad pattern")
+    );
+}
+
+#[test]
+fn paths_are_lexical() {
+    let (lua, _) = setup(Recorder::default());
+    run(
+        &lua,
+        r#"
+        local p = psi.path
+        assert(p.join("a/b", "c.txt") == "a/b/c.txt")
+        assert(p.join("a", "/abs") == "/abs")
+        assert(p.normalize("a/./b/../c") == "a/c")
+        assert(p.relative("/w/src/x.rs", "/w/docs") == "../src/x.rs")
+        assert(p.relative("/w", "/w") == ".")
+        assert(p.basename("a/b/c.txt") == "c.txt" and p.dirname("a/b/c.txt") == "a/b")
+        assert(p.dirname("c.txt") == "." and p.dirname("/") == "/")
+        assert(p.ext("a/c.tar.gz") == "gz" and p.ext("Makefile") == "")
+        assert(p.absolute("/x/../y") == "/y")
+        "#,
+    );
+}
+
+#[test]
+fn files_read_write_list_and_glob() {
+    let (lua, _) = setup(Recorder::default());
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(".gitignore"), "skip/\n").unwrap();
+    std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+    lua.globals()
+        .set("D", dir.path().display().to_string())
+        .unwrap();
+    run(
+        &lua,
+        r#"
+        local fs, p = psi.fs, psi.path
+        fs.write(p.join(D, "src/a.rs"), "fn a() {}\0bytes")
+        fs.write(p.join(D, "src/deep/b.rs"), "b")
+        fs.write(p.join(D, "skip/c.rs"), "c")
+        assert(fs.read(p.join(D, "src/a.rs")) == "fn a() {}\0bytes")
+        assert(fs.exists(p.join(D, "src")) and not fs.exists(p.join(D, "nope")))
+        local st = fs.stat(p.join(D, "src/a.rs"))
+        assert(st.kind == "file" and st.size == 15 and st.modified > 0)
+        assert(fs.stat(p.join(D, "src")).kind == "dir" and fs.stat(p.join(D, "nope")) == nil)
+        local names = fs.list(p.join(D, "src"))
+        assert(#names == 2 and names[1] == "a.rs" and names[2] == "deep")
+        local top = fs.glob("src/*.rs", { cwd = D })
+        assert(#top == 1 and top[1] == "src/a.rs", table.concat(top, " "))
+        local all = fs.glob("**/*.rs", { cwd = D })
+        assert(#all == 2 and all[2] == "src/deep/b.rs", table.concat(all, " "))
+        local every = fs.glob("**/*.rs", { cwd = D, gitignore = false })
+        assert(#every == 3, table.concat(every, " "))
+        "#,
+    );
+    let err = lua_error(&lua, "psi.fs.read(D .. '/nope')");
+    assert!(
+        err.starts_with("psi.fs.read: ") && err.contains("nope"),
+        "{err}"
+    );
+}
+
+#[test]
+fn formats_hashes_and_time() {
+    let (lua, _) = setup(Recorder::default());
+    run(
+        &lua,
+        r#"
+        local t = psi.toml.decode('name = "psi"\nwhen = 2026-11-02T10:00:00Z\n[deps]\nmlua = { version = "0.12" }\n')
+        assert(t.name == "psi" and t.deps.mlua.version == "0.12", psi.json.encode(t))
+        assert(t.when == "2026-11-02T10:00:00Z", psi.json.encode(t))
+        assert(psi.toml.encode({ b = 1, a = "x" }) == 'a = "x"\nb = 1\n')
+        assert(psi.base64.encode("hi\0") == "aGkA" and psi.base64.decode("aGkA") == "hi\0")
+        assert(psi.hash.sha256("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        local now = psi.time.now()
+        assert(now > 1.7e9)
+        assert(psi.time.parse("2026-11-02T10:00:00Z") == 1793613600)
+        assert(psi.time.parse("not a time") == nil)
+        assert(psi.time.parse("2026-11-02 10:00 +0000", "%Y-%m-%d %H:%M %z") == 1793613600)
+        assert(psi.time.format(0, "%Y") == "1970" or psi.time.format(0, "%Y") == "1969")
+        assert(#psi.time.format() >= 20)
+        "#,
+    );
+    assert!(lua_error(&lua, "psi.base64.decode('!!')").starts_with("psi.base64.decode: "));
+    assert!(lua_error(&lua, "psi.time.format(0, '%Q')").starts_with("psi.time.format: bad format"));
+    assert!(lua_error(&lua, "psi.toml.encode({1, 2})").starts_with("psi.toml.encode: "));
 }

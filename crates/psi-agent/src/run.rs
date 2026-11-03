@@ -208,6 +208,8 @@ pub struct Agent {
     /// The grants given at the start (`--allow`); `s` answers come on top
     /// and last until the session changes.
     base_grants: HashSet<String>,
+    /// `s` answers to extension commands (psi.exec), until the session changes.
+    ext_grants: Arc<Mutex<HashSet<String>>>,
 }
 
 /// A call after the shape-fix pipeline: the tool and its arguments, or the
@@ -276,6 +278,7 @@ impl Agent {
             mcp_tools: Vec::new(),
             mcp_waited: false,
             base_grants: HashSet::new(),
+            ext_grants: Arc::default(),
         }
         .with_abort_token()
     }
@@ -342,6 +345,15 @@ impl Agent {
             self.cfg.tools.clone(),
             Arc::downgrade(&self.ext),
         ));
+        self.ext
+            .set_services(Arc::new(crate::services::ExtServices {
+                ctx: self.ctx.clone(),
+                policy: self.safety.policy.clone(),
+                approver: self.safety.approver.clone(),
+                grants: self.safety.grants.clone(),
+                ext_grants: self.ext_grants.clone(),
+                ext: Arc::downgrade(&self.ext),
+            }));
     }
 
     /// The tools offered to the model, core first. Plan mode leaves out
@@ -493,6 +505,9 @@ impl Agent {
         // /fork drop the `s` answers (always-ask entries) and keep only
         // what --allow granted at the start.
         self.safety.grants = self.base_grants.clone();
+        if let Ok(mut g) = self.ext_grants.lock() {
+            g.clear();
+        }
         self.capture_failing = false;
         self.restore_plan();
         if let Ok(mut f) = self.ctx.files.lock() {

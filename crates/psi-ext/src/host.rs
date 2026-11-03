@@ -6,6 +6,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use mlua::{Function, Lua, LuaSerdeExt, Table, Value};
 use psi_ext_api::ExtHost;
@@ -77,6 +78,198 @@ pub enum Request {
     Log(String),
     /// Answered once every request sent before it was handled.
     Flush(oneshot::Sender<()>),
+    /// psi.exec: run through the agent's policy and sandbox.
+    Exec {
+        call: ExecCall,
+        reply: oneshot::Sender<Result<ExecOutput, String>>,
+    },
+    /// psi.http.request: honors the `network` setting.
+    Http {
+        call: HttpCall,
+        reply: oneshot::Sender<Result<HttpOutput, String>>,
+    },
+}
+
+/// A `psi.exec` call.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExecCall {
+    pub argv: Vec<String>,
+    pub cwd: Option<String>,
+    pub env: Vec<(String, String)>,
+    pub stdin: Option<Vec<u8>>,
+    pub timeout: Duration,
+    /// Per stream.
+    pub max_bytes: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ExecOutput {
+    /// `None` when it was stopped.
+    pub code: Option<i32>,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub killed: bool,
+    pub truncated: bool,
+}
+
+/// A `psi.http.request` call.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HttpCall {
+    pub method: String,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub query: Vec<(String, String)>,
+    pub body: Option<Vec<u8>>,
+    pub timeout: Duration,
+    pub max_bytes: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HttpOutput {
+    pub status: u16,
+    /// Lowercase names; a repeated header joined with ", ".
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+    pub truncated: bool,
+}
+
+const EXEC_TIMEOUT_MS: i64 = 60_000;
+const EXEC_MAX_BYTES: i64 = 1 << 20;
+const HTTP_TIMEOUT_MS: i64 = 30_000;
+const HTTP_MAX_BYTES: i64 = 10 << 20;
+
+/// A positive `opts` number, else `default`.
+fn positive(t: &Table, key: &str, default: i64) -> mlua::Result<u64> {
+    let v: Option<i64> = t.get(key)?;
+    Ok(v.filter(|n| *n > 0).unwrap_or(default) as u64)
+}
+
+/// A `{string: string}` field as pairs, sorted.
+fn pairs(t: &Table, key: &str) -> mlua::Result<Vec<(String, String)>> {
+    let mut out = Vec::new();
+    if let Some(m) = t.get::<Option<Table>>(key)? {
+        for p in m.pairs::<String, String>() {
+            out.push(p?);
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// The `opts` of psi.exec.
+pub fn exec_call(argv: Vec<String>, opts: Option<Value>) -> mlua::Result<ExecCall> {
+    if argv.is_empty() {
+        return Err(err(
+            "psi.exec: argv is empty; give the program and its arguments, like {\"git\", \"status\"}",
+        ));
+    }
+    let t = match opts {
+        Some(Value::Table(t)) => Some(t),
+        _ => None,
+    };
+    let Some(t) = t else {
+        return Ok(ExecCall {
+            argv,
+            cwd: None,
+            env: Vec::new(),
+            stdin: None,
+            timeout: Duration::from_millis(EXEC_TIMEOUT_MS as u64),
+            max_bytes: EXEC_MAX_BYTES as usize,
+        });
+    };
+    Ok(ExecCall {
+        argv,
+        cwd: t.get("cwd")?,
+        env: pairs(&t, "env")?,
+        stdin: t
+            .get::<Option<mlua::LuaString>>("stdin")?
+            .map(|s| s.as_bytes().to_vec()),
+        timeout: Duration::from_millis(positive(&t, "timeout_ms", EXEC_TIMEOUT_MS)?),
+        max_bytes: positive(&t, "max_bytes", EXEC_MAX_BYTES)? as usize,
+    })
+}
+
+/// The table psi.exec returns.
+pub fn exec_result(lua: &Lua, o: &ExecOutput) -> mlua::Result<Value> {
+    let t = lua.create_table()?;
+    t.set("code", o.code)?;
+    t.set("ok", o.code == Some(0))?;
+    t.set("stdout", lua.create_string(&o.stdout)?)?;
+    t.set("stderr", lua.create_string(&o.stderr)?)?;
+    t.set("killed", o.killed)?;
+    t.set("truncated", o.truncated)?;
+    Ok(Value::Table(t))
+}
+
+/// The request table of psi.http.request.
+pub fn http_call(lua: &Lua, req: Value) -> mlua::Result<HttpCall> {
+    let what = "psi.http.request";
+    let Value::Table(t) = req else {
+        return Err(err(format!("{what}: expected a table with a url")));
+    };
+    let url: String = field(&t, what, "url")?;
+    let mut headers = pairs(&t, "headers")?;
+    let mut body = t
+        .get::<Option<mlua::LuaString>>("body")?
+        .map(|s| s.as_bytes().to_vec());
+    let json: Value = t.get("json")?;
+    if !json.is_nil() {
+        let j = psi_ext_api::batteries::to_json(lua, what, json)?;
+        body = Some(j.to_string().into_bytes());
+        if !headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        {
+            headers.push(("content-type".into(), "application/json".into()));
+        }
+    }
+    let method = match t.get::<Option<String>>("method")? {
+        Some(m) => m.to_ascii_uppercase(),
+        None if body.is_some() => "POST".into(),
+        None => "GET".into(),
+    };
+    Ok(HttpCall {
+        method,
+        url,
+        headers,
+        query: pairs(&t, "query")?,
+        body,
+        timeout: Duration::from_millis(positive(&t, "timeout_ms", HTTP_TIMEOUT_MS)?),
+        max_bytes: positive(&t, "max_bytes", HTTP_MAX_BYTES)? as usize,
+    })
+}
+
+/// A GET for psi.http.get.
+pub fn http_get_call(url: String) -> HttpCall {
+    HttpCall {
+        method: "GET".into(),
+        url,
+        headers: Vec::new(),
+        query: Vec::new(),
+        body: None,
+        timeout: Duration::from_millis(HTTP_TIMEOUT_MS as u64),
+        max_bytes: HTTP_MAX_BYTES as usize,
+    }
+}
+
+/// The table psi.http.request returns; `json()` decodes the body.
+pub fn http_result(lua: &Lua, o: HttpOutput) -> mlua::Result<Value> {
+    let t = lua.create_table()?;
+    t.set("status", o.status)?;
+    t.set("ok", (200..300).contains(&o.status))?;
+    let h = lua.create_table()?;
+    for (k, v) in &o.headers {
+        h.set(k.as_str(), v.as_str())?;
+    }
+    t.set("headers", h)?;
+    let body = lua.create_string(&o.body)?;
+    t.set("body", &body)?;
+    t.set("truncated", o.truncated)?;
+    t.set(
+        "json",
+        lua.create_function(move |lua, ()| psi_ext_api::batteries::json_decode(lua, body.clone()))?,
+    )?;
+    Ok(Value::Table(t))
 }
 
 /// Where an extension's requests go.
@@ -614,6 +807,36 @@ impl<B: Backend> ExtHost for Host<B> {
     fn log(&self, _: &Lua, message: String) -> mlua::Result<()> {
         self.send(Request::Log(message));
         Ok(())
+    }
+
+    async fn exec(&self, lua: &Lua, argv: Vec<String>, opts: Option<Value>) -> mlua::Result<Value> {
+        let call = exec_call(argv, opts)?;
+        let (tx, rx) = oneshot::channel();
+        self.send(Request::Exec { call, reply: tx });
+        match self.wait(rx, Err("psi is shutting down".into())).await {
+            Ok(o) => exec_result(lua, &o),
+            Err(m) => Err(err(format!("psi.exec: {m}"))),
+        }
+    }
+
+    async fn http_request(&self, lua: &Lua, req: Value) -> mlua::Result<Value> {
+        let call = http_call(lua, req)?;
+        self.http(lua, call).await
+    }
+
+    async fn http_get(&self, lua: &Lua, url: String) -> mlua::Result<Value> {
+        self.http(lua, http_get_call(url)).await
+    }
+}
+
+impl<B: Backend> Host<B> {
+    async fn http(&self, lua: &Lua, call: HttpCall) -> mlua::Result<Value> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Request::Http { call, reply: tx });
+        match self.wait(rx, Err("psi is shutting down".into())).await {
+            Ok(o) => http_result(lua, o),
+            Err(m) => Err(err(format!("psi.http: {m}"))),
+        }
     }
 }
 

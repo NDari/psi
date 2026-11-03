@@ -225,6 +225,7 @@ pub async fn load<B: Backend>(
     let shown = file.display().to_string();
     let lua = Lua::new();
     let busy = limits::install(&lua, &limits).map_err(|e| format!("{shown}: {e}"))?;
+    psi_ext_api::batteries::remove_shell(&lua).map_err(|e| format!("{shown}: {e}"))?;
     // `require` finds the extension's own modules first.
     if let Some(dir) = file.parent() {
         let pkg: Table = lua.globals().get("package").map_err(|e| e.to_string())?;

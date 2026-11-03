@@ -3,7 +3,10 @@
 
 use psi_ext_api::{EVENTS, FUNCTIONS, TYPES};
 
-const API: &str = include_str!("../api/psi.toml");
+const API: &str = concat!(
+    include_str!("../api/psi.toml"),
+    include_str!("../api/std.toml")
+);
 
 fn count(header: &str) -> usize {
     API.lines().filter(|l| l.trim() == header).count()
@@ -15,7 +18,7 @@ fn counts_match_the_toml() {
     assert_eq!(EVENTS.len(), count("[[event]]"));
     assert_eq!(TYPES.len(), count("[[type]]"));
     // Today's API, so a parsing slip that drops items shows up.
-    assert_eq!((FUNCTIONS.len(), EVENTS.len(), TYPES.len()), (28, 18, 31));
+    assert_eq!((FUNCTIONS.len(), EVENTS.len(), TYPES.len()), (61, 18, 39));
 }
 
 #[test]

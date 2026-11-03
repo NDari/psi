@@ -2,6 +2,7 @@
 //! function, event and type once; build.rs generates the [`ExtHost`] trait, the
 //! [`register`] glue, the signature tables, the LuaLS stubs and the reference.
 
+pub mod batteries;
 // Which checks the generated glue uses depends on the API definition.
 #[allow(dead_code)]
 mod glue;

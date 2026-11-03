@@ -52,11 +52,42 @@ end
 return { name = "my-ext", version = "0.1.0", description = "What it does", setup = setup }
 ```
 
-Read, write and list files with Lua's `io` and `os` (or `io.popen`),
+Read, write and list files with Lua's `io` and `os` or `psi.fs`,
 relative to `ctx.cwd`, which `psi ext test` sets to a temporary
 directory. `ctx.execute_tool` runs a tool as the model would, through the
 policy, and returns what the model would see (`read` numbers its lines),
 so it is not a way to get a file's contents.
+
+### Batteries
+
+Rust-backed modules for what Lua lacks (D-45; every signature is in
+`docs/api.md`):
+
+- `psi.exec(argv, opts)` runs a program and waits for it: `{ code, ok,
+  stdout, stderr, killed, truncated }`. It runs inside the same sandbox as
+  bash, and a command on the always-ask list asks the user (the card names
+  your extension; headless runs refuse it). `{"sh", "-c", script}` is
+  checked like a bash command. Options: `cwd`, `env`, `stdin`,
+  `timeout_ms` (default 60 s), `max_bytes`. Esc stops it. `io.popen` and
+  `os.execute` are not available: they would skip the sandbox and the
+  approval rules. An extension that must run outside the sandbox needs the
+  user's settings: `"extensions": {"<name>": {"unsandboxed": true}}`.
+- `psi.http.request{ url, method, headers, query, body, json, timeout_ms,
+  max_bytes }` and `psi.http.get(url)` return `{ status, ok, headers, body,
+  truncated, json() }`. A transport failure is an error, any status is a
+  response, and with `network` off every request fails.
+- `psi.json.encode/decode` (`psi.json.null()`, `psi.json.array(t)` for an
+  empty array), `psi.toml.encode/decode`, `psi.base64.encode/decode`,
+  `psi.hash.sha256`.
+- `psi.re.is_match/find/find_all/replace/split`, with Rust regex syntax.
+- `psi.path.join/normalize/absolute/relative/basename/dirname/ext` and
+  `psi.fs.read/write/exists/stat/list/glob` (glob skips gitignored files).
+- `psi.time.now/format/parse`.
+
+In `psi ext test`, script what commands and requests return with
+`test.ui.answer("exec", { code = 0, stdout = "..." })` and
+`test.ui.answer("http", { status = 200, body = "..." })`; each call takes
+the next answer, and `test.requests("exec")` lists the calls.
 
 Event kinds: `notify` handlers' results are ignored; `chain` handlers may
 return a table that changes the payload for the next handler; `gate`

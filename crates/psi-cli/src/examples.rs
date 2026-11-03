@@ -28,6 +28,22 @@ pub const EXAMPLES: &[Example] = &[
         ],
     },
     Example {
+        name: "changes",
+        shows: "psi.exec (git, inside the sandbox), psi.re, psi.time, psi.path, psi.json",
+        files: &[
+            file!("changes", "init.lua"),
+            file!("changes", "changes_test.lua"),
+        ],
+    },
+    Example {
+        name: "fetch-cache",
+        shows: "psi.http with a disk cache, psi.fs, psi.toml settings, psi.hash, psi.base64",
+        files: &[
+            file!("fetch-cache", "init.lua"),
+            file!("fetch-cache", "fetch_cache_test.lua"),
+        ],
+    },
+    Example {
         name: "focus",
         shows: "a flag, a shortcut, the event bus, choosing the active tools",
         files: &[file!("focus", "init.lua"), file!("focus", "focus_test.lua")],

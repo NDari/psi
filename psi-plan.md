@@ -526,12 +526,12 @@ return {
 
 **Composition semantics** (pi parity): notification, mutation, chain or gate. Handler errors are reported and never crash the host; a failing `tool_call` gate fails closed.
 
-**Batteries (planned, D-45).** Rust-backed modules, declared in `psi.toml` like the rest (D-14), so stubs, docs and `psi ext check` cover them. Calls yield and look synchronous. Order: `psi.json`, `psi.exec`, `psi.http`, `psi.re`, then `psi.fs`/`psi.path`, then a small bundle (time, hash, base64, toml, env). Sketch in `qol-survey.md` §6.
-- `psi.exec(argv, opts)` runs inside the same boundary as bash (bubblewrap or Seatbelt, `network` honored, the bash environment). Its argv is matched against the always-ask list; `{"sh", "-c", script}` is classified like bash. A match shows the approval card labelled with the extension's name; headless runs deny it. It takes a timeout, a size cap and Esc.
+**Batteries (D-45, built 2026-11-02).** Rust-backed modules, declared in `api/std.toml` next to `psi.toml` (D-14), so stubs, docs and `psi ext check` cover them. `psi.exec` and `psi.http` yield and look synchronous; the rest are `builtin` functions, implemented once in `psi-ext-api/src/batteries.rs` as `ExtHost` default methods, so every host (psi, `psi ext check`, `psi ext test`) has the same ones, and their strings pass bytes through. Shipped: `psi.exec`, `psi.http.request/get`, `psi.json`, `psi.re` (functions over a pattern cache, not regex objects), `psi.path`, `psi.fs` (read, write, exists, stat, list, glob), `psi.toml`, `psi.base64`, `psi.hash.sha256`, `psi.time`. Left out: `env` (`os.getenv` covers it) and async helpers (wait for a need). Sketch in `qol-survey.md` §6.
+- `psi.exec(argv, opts)` runs inside the same boundary as bash (bubblewrap or Seatbelt, `network` honored, the bash environment). Its argv is matched against the always-ask list; `{"sh", "-c", script}` is classified like bash. A match shows the approval card labelled with the extension's name; headless runs deny it. It takes a timeout, a size cap and Esc. Session grants (`--allow`, `s`) cover it; an `s` answer to an extension's command lasts until the session changes.
 - `io.popen` and `os.execute` are removed from the Lua state when `psi.exec` lands; `psi ext check` names `psi.exec` as the fix.
 - An extension that must run outside the sandbox gets it from the user's settings (`"extensions": {"<name>": {"unsandboxed": true}}`), never from its own manifest.
 - `psi.http` fails with a one-line error when `network` is off, with a default timeout, a response cap and cancellation.
-- File writes through `io`/`os` stay for now (checkpoints capture workspace changes); revisit them with `psi.fs`.
+- File writes through `io`/`os` stay for now (checkpoints capture workspace changes). `psi.fs.write` writes like `io` does, creating directories; giving it the file tools' rules (no `.psi/`, asking outside the workspace) waits for a reason.
 - Not planned: LuaRocks and C modules, YAML, SQLite, templating.
 
 **Argument rewriting in `tool_call`** happens **before** classification, so a rewritten call is classified as rewritten. Rewrites are recorded in the policy decision. (Heimdall found this the riskiest hook and the least used; keep it, but make it visible.)
@@ -897,7 +897,7 @@ Each phase ends with its acceptance criteria passing in the local check, where a
 9. rg and fd startup check with the install hint; `fd-find` in the eval image. Done 2026-11-02: one banner line naming what is missing and this system's install command (pacman, apt or brew); Debian's `fdfind` counts. The eval image gained `fd-find` (Debian's binary name is `fdfind`).
 
 **Then** (agreed 2026-11-02):
-10. Lua batteries (D-45, §9.4): `psi.json`, `psi.exec` (removing `io.popen` and `os.execute`), `psi.http`, `psi.re`, then `psi.fs`/`psi.path` and the small bundle.
+10. Lua batteries (D-45, §9.4): `psi.json`, `psi.exec` (removing `io.popen` and `os.execute`), `psi.http`, `psi.re`, then `psi.fs`/`psi.path` and the small bundle. Done 2026-11-02: 33 functions in `api/std.toml`; `io.popen` and `os.execute` raise an error naming `psi.exec`, and `psi ext check` flags them; `"extensions": {"<name>": {"unsandboxed": true}}` in the settings; `psi ext test` scripts answers with `test.ui.answer("exec"|"http", ...)`. New crates: `sha2`, `base64` and `chrono` (already in the tree through rmcp), and reqwest's `rustls` feature named in psi-agent (it came through rmcp before).
 11. Fish completions (`clap_complete`'s `CompleteEnv`): help topics, models, sessions and eval tasks completed dynamically; `COMPLETE=fish psi | source` in `config.fish`.
 12. Status line: tokens per second, prompt-processing progress, context used and cache reuse from llama-server's timings, plus a Lua hook for extra segments (built after the batteries, so it can follow their conventions).
 

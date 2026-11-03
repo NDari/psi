@@ -164,6 +164,59 @@
 ---@field message string
 ---@field agent? string The sub-agent that made the call; nil for the main agent (psi help agents)
 
+---@class ExecOptions
+---@field cwd? string Where it runs (default: the working directory)
+---@field env? table<string, string> Variables to add
+---@field stdin? string Its input (default: none)
+---@field timeout_ms? integer Stopped after this long (default 60000)
+---@field max_bytes? integer Each of stdout and stderr is cut after this many bytes (default 1048576)
+
+---@class ExecResult
+---@field code? integer The exit code; nil when it was stopped
+---@field ok boolean It exited with 0
+---@field stdout string
+---@field stderr string
+---@field killed boolean Stopped by the timeout, Esc or a signal
+---@field truncated boolean stdout or stderr was cut at max_bytes
+
+---@class HttpRequest
+---@field url string
+---@field method? string Default GET, or POST with a body
+---@field headers? table<string, string>
+---@field query? table<string, string> Added to the URL, encoded
+---@field body? string
+---@field json any Sent as a JSON body (and Content-Type) instead of `body`
+---@field timeout_ms? integer Default 30000
+---@field max_bytes? integer The body is cut after this many bytes (default 10485760)
+
+---@class HttpResponse
+---@field status integer
+---@field ok boolean The status is 2xx
+---@field headers table<string, string> Lowercase names; repeated headers joined with ", "
+---@field body string
+---@field truncated boolean The body was cut at max_bytes
+---@field json fun(): any The body decoded as JSON (psi.json.decode)
+
+---@class JsonOptions
+---@field pretty? boolean Indented, one value per line
+
+--- A regex match. Positions are byte offsets, 1-based and inclusive, as string.find gives.
+---@class Match
+---@field text string The matched text
+---@field start integer
+---@field finish integer
+---@field groups string[] The capture groups in order; "" for one that didn't take part
+---@field named table<string, string> Named groups that took part
+
+---@class Stat
+---@field kind "file"|"dir"|"other"
+---@field size integer In bytes
+---@field modified number Seconds since 1970
+
+---@class GlobOptions
+---@field cwd? string Where to search from
+---@field gitignore? boolean Skip ignored and hidden files (default true)
+
 ---@class psi
 local psi = {}
 
@@ -175,6 +228,33 @@ psi.ui = {}
 
 ---@class psi.style
 psi.style = {}
+
+---@class psi.http
+psi.http = {}
+
+---@class psi.json
+psi.json = {}
+
+---@class psi.re
+psi.re = {}
+
+---@class psi.path
+psi.path = {}
+
+---@class psi.fs
+psi.fs = {}
+
+---@class psi.toml
+psi.toml = {}
+
+---@class psi.base64
+psi.base64 = {}
+
+---@class psi.hash
+psi.hash = {}
+
+---@class psi.time
+psi.time = {}
 
 --- Subscribe to an event. Gate and chain events use the handler's return value (see the event); errors are reported and never crash psi, and a failing `tool_call` handler blocks the call.
 ---@param event EventName
@@ -339,3 +419,183 @@ function psi.style.dim(text) end
 --- Write to psi's log (PSI_LOG=info shows it); `psi ext test` prints it.
 ---@param message string
 function psi.log(message) end
+
+--- Run a program and wait for it, inside the same boundary as bash, with bash's environment. Commands on the always-ask list ask the user (the card names this extension); headless runs refuse them. `{"sh", "-c", script}` is checked like a bash command. Errors when refused, denied or the program can't start; a non-zero exit is a result. Esc stops it. Use it instead of io.popen and os.execute, which extensions don't have.
+---@async
+---@param argv string[]
+---@param opts? ExecOptions
+---@return ExecResult
+function psi.exec(argv, opts) end
+
+--- Make an HTTP or HTTPS request. Errors when the network is off (the `network` setting), on a bad URL, or when the connection fails or times out; any status is a response. Esc stops it.
+---@async
+---@param req HttpRequest
+---@return HttpResponse
+function psi.http.request(req) end
+
+--- A GET request: psi.http.request{ url = url }.
+---@async
+---@param url string
+---@return HttpResponse
+function psi.http.get(url) end
+
+--- A value as JSON. Keys come out sorted. An empty table is {} unless marked with psi.json.array; functions are an error.
+---@param value any
+---@param opts? JsonOptions
+---@return string
+function psi.json.encode(value, opts) end
+
+--- Parses JSON. null becomes psi.json.null() (so arrays keep their length), and arrays decode marked as arrays.
+---@param text string
+---@return any
+function psi.json.decode(text) end
+
+--- The value JSON null decodes to; put it in a table to encode a null.
+---@return any
+function psi.json.null() end
+
+--- Marks a table as an array, so it encodes as [] even when empty. Returns the table.
+---@param t table
+---@return table
+function psi.json.array(t) end
+
+--- Whether `pattern` matches anywhere in `text`. Patterns use Rust regex syntax (Perl-like, without lookaround or backreferences); (?i) ignores case.
+---@param pattern string
+---@param text string
+---@return boolean
+function psi.re.is_match(pattern, text) end
+
+--- The first match, or nil.
+---@param pattern string
+---@param text string
+---@return Match?
+function psi.re.find(pattern, text) end
+
+--- Every match that doesn't overlap the one before, in order.
+---@param pattern string
+---@param text string
+---@return Match[]
+function psi.re.find_all(pattern, text) end
+
+--- `text` with matches replaced: all of them, or the first `limit`. In `replacement`, $1 and ${name} are capture groups and $$ is a dollar sign.
+---@param pattern string
+---@param text string
+---@param replacement string
+---@param limit? integer
+---@return string
+function psi.re.replace(pattern, text, replacement, limit) end
+
+--- `text` split at each match.
+---@param pattern string
+---@param text string
+---@return string[]
+function psi.re.split(pattern, text) end
+
+--- `part` under `base`; an absolute `part` replaces `base`.
+---@param base string
+---@param part string
+---@return string
+function psi.path.join(base, part) end
+
+--- The path with `.` and `..` resolved, without looking at the disk.
+---@param p string
+---@return string
+function psi.path.normalize(p) end
+
+--- The path from the working directory, normalized.
+---@param p string
+---@return string
+function psi.path.absolute(p) end
+
+--- `p` relative to `base` (default: the working directory), with `..` where needed.
+---@param p string
+---@param base? string
+---@return string
+function psi.path.relative(p, base) end
+
+--- The last part: "c.txt" for "a/b/c.txt".
+---@param p string
+---@return string
+function psi.path.basename(p) end
+
+--- Everything but the last part: "a/b" for "a/b/c.txt", "." for "c.txt".
+---@param p string
+---@return string
+function psi.path.dirname(p) end
+
+--- The extension without the dot: "txt" for "a/b/c.txt", "" when there is none.
+---@param p string
+---@return string
+function psi.path.ext(p) end
+
+--- A file's contents. Errors when it can't be read.
+---@param path string
+---@return string
+function psi.fs.read(path) end
+
+--- Writes a file, creating its directories. Inside the workspace, the next checkpoint captures the change.
+---@param path string
+---@param data string
+function psi.fs.write(path, data) end
+
+--- Whether the path exists.
+---@param path string
+---@return boolean
+function psi.fs.exists(path) end
+
+--- What the path is (following links), or nil when it doesn't exist.
+---@param path string
+---@return Stat?
+function psi.fs.stat(path) end
+
+--- The names in a directory, sorted.
+---@param dir string
+---@return string[]
+function psi.fs.list(dir) end
+
+--- Files matching a glob like "src/**/*.rs" (`*` stays within one directory), relative to the working directory or `opts.cwd`, sorted. Skips what .gitignore ignores, hidden files and .git, unless `gitignore = false`.
+---@param pattern string
+---@param opts? GlobOptions
+---@return string[]
+function psi.fs.glob(pattern, opts) end
+
+--- Parses a TOML document into a table; dates become strings.
+---@param text string
+---@return table
+function psi.toml.decode(text) end
+
+--- A table as a TOML document.
+---@param t table
+---@return string
+function psi.toml.encode(t) end
+
+--- Standard base64, with padding.
+---@param data string
+---@return string
+function psi.base64.encode(data) end
+
+--- Decodes standard base64. Errors on anything else.
+---@param text string
+---@return string
+function psi.base64.decode(text) end
+
+--- The SHA-256 of the data, in lowercase hex.
+---@param data string
+---@return string
+function psi.hash.sha256(data) end
+
+--- Seconds since 1970 (UTC), with a fraction.
+---@return number
+function psi.time.now() end
+
+--- A time in local time, with strftime codes (default "%Y-%m-%dT%H:%M:%S%:z"); `t` defaults to now.
+---@param t? number
+---@param fmt? string
+---@return string
+function psi.time.format(t, fmt) end
+
+--- Seconds since 1970 for a time written as RFC 3339 ("2026-11-02T10:00:00Z"), or with strftime codes in `fmt` (local time unless it has %z). nil when it doesn't parse.
+---@param text string
+---@param fmt? string
+---@return number?
+function psi.time.parse(text, fmt) end

@@ -196,6 +196,21 @@ impl ExtSources {
     }
 }
 
+/// Extensions whose psi.exec runs outside the sandbox, from the settings
+/// only (never an extension's own manifest, D-45):
+/// `"extensions": {"<name>": {"unsandboxed": true}}`.
+fn unsandboxed_extensions(settings: &Value) -> Vec<String> {
+    settings["extensions"]
+        .as_object()
+        .map(|m| {
+            m.iter()
+                .filter(|(_, v)| v["unsandboxed"].as_bool() == Some(true))
+                .map(|(k, _)| k.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Starts the extensions; their load errors become warnings.
 async fn start_extensions(
     sources: &ExtSources,
@@ -276,6 +291,7 @@ pub async fn prepare(args: &RunArgs, approver: Arc<dyn Approver>) -> Result<Prep
     };
     let mut ext_warnings = Vec::new();
     let (ext, ext_requests) = start_extensions(&ext_sources, shared, &mut ext_warnings).await;
+    ext.set_unsandboxed(unsandboxed_extensions(&args.settings));
 
     let profile = match pick_profile(home.as_deref(), args.model.as_deref(), &ext.providers()) {
         Ok(p) => p,
@@ -632,4 +648,20 @@ pub async fn run(args: RunArgs) -> Result<ExitCode> {
     }
     tracing::info!(session = %session_path.display(), "run finished");
     Ok(exit_code(&out.stop))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_extensions_marked_unsandboxed_leave_the_sandbox() {
+        let s = serde_json::json!({"extensions": {
+            "deploy": {"unsandboxed": true},
+            "lint": {"unsandboxed": false},
+            "other": {}
+        }});
+        assert_eq!(unsandboxed_extensions(&s), ["deploy"]);
+        assert!(unsandboxed_extensions(&serde_json::json!({})).is_empty());
+    }
 }

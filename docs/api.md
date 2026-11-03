@@ -221,6 +221,21 @@ Write to psi's log (PSI_LOG=info shows it); `psi ext test` prints it.
 |---|---|---|
 | `message` | `string` |  |
 
+#### psi.exec
+
+```
+psi.exec(argv: string[], opts: ExecOptions?): ExecResult -- async
+```
+
+Run a program and wait for it, inside the same boundary as bash, with bash's environment. Commands on the always-ask list ask the user (the card names this extension); headless runs refuse them. `{"sh", "-c", script}` is checked like a bash command. Errors when refused, denied or the program can't start; a non-zero exit is a result. Esc stops it. Use it instead of io.popen and os.execute, which extensions don't have.
+
+| Param | Type | Optional |
+|---|---|---|
+| `argv` | `string[]` |  |
+| `opts` | `ExecOptions?` | yes |
+
+Returns `ExecResult`.
+
 ### psi.events
 
 #### psi.events.emit
@@ -393,6 +408,476 @@ Dimmed text.
 | `text` | `string` |  |
 
 Returns `string`.
+
+### psi.http
+
+#### psi.http.request
+
+```
+psi.http.request(req: HttpRequest): HttpResponse -- async
+```
+
+Make an HTTP or HTTPS request. Errors when the network is off (the `network` setting), on a bad URL, or when the connection fails or times out; any status is a response. Esc stops it.
+
+| Param | Type | Optional |
+|---|---|---|
+| `req` | `HttpRequest` |  |
+
+Returns `HttpResponse`.
+
+#### psi.http.get
+
+```
+psi.http.get(url: string): HttpResponse -- async
+```
+
+A GET request: psi.http.request{ url = url }.
+
+| Param | Type | Optional |
+|---|---|---|
+| `url` | `string` |  |
+
+Returns `HttpResponse`.
+
+### psi.json
+
+#### psi.json.encode
+
+```
+psi.json.encode(value: any, opts: JsonOptions?): string
+```
+
+A value as JSON. Keys come out sorted. An empty table is {} unless marked with psi.json.array; functions are an error.
+
+| Param | Type | Optional |
+|---|---|---|
+| `value` | `any` |  |
+| `opts` | `JsonOptions?` | yes |
+
+Returns `string`.
+
+#### psi.json.decode
+
+```
+psi.json.decode(text: string): any
+```
+
+Parses JSON. null becomes psi.json.null() (so arrays keep their length), and arrays decode marked as arrays.
+
+| Param | Type | Optional |
+|---|---|---|
+| `text` | `string` |  |
+
+Returns `any`.
+
+#### psi.json.null
+
+```
+psi.json.null(): any
+```
+
+The value JSON null decodes to; put it in a table to encode a null.
+
+Returns `any`.
+
+#### psi.json.array
+
+```
+psi.json.array(t: table): table
+```
+
+Marks a table as an array, so it encodes as [] even when empty. Returns the table.
+
+| Param | Type | Optional |
+|---|---|---|
+| `t` | `table` |  |
+
+Returns `table`.
+
+### psi.re
+
+#### psi.re.is_match
+
+```
+psi.re.is_match(pattern: string, text: string): boolean
+```
+
+Whether `pattern` matches anywhere in `text`. Patterns use Rust regex syntax (Perl-like, without lookaround or backreferences); (?i) ignores case.
+
+| Param | Type | Optional |
+|---|---|---|
+| `pattern` | `string` |  |
+| `text` | `string` |  |
+
+Returns `boolean`.
+
+#### psi.re.find
+
+```
+psi.re.find(pattern: string, text: string): Match?
+```
+
+The first match, or nil.
+
+| Param | Type | Optional |
+|---|---|---|
+| `pattern` | `string` |  |
+| `text` | `string` |  |
+
+Returns `Match?`.
+
+#### psi.re.find_all
+
+```
+psi.re.find_all(pattern: string, text: string): Match[]
+```
+
+Every match that doesn't overlap the one before, in order.
+
+| Param | Type | Optional |
+|---|---|---|
+| `pattern` | `string` |  |
+| `text` | `string` |  |
+
+Returns `Match[]`.
+
+#### psi.re.replace
+
+```
+psi.re.replace(pattern: string, text: string, replacement: string, limit: integer?): string
+```
+
+`text` with matches replaced: all of them, or the first `limit`. In `replacement`, $1 and ${name} are capture groups and $$ is a dollar sign.
+
+| Param | Type | Optional |
+|---|---|---|
+| `pattern` | `string` |  |
+| `text` | `string` |  |
+| `replacement` | `string` |  |
+| `limit` | `integer?` | yes |
+
+Returns `string`.
+
+#### psi.re.split
+
+```
+psi.re.split(pattern: string, text: string): string[]
+```
+
+`text` split at each match.
+
+| Param | Type | Optional |
+|---|---|---|
+| `pattern` | `string` |  |
+| `text` | `string` |  |
+
+Returns `string[]`.
+
+### psi.path
+
+#### psi.path.join
+
+```
+psi.path.join(base: string, part: string): string
+```
+
+`part` under `base`; an absolute `part` replaces `base`.
+
+| Param | Type | Optional |
+|---|---|---|
+| `base` | `string` |  |
+| `part` | `string` |  |
+
+Returns `string`.
+
+#### psi.path.normalize
+
+```
+psi.path.normalize(p: string): string
+```
+
+The path with `.` and `..` resolved, without looking at the disk.
+
+| Param | Type | Optional |
+|---|---|---|
+| `p` | `string` |  |
+
+Returns `string`.
+
+#### psi.path.absolute
+
+```
+psi.path.absolute(p: string): string
+```
+
+The path from the working directory, normalized.
+
+| Param | Type | Optional |
+|---|---|---|
+| `p` | `string` |  |
+
+Returns `string`.
+
+#### psi.path.relative
+
+```
+psi.path.relative(p: string, base: string?): string
+```
+
+`p` relative to `base` (default: the working directory), with `..` where needed.
+
+| Param | Type | Optional |
+|---|---|---|
+| `p` | `string` |  |
+| `base` | `string?` | yes |
+
+Returns `string`.
+
+#### psi.path.basename
+
+```
+psi.path.basename(p: string): string
+```
+
+The last part: "c.txt" for "a/b/c.txt".
+
+| Param | Type | Optional |
+|---|---|---|
+| `p` | `string` |  |
+
+Returns `string`.
+
+#### psi.path.dirname
+
+```
+psi.path.dirname(p: string): string
+```
+
+Everything but the last part: "a/b" for "a/b/c.txt", "." for "c.txt".
+
+| Param | Type | Optional |
+|---|---|---|
+| `p` | `string` |  |
+
+Returns `string`.
+
+#### psi.path.ext
+
+```
+psi.path.ext(p: string): string
+```
+
+The extension without the dot: "txt" for "a/b/c.txt", "" when there is none.
+
+| Param | Type | Optional |
+|---|---|---|
+| `p` | `string` |  |
+
+Returns `string`.
+
+### psi.fs
+
+#### psi.fs.read
+
+```
+psi.fs.read(path: string): string
+```
+
+A file's contents. Errors when it can't be read.
+
+| Param | Type | Optional |
+|---|---|---|
+| `path` | `string` |  |
+
+Returns `string`.
+
+#### psi.fs.write
+
+```
+psi.fs.write(path: string, data: string)
+```
+
+Writes a file, creating its directories. Inside the workspace, the next checkpoint captures the change.
+
+| Param | Type | Optional |
+|---|---|---|
+| `path` | `string` |  |
+| `data` | `string` |  |
+
+#### psi.fs.exists
+
+```
+psi.fs.exists(path: string): boolean
+```
+
+Whether the path exists.
+
+| Param | Type | Optional |
+|---|---|---|
+| `path` | `string` |  |
+
+Returns `boolean`.
+
+#### psi.fs.stat
+
+```
+psi.fs.stat(path: string): Stat?
+```
+
+What the path is (following links), or nil when it doesn't exist.
+
+| Param | Type | Optional |
+|---|---|---|
+| `path` | `string` |  |
+
+Returns `Stat?`.
+
+#### psi.fs.list
+
+```
+psi.fs.list(dir: string): string[]
+```
+
+The names in a directory, sorted.
+
+| Param | Type | Optional |
+|---|---|---|
+| `dir` | `string` |  |
+
+Returns `string[]`.
+
+#### psi.fs.glob
+
+```
+psi.fs.glob(pattern: string, opts: GlobOptions?): string[]
+```
+
+Files matching a glob like "src/**/*.rs" (`*` stays within one directory), relative to the working directory or `opts.cwd`, sorted. Skips what .gitignore ignores, hidden files and .git, unless `gitignore = false`.
+
+| Param | Type | Optional |
+|---|---|---|
+| `pattern` | `string` |  |
+| `opts` | `GlobOptions?` | yes |
+
+Returns `string[]`.
+
+### psi.toml
+
+#### psi.toml.decode
+
+```
+psi.toml.decode(text: string): table
+```
+
+Parses a TOML document into a table; dates become strings.
+
+| Param | Type | Optional |
+|---|---|---|
+| `text` | `string` |  |
+
+Returns `table`.
+
+#### psi.toml.encode
+
+```
+psi.toml.encode(t: table): string
+```
+
+A table as a TOML document.
+
+| Param | Type | Optional |
+|---|---|---|
+| `t` | `table` |  |
+
+Returns `string`.
+
+### psi.base64
+
+#### psi.base64.encode
+
+```
+psi.base64.encode(data: string): string
+```
+
+Standard base64, with padding.
+
+| Param | Type | Optional |
+|---|---|---|
+| `data` | `string` |  |
+
+Returns `string`.
+
+#### psi.base64.decode
+
+```
+psi.base64.decode(text: string): string
+```
+
+Decodes standard base64. Errors on anything else.
+
+| Param | Type | Optional |
+|---|---|---|
+| `text` | `string` |  |
+
+Returns `string`.
+
+### psi.hash
+
+#### psi.hash.sha256
+
+```
+psi.hash.sha256(data: string): string
+```
+
+The SHA-256 of the data, in lowercase hex.
+
+| Param | Type | Optional |
+|---|---|---|
+| `data` | `string` |  |
+
+Returns `string`.
+
+### psi.time
+
+#### psi.time.now
+
+```
+psi.time.now(): number
+```
+
+Seconds since 1970 (UTC), with a fraction.
+
+Returns `number`.
+
+#### psi.time.format
+
+```
+psi.time.format(t: number?, fmt: string?): string
+```
+
+A time in local time, with strftime codes (default "%Y-%m-%dT%H:%M:%S%:z"); `t` defaults to now.
+
+| Param | Type | Optional |
+|---|---|---|
+| `t` | `number?` | yes |
+| `fmt` | `string?` | yes |
+
+Returns `string`.
+
+#### psi.time.parse
+
+```
+psi.time.parse(text: string, fmt: string?): number?
+```
+
+Seconds since 1970 for a time written as RFC 3339 ("2026-11-02T10:00:00Z"), or with strftime codes in `fmt` (local time unless it has %z). nil when it doesn't parse.
+
+| Param | Type | Optional |
+|---|---|---|
+| `text` | `string` |  |
+| `fmt` | `string?` | yes |
+
+Returns `number?`.
 
 ## Events
 
@@ -663,3 +1148,81 @@ A custom UI component (pi-tui parity), drawn under the input box under a deadlin
 The name of an event.
 
 One of: `"session_start"`, `"session_shutdown"`, `"session_before_compact"`, `"input"`, `"before_agent_start"`, `"agent_start"`, `"agent_end"`, `"turn_start"`, `"turn_end"`, `"context"`, `"message_start"`, `"message_update"`, `"message_end"`, `"tool_call"`, `"tool_execution_update"`, `"tool_result"`, `"policy_decision"`, `"guard_event"`.
+
+### ExecOptions
+
+| Field | Type | Description |
+|---|---|---|
+| `cwd` | `string?` | Where it runs (default: the working directory) |
+| `env` | `{string: string}?` | Variables to add |
+| `stdin` | `string?` | Its input (default: none) |
+| `timeout_ms` | `integer?` | Stopped after this long (default 60000) |
+| `max_bytes` | `integer?` | Each of stdout and stderr is cut after this many bytes (default 1048576) |
+
+### ExecResult
+
+| Field | Type | Description |
+|---|---|---|
+| `code` | `integer?` | The exit code; nil when it was stopped |
+| `ok` | `boolean` | It exited with 0 |
+| `stdout` | `string` |  |
+| `stderr` | `string` |  |
+| `killed` | `boolean` | Stopped by the timeout, Esc or a signal |
+| `truncated` | `boolean` | stdout or stderr was cut at max_bytes |
+
+### HttpRequest
+
+| Field | Type | Description |
+|---|---|---|
+| `url` | `string` |  |
+| `method` | `string?` | Default GET, or POST with a body |
+| `headers` | `{string: string}?` |  |
+| `query` | `{string: string}?` | Added to the URL, encoded |
+| `body` | `string?` |  |
+| `json` | `any` | Sent as a JSON body (and Content-Type) instead of `body` |
+| `timeout_ms` | `integer?` | Default 30000 |
+| `max_bytes` | `integer?` | The body is cut after this many bytes (default 10485760) |
+
+### HttpResponse
+
+| Field | Type | Description |
+|---|---|---|
+| `status` | `integer` |  |
+| `ok` | `boolean` | The status is 2xx |
+| `headers` | `{string: string}` | Lowercase names; repeated headers joined with ", " |
+| `body` | `string` |  |
+| `truncated` | `boolean` | The body was cut at max_bytes |
+| `json` | `function(): any` | The body decoded as JSON (psi.json.decode) |
+
+### JsonOptions
+
+| Field | Type | Description |
+|---|---|---|
+| `pretty` | `boolean?` | Indented, one value per line |
+
+### Match
+
+A regex match. Positions are byte offsets, 1-based and inclusive, as string.find gives.
+
+| Field | Type | Description |
+|---|---|---|
+| `text` | `string` | The matched text |
+| `start` | `integer` |  |
+| `finish` | `integer` |  |
+| `groups` | `string[]` | The capture groups in order; "" for one that didn't take part |
+| `named` | `{string: string}` | Named groups that took part |
+
+### Stat
+
+| Field | Type | Description |
+|---|---|---|
+| `kind` | `"file"\|"dir"\|"other"` |  |
+| `size` | `integer` | In bytes |
+| `modified` | `number` | Seconds since 1970 |
+
+### GlobOptions
+
+| Field | Type | Description |
+|---|---|---|
+| `cwd` | `string?` | Where to search from |
+| `gitignore` | `boolean?` | Skip ignored and hidden files (default true) |

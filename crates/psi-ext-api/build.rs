@@ -61,6 +61,9 @@ struct FunctionDef {
     doc: String,
     #[serde(default, rename = "async")]
     is_async: bool,
+    /// Implemented once in `src/batteries.rs`, as the trait method's default.
+    #[serde(default)]
+    builtin: bool,
     #[serde(default)]
     params: Vec<ParamDef>,
     returns: Option<String>,
@@ -256,6 +259,9 @@ fn validate(api: &Api) -> Model<'_> {
             );
         }
         unique(&mut fn_names, "function", &f.name);
+        if f.builtin && f.is_async {
+            panic!("api: function `{}`: a builtin can't be async", f.name);
+        }
         let method = f.name.replace('.', "_");
         if !methods.insert(method.clone()) {
             panic!(
@@ -376,10 +382,13 @@ fn rust_ty(m: &Model, t: &Ty) -> String {
     }
 }
 
-fn rust_ret(m: &Model, t: Option<&Ty>) -> String {
+/// A builtin's type: strings stay Lua strings, so bytes pass through
+/// (file contents, base64, hashes).
+fn builtin_ty(m: &Model, t: &Ty) -> String {
     match t {
-        None | Some(Ty::Nil) => "()".into(),
-        Some(t) => rust_ty(m, t),
+        Ty::String => "mlua::LuaString".into(),
+        Ty::Optional(t) => format!("Option<{}>", builtin_ty(m, t)),
+        t => rust_ty(m, t),
     }
 }
 
@@ -388,6 +397,15 @@ fn expected(t: &Ty) -> String {
     match t {
         Ty::Function { .. } => "function".into(),
         t => t.to_string(),
+    }
+}
+
+/// `conv` for a builtin's argument (see `builtin_ty`).
+fn builtin_conv(m: &Model, t: &Ty, arg: &str, v: &str) -> String {
+    match t {
+        Ty::String => format!("glue::lua_string({arg}, {v})"),
+        Ty::Optional(t) => format!("glue::optional({v}, |v| {})", builtin_conv(m, t, arg, "v")),
+        t => conv(m, t, arg, v),
     }
 }
 
@@ -489,16 +507,33 @@ fn gen_rust(m: &Model) -> String {
         let _ = writeln!(w, "\n    #[doc = {:?}]", format!("`{}`{tag}", signature(f)));
         w.push_str("    ///\n");
         let _ = writeln!(w, "    #[doc = {:?}]", f.def.doc);
+        let ty = |t: &Ty| {
+            if f.def.builtin {
+                builtin_ty(m, t)
+            } else {
+                rust_ty(m, t)
+            }
+        };
         let mut params = String::from("&self, lua: &mlua::Lua");
         for (name, t) in &f.params {
-            let _ = write!(params, ", {name}: {}", rust_ty(m, t));
+            let _ = write!(params, ", {name}: {}", ty(t));
         }
-        let ret = rust_ret(m, f.ret.as_ref());
+        let ret = match f.ret.as_ref() {
+            None | Some(Ty::Nil) => "()".into(),
+            Some(t) => ty(t),
+        };
         if f.def.is_async {
             let _ = writeln!(
                 w,
                 "    fn {}({params}) -> impl Future<Output = mlua::Result<{ret}>>;",
                 f.method
+            );
+        } else if f.def.builtin {
+            let args: String = f.params.iter().map(|(n, _)| format!(", {n}")).collect();
+            let _ = writeln!(
+                w,
+                "    fn {m}({params}) -> mlua::Result<{ret}> {{\n        crate::batteries::{m}(lua{args})\n    }}",
+                m = f.method
             );
         } else {
             let _ = writeln!(w, "    fn {}({params}) -> mlua::Result<{ret}>;", f.method);
@@ -554,12 +589,13 @@ fn gen_rust(m: &Model) -> String {
                 "&glue::Arg {{ func: {lua_name:?}, index: {}, name: {name:?} }}",
                 i + 1
             );
-            let _ = writeln!(
-                b,
-                "let p{} = {}?;",
-                i + 1,
-                conv(m, t, &arg, "args.next().unwrap_or_default()")
-            );
+            let v = "args.next().unwrap_or_default()";
+            let c = if f.def.builtin {
+                builtin_conv(m, t, &arg, v)
+            } else {
+                conv(m, t, &arg, v)
+            };
+            let _ = writeln!(b, "let p{} = {c}?;", i + 1);
             call_args.push(format!("p{}", i + 1));
         }
         let call_args: String = call_args.iter().map(|a| format!(", {a}")).collect();

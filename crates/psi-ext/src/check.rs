@@ -1281,6 +1281,17 @@ impl<'a> Lint<'a> {
                     let msg = "table.getn is Lua 5.1; use #t".into();
                     self.diag(tok_pos(name), Severity::Warning, msg);
                 }
+                if let Some(Suffix::Index(Index::Dot { name, .. })) = suffixes.first()
+                    && let m = name_of(name)
+                    && matches!(
+                        (n.as_str(), m.as_str()),
+                        ("io", "popen") | ("os", "execute")
+                    )
+                    && self.lookup(&n).is_none()
+                {
+                    let msg = format!("{n}.{m} {}", psi_ext_api::batteries::NO_SHELL);
+                    self.diag(tok_pos(name), Severity::Error, msg);
+                }
                 (self.read_name(t), tok_pos(t))
             }
             Prefix::Expression(e) => (self.expr(e), node_pos(&**e)),
@@ -1838,6 +1849,46 @@ impl ExtHost for RecordingHost {
         self.out(format!("log: {message}"));
         Ok(())
     }
+
+    // Nothing runs during a check: an empty success, so setup goes on.
+    async fn exec(&self, lua: &Lua, argv: Vec<String>, opts: Option<Value>) -> mlua::Result<Value> {
+        let call = crate::host::exec_call(argv, opts)?;
+        self.out(format!(
+            "psi.exec (not run by the check): {}",
+            call.argv.join(" ")
+        ));
+        let ok = crate::host::ExecOutput {
+            code: Some(0),
+            ..Default::default()
+        };
+        crate::host::exec_result(lua, &ok)
+    }
+
+    async fn http_request(&self, lua: &Lua, req: Value) -> mlua::Result<Value> {
+        let call = crate::host::http_call(lua, req)?;
+        self.out(format!(
+            "psi.http (not sent by the check): {} {}",
+            call.method, call.url
+        ));
+        crate::host::http_result(
+            lua,
+            crate::host::HttpOutput {
+                status: 200,
+                ..Default::default()
+            },
+        )
+    }
+
+    async fn http_get(&self, lua: &Lua, url: String) -> mlua::Result<Value> {
+        self.out(format!("psi.http (not sent by the check): GET {url}"));
+        crate::host::http_result(
+            lua,
+            crate::host::HttpOutput {
+                status: 200,
+                ..Default::default()
+            },
+        )
+    }
 }
 
 /// Re-raises the stop error through pcall, xpcall and coroutine.resume (a
@@ -1876,6 +1927,7 @@ fn dry_load(main: &Path, src: &str, dir: Option<&Path>, info: &MainInfo, r: &mut
         let lua = Lua::new();
         let setup_err = |e: mlua::Error| (None, format!("could not set up the check: {e}"));
         lua.set_memory_limit(LOAD_MEMORY).map_err(setup_err)?;
+        psi_ext_api::batteries::remove_shell(&lua).map_err(setup_err)?;
         let (d, k, c) = (deadline.clone(), killed_at.clone(), chunk.clone());
         lua.set_global_hook(
             HookTriggers::new().every_nth_instruction(1000),
@@ -2453,6 +2505,22 @@ mod tests {
             "{m:#?}"
         );
         assert_eq!(r.errors(), 16, "{}", r.render());
+    }
+
+    #[test]
+    fn io_popen_and_os_execute_point_to_psi_exec() {
+        let r = run("shell.lua");
+        let msg = |f: &str| format!("{f} {}", psi_ext_api::batteries::NO_SHELL);
+        has(&r, 1, Severity::Error, &msg("io.popen"));
+        has(&r, 2, Severity::Error, &msg("os.execute"));
+        // A local named io is the extension's own; the dry load runs line 2.
+        assert_eq!(r.errors(), 3, "{}", r.render());
+        has(
+            &r,
+            2,
+            Severity::Error,
+            &format!("loading failed: {}", msg("os.execute")),
+        );
     }
 
     #[test]

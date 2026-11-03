@@ -17,7 +17,7 @@ impl fmt::Display for ApiError {
 
 impl std::error::Error for ApiError {}
 
-fn error(msg: String) -> mlua::Error {
+pub(crate) fn error(msg: String) -> mlua::Error {
     mlua::Error::external(ApiError(msg))
 }
 
@@ -79,6 +79,14 @@ pub(crate) fn optional<T>(
 pub(crate) fn string(a: &Arg, v: Value) -> mlua::Result<String> {
     match v {
         Value::String(s) => Ok(s.to_string_lossy()),
+        v => Err(a.mismatch("string", lua_type(&v))),
+    }
+}
+
+/// A string as Lua holds it: any bytes.
+pub(crate) fn lua_string(a: &Arg, v: Value) -> mlua::Result<mlua::LuaString> {
+    match v {
+        Value::String(s) => Ok(s),
         v => Err(a.mismatch("string", lua_type(&v))),
     }
 }

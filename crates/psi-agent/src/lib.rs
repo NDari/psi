@@ -13,6 +13,7 @@ pub mod post_edit;
 pub mod prompt;
 pub mod recovery;
 mod run;
+pub mod services;
 pub mod subagent;
 
 pub use compact::{CompactionSettings, SummaryForm};

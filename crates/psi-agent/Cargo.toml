@@ -14,6 +14,8 @@ psi-safety = { path = "../psi-safety" }
 psi-session = { path = "../psi-session" }
 psi-tools = { path = "../psi-tools" }
 regex.workspace = true
+# psi.http (D-45); rustls for HTTPS.
+reqwest = { workspace = true, features = ["rustls"] }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

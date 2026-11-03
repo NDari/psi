@@ -22,6 +22,8 @@ fn every_example_passes_its_tests() {
         names,
         [
             "ask-first",
+            "changes",
+            "fetch-cache",
             "focus",
             "git-guard",
             "llama-box",

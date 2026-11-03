@@ -152,6 +152,43 @@ impl Backend for FakeBackend {
             Request::Bus { name, data } => {
                 record(self, json!({"kind": "emit", "name": name, "data": data}))
             }
+            Request::Exec { call, reply } => {
+                record(
+                    self,
+                    json!({"kind": "exec", "argv": call.argv, "cwd": call.cwd}),
+                );
+                let out = match self.answer("exec") {
+                    Some(v) => Ok(crate::host::ExecOutput {
+                        code: Some(v["code"].as_i64().unwrap_or(0) as i32),
+                        stdout: v["stdout"].as_str().unwrap_or("").as_bytes().to_vec(),
+                        stderr: v["stderr"].as_str().unwrap_or("").as_bytes().to_vec(),
+                        ..Default::default()
+                    }),
+                    None => Err(format!(
+                        "test: no answer for {} (use test.ui.answer(\"exec\", {{ code = 0, stdout = \"...\" }}))",
+                        call.argv.join(" ")
+                    )),
+                };
+                let _ = reply.send(out);
+            }
+            Request::Http { call, reply } => {
+                record(
+                    self,
+                    json!({"kind": "http", "method": call.method, "url": call.url}),
+                );
+                let out = match self.answer("http") {
+                    Some(v) => Ok(crate::host::HttpOutput {
+                        status: v["status"].as_u64().unwrap_or(200) as u16,
+                        body: v["body"].as_str().unwrap_or("").as_bytes().to_vec(),
+                        ..Default::default()
+                    }),
+                    None => Err(format!(
+                        "test: no answer for {} {} (use test.ui.answer(\"http\", {{ status = 200, body = \"...\" }}))",
+                        call.method, call.url
+                    )),
+                };
+                let _ = reply.send(out);
+            }
             Request::ExecuteTool { name, args, reply } => {
                 record(
                     self,
@@ -777,6 +814,46 @@ mod tests {
         );
         assert!(text.contains("| print: greeting ann"), "{text}");
         assert!(text.ends_with("3 passed, 1 failed\n"), "{text}");
+    }
+
+    #[test]
+    fn commands_and_requests_get_scripted_answers() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("init.lua"),
+            r#"return { name = "g", version = "1", description = "d", setup = function(psi)
+                 psi.register_command("branch", { description = "b", handler = function()
+                   local r = psi.exec({ "git", "branch", "--show-current" })
+                   local h = psi.http.get("https://example.com/x")
+                   psi.ui.notify(r.stdout .. h.json().v)
+                 end })
+               end }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            d.path().join("g_test.lua"),
+            r#"
+            test.case("answers", function()
+              test.ui.answer("exec", { code = 0, stdout = "main " })
+              test.ui.answer("http", { status = 200, body = '{"v":"ok"}' })
+              test.command("/branch", "")
+              test.eq(test.requests("notify")[1].message, "main ok")
+              test.eq(test.requests("exec")[1].argv, { "git", "branch", "--show-current" })
+            end)
+            test.case("no answer", function()
+              test.command("/branch", "")
+            end)
+            "#,
+        )
+        .unwrap();
+        let r = run(d.path());
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert!(r.cases[0].error.is_none(), "{}", r.render(true));
+        let text = r.render(true);
+        assert!(
+            text.contains("test: no answer for git branch --show-current"),
+            "{text}"
+        );
     }
 
     #[test]
