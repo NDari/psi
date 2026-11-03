@@ -889,7 +889,7 @@ Each phase ends with its acceptance criteria passing in the local check, where a
 1. Ctrl+G edits the prompt in `$VISUAL`/`$EDITOR` (pi's `app.editor.external` id). Done 2026-11-02: the draft goes to a temporary `.md` file, the editor runs through `sh -c` (so `code --wait` works), a failed editor leaves the prompt as it was.
 2. Notifications when a turn ends or an approval waits while unfocused (OSC 9/777/99, tmux passthrough), with progress (OSC 9;4) and a title status. Done 2026-11-02: `psi_tui::term`; the `notify` setting (`auto`, `bell`, `off`); title `ψ <dir> · working`/`· waiting`, pushed and popped on the title stack; tmux needs `focus-events on` and `allow-passthrough on`.
 3. The `@` file list: refresh it (it is built once per session), walk off the UI path, rank with `nucleo-matcher` or `frizbee`. Done 2026-11-02: walked in a background thread each time the list opens (the previous list serves meanwhile), ranked by `nucleo-matcher` 0.3 (MPL-2.0) with fzf syntax.
-4. Word-level diff highlighting (`similar`'s inline changes).
+4. Word-level diff highlighting (`similar`'s inline changes). Done 2026-11-02: changed words in reverse video in the line's diff color; a line that changed by more than 60% stays color-only; a 50 ms deadline.
 5. Clickable `file:line` links and URLs (OSC 8, Psi's own links only).
 6. Ctrl+R prompt history search and a draft stash.
 7. Paste collapse (`[Pasted text #1 +120 lines]`) and an invisible-Unicode strip.

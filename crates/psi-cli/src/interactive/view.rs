@@ -150,26 +150,48 @@ pub fn call_block(
     out
 }
 
-/// A colored unified-style diff of two texts, cut to `max` lines.
+/// A colored unified-style diff of two texts, cut to `max` lines. Within a
+/// changed line, the words that changed are shown in reverse video, unless
+/// most of the line changed (then the color alone says it).
 pub fn diff_lines(old: &str, new: &str, max: usize, width: usize) -> Vec<Line> {
     let diff = similar::TextDiff::from_lines(old, new);
+    // Word diffs run on the UI thread; a pathological edit gives up early.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
     let mut out = Vec::new();
     let mut more = 0;
-    for change in diff.iter_all_changes() {
-        let (sign, style) = match change.tag() {
-            similar::ChangeTag::Delete => ("-", theme::style(Token::ToolDiffRemoved)),
-            similar::ChangeTag::Insert => ("+", theme::style(Token::ToolDiffAdded)),
-            similar::ChangeTag::Equal => continue,
-        };
-        if out.len() >= max {
-            more += 1;
-            continue;
+    for op in diff.ops() {
+        for change in diff.iter_inline_changes_deadline(op, Some(deadline)) {
+            let (sign, style) = match change.tag() {
+                similar::ChangeTag::Delete => ("-", theme::style(Token::ToolDiffRemoved)),
+                similar::ChangeTag::Insert => ("+", theme::style(Token::ToolDiffAdded)),
+                similar::ChangeTag::Equal => continue,
+            };
+            if out.len() >= max {
+                more += 1;
+                continue;
+            }
+            let parts: Vec<(bool, String)> = change
+                .iter_strings_lossy()
+                .map(|(emph, s)| (emph, s.trim_end_matches('\n').to_owned()))
+                .collect();
+            let total: usize = parts.iter().map(|(_, s)| s.chars().count()).sum();
+            let changed: usize = parts
+                .iter()
+                .filter(|(e, _)| *e)
+                .map(|(_, s)| s.chars().count())
+                .sum();
+            let words = changed * 10 <= total * 6;
+            let mut line = Line::styled(format!("    {sign} "), style);
+            for (emph, s) in &parts {
+                let st = if *emph && words {
+                    style.reverse()
+                } else {
+                    style
+                };
+                line.push(s, st);
+            }
+            out.push(line.truncate(width));
         }
-        let text = change.value().trim_end_matches('\n');
-        out.push(Line::styled(
-            format!("    {sign} {}", cut(text, width.saturating_sub(6))),
-            style,
-        ));
     }
     if more > 0 {
         out.push(Line::styled(
@@ -329,4 +351,57 @@ pub fn list(items: &[String], sel: usize, max: usize, width: usize) -> Vec<Line>
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The words shown in reverse video on each line.
+    fn emphasized(lines: &[Line]) -> Vec<Vec<String>> {
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .filter(|s| s.style.reverse)
+                    .map(|s| s.text.clone())
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn changed_words_stand_out_in_a_changed_line() {
+        let lines = diff_lines(
+            "let total = price * 3;\nkeep\n",
+            "let total = price * 4;\nkeep\n",
+            20,
+            80,
+        );
+        let plain: Vec<String> = lines.iter().map(Line::plain).collect();
+        assert_eq!(
+            plain,
+            [
+                "    - let total = price * 3;",
+                "    + let total = price * 4;"
+            ]
+        );
+        assert_eq!(emphasized(&lines), [vec!["3;"], vec!["4;"]]);
+    }
+
+    #[test]
+    fn a_rewritten_line_and_new_lines_are_color_only() {
+        let lines = diff_lines("alpha beta\n", "gamma delta\nextra line\n", 20, 80);
+        assert_eq!(lines.len(), 3);
+        assert!(emphasized(&lines).iter().all(Vec::is_empty));
+    }
+
+    #[test]
+    fn long_diffs_are_cut_with_a_count() {
+        let old: String = (0..30).map(|i| format!("a{i}\n")).collect();
+        let lines = diff_lines(&old, "", 20, 80);
+        assert_eq!(lines.len(), 21);
+        assert_eq!(lines[20].plain(), "    … 10 more changed lines");
+    }
 }
