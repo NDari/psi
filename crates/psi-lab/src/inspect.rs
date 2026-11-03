@@ -67,6 +67,8 @@ pub fn load(path: &Path) -> Result<Record> {
 #[derive(Debug, Clone, Serialize)]
 pub struct Timeline {
     pub cwd: Option<String>,
+    /// The server's model file, as the session last recorded it.
+    pub model: Option<String>,
     pub events: Vec<Event>,
     pub patterns: Vec<Pattern>,
     pub result: Option<TrialResult>,
@@ -121,13 +123,18 @@ pub struct Pattern {
 
 pub fn timeline(rec: &Record) -> Timeline {
     let mut cwd = None;
+    let mut model = None;
     let mut events = Vec::new();
     let mut n = 0;
     let mut step_cap_hit = rec.result.as_ref().is_some_and(|r| r.step_cap_hit);
     for e in &rec.entries {
         match &e.body {
             EntryBody::Custom { custom_type, data } => match custom_type.as_str() {
-                "session_info" => cwd = data["cwd"].as_str().map(str::to_owned),
+                "session_info" => {
+                    cwd = data["cwd"].as_str().map(str::to_owned);
+                    model = data["server"]["model_file"].as_str().map(str::to_owned);
+                }
+                "server" => model = data["model_file"].as_str().map(str::to_owned),
                 "eval_end" => step_cap_hit |= data["step_cap_hit"] == Value::Bool(true),
                 "subagent" => events.push(Event::Guard {
                     guard: "subagent".into(),
@@ -262,6 +269,7 @@ pub fn timeline(rec: &Record) -> Timeline {
     }
     Timeline {
         cwd,
+        model,
         events,
         patterns,
         result: rec.result.clone(),
@@ -490,6 +498,9 @@ pub fn render_text(t: &Timeline, full: bool) -> String {
     if let Some(c) = &t.cwd {
         let _ = writeln!(s, "cwd {c}");
     }
+    if let Some(m) = &t.model {
+        let _ = writeln!(s, "model {m}");
+    }
     for ev in &t.events {
         match ev {
             Event::User { text } => {
@@ -587,6 +598,35 @@ mod tests {
             usage: None,
             stop_reason: Some(StopReason::ToolUse),
         })
+    }
+
+    #[test]
+    fn the_header_names_the_model_last_recorded() {
+        let custom = |id: &str, kind: &str, data: Value| Entry {
+            id: id.into(),
+            parent_id: None,
+            ts: 0,
+            body: EntryBody::Custom {
+                custom_type: kind.into(),
+                data,
+            },
+        };
+        let mut rec = Record {
+            entries: vec![custom(
+                "1",
+                "session_info",
+                serde_json::json!({"cwd": "/w", "server": {"model_file": "a.gguf"}}),
+            )],
+            result: None,
+        };
+        assert_eq!(timeline(&rec).model.as_deref(), Some("a.gguf"));
+        rec.entries.push(custom(
+            "2",
+            "server",
+            serde_json::json!({"model_file": "b.gguf"}),
+        ));
+        let t = timeline(&rec);
+        assert!(render_text(&t, false).contains("cwd /w\nmodel b.gguf\n"));
     }
 
     #[test]

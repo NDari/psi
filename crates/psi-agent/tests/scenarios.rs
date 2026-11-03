@@ -1465,3 +1465,34 @@ async fn a_short_conversation_has_nothing_to_compact() {
     assert!(msg.starts_with("nothing to compact"), "{msg}");
     assert!(f.server.chat_requests().is_empty());
 }
+
+#[tokio::test]
+async fn the_session_records_which_model_the_server_runs() {
+    let f = Fixture::new(vec![text("one"), text("two"), text("three")]);
+    let a35 = json!({"model_file": "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf", "n_ctx": 65536});
+    let gemma = json!({"model_file": "gemma-4-12B-it-qat-q4_0.gguf", "n_ctx": 131072});
+    let mut a = f.agent(Budgets::default()).with_server(Some(a35.clone()));
+    a.run("first").await;
+    let servers = |a: &Agent| -> Vec<Value> {
+        a.session()
+            .entries()
+            .iter()
+            .filter_map(|e| match &e.body {
+                EntryBody::Custom { custom_type, data } if custom_type == "session_info" => {
+                    Some(data["server"].clone())
+                }
+                EntryBody::Custom { custom_type, data } if custom_type == "server" => {
+                    Some(data.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(servers(&a), std::slice::from_ref(&a35));
+    // The same server again: nothing new. Another model: a `server` entry.
+    a.run("second").await;
+    assert_eq!(servers(&a), std::slice::from_ref(&a35));
+    let mut a = a.with_server(Some(gemma.clone()));
+    a.run("third").await;
+    assert_eq!(servers(&a), [a35, gemma]);
+}

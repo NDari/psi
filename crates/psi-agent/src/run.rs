@@ -179,6 +179,9 @@ pub struct Agent {
     run_system: String,
     /// Run after a turn whose write or edit calls changed files (D-36).
     post_edit: Option<PostEditCheck>,
+    /// What the server says it runs (model file, window, build), for the
+    /// session record: requests only name the alias (`local`).
+    server: Option<Value>,
     compaction: CompactionSettings,
     /// Plan mode (D-34).
     plan: PlanState,
@@ -265,6 +268,7 @@ impl Agent {
             active: None,
             run_system: String::new(),
             post_edit: None,
+            server: None,
             compaction: CompactionSettings::default(),
             plan: PlanState::default(),
             plan_off_note: false,
@@ -598,6 +602,29 @@ impl Agent {
         self
     }
 
+    /// The server's model file, window and build, recorded in
+    /// `session_info`, and again as a `server` entry when a later run
+    /// finds the server changed (a resumed session, a restarted server).
+    pub fn with_server(mut self, info: Option<Value>) -> Self {
+        self.server = info;
+        self
+    }
+
+    /// The server as the session last recorded it.
+    fn recorded_server(&self) -> Option<&Value> {
+        self.session
+            .entries()
+            .iter()
+            .rev()
+            .find_map(|e| match &e.body {
+                EntryBody::Custom { custom_type, data } if custom_type == "server" => Some(data),
+                EntryBody::Custom { custom_type, data } if custom_type == "session_info" => {
+                    data.get("server")
+                }
+                _ => None,
+            })
+    }
+
     /// The project's check command, run after turns that edited files.
     pub fn with_post_edit_check(mut self, check: Option<PostEditCheck>) -> Self {
         self.post_edit = check;
@@ -784,11 +811,22 @@ impl Agent {
     async fn run_inner(&mut self, input: &str, out: &mut RunOutcome) -> Result<Stop, String> {
         self.refresh_mcp().await;
         if self.session.entries().is_empty() {
+            let mut data = json!({"agent": "psi", "version": env!("CARGO_PKG_VERSION"),
+                                  "cwd": self.ctx.cwd, "model": self.cfg.model,
+                                  "safety": self.safety.info});
+            if let Some(s) = &self.server {
+                data["server"] = s.clone();
+            }
             self.record(EntryBody::Custom {
                 custom_type: "session_info".into(),
-                data: json!({"agent": "psi", "version": env!("CARGO_PKG_VERSION"),
-                             "cwd": self.ctx.cwd, "model": self.cfg.model,
-                             "safety": self.safety.info}),
+                data,
+            })?;
+        } else if let Some(s) = self.server.clone()
+            && self.recorded_server() != Some(&s)
+        {
+            self.record(EntryBody::Custom {
+                custom_type: "server".into(),
+                data: s,
             })?;
         }
         if self.plan_unrecorded {

@@ -303,6 +303,16 @@ pub async fn prepare(args: &RunArgs, approver: Arc<dyn Approver>) -> Result<Prep
 
     // D-09: the template must support tool calls; take the window from /props.
     let props = client.props().await;
+    // For the session record: requests name only the alias.
+    let server = props.as_ref().ok().map(|p| {
+        let file = p
+            .model_path
+            .as_deref()
+            .and_then(|m| Path::new(m).file_name())
+            .map(|f| f.to_string_lossy().into_owned());
+        serde_json::json!({"model_file": file, "model_path": p.model_path,
+                           "n_ctx": p.n_ctx, "build": p.build_info})
+    });
     // A server with /props is llama-server: in the TUI, ask it for
     // prompt-processing progress (other servers may refuse the field).
     let client = client.with_progress(props.is_ok() && mode == "interactive");
@@ -425,6 +435,7 @@ pub async fn prepare(args: &RunArgs, approver: Arc<dyn Approver>) -> Result<Prep
         .with_safety(safety)
         .with_extensions(ext.clone())
         .with_post_edit_check(post_edit)
+        .with_server(server)
         .with_compaction(compaction)
         .with_mcp(mcp);
     if args.settings["subagents"].as_bool() == Some(true) {

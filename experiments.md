@@ -182,6 +182,8 @@ Flags worth sweeping: `-fa`, `-b`/`-ub`, `-ctk`/`-ctv` (KV cache type), `-t`, `-
 - Whether the per-message `model` should stay the alias or become the file name; what pi records there is unchecked.
 - `psi inspect` and the eval reports could show it once it's recorded.
 
+**Built 2026-11-03.** `session_info` carries `server`: the `/props` model file name, its full path, `n_ctx` and the build. A later run on the same session that finds a different server (a resumed session, a restarted server) records a `server` entry with the new values; the same server adds nothing. `psi inspect` prints `model <file>` under `cwd`. Requests still send the alias. Not covered: a model swapped while one run is going (Psi reads `/props` once at start), and the eval reports, which already print the model from `/props`.
+
 ### Clear more at once, so the cache breaks less often (added 2026-11-03)
 
 **Question:** each clearing of old tool results breaks the prompt cache from the first cleared result, near the start of the conversation, so the server re-reads almost everything. Would freeing more per clearing (so it happens once or twice instead of every few steps) save most of that time without hurting the model?
