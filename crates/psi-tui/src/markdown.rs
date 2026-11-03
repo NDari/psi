@@ -3,6 +3,7 @@
 //! [`MdStream`] splits streamed text into complete blocks (paragraphs, headings,
 //! whole fenced code blocks) and [`render_block`] turns a block into lines: prose
 //! through pulldown-cmark, fenced code verbatim and highlighted (§11.5).
+//! [`render_blocks`] puts a blank line between blocks, as pi does.
 
 use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
 
@@ -41,6 +42,28 @@ fn heading_level(line: &str) -> Option<usize> {
     ((1..=6).contains(&n) && line[n..].chars().next().is_none_or(|c| c == ' ')).then_some(n)
 }
 
+/// A complete block of streamed text, as source without the trailing newline.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Block {
+    pub text: String,
+    /// A blank line goes before it: it follows an earlier block of the same
+    /// text, and isn't the next piece of a long one.
+    pub gap: bool,
+}
+
+impl std::ops::Deref for Block {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.text
+    }
+}
+
+impl PartialEq<&str> for Block {
+    fn eq(&self, other: &&str) -> bool {
+        self.text == *other
+    }
+}
+
 /// Splits streamed text into complete blocks.
 #[derive(Clone, Debug, Default)]
 pub struct MdStream {
@@ -52,6 +75,10 @@ pub struct MdStream {
     fence: Option<(char, usize)>,
     /// Lines in the current block outside a fence.
     lines: usize,
+    /// A block has been emitted since the start or the last `finish`.
+    started: bool,
+    /// The last block was cut at `PROGRESSIVE_LINES`, so the next continues it.
+    cut: bool,
 }
 
 enum Kind {
@@ -66,9 +93,8 @@ impl MdStream {
         MdStream::default()
     }
 
-    /// Feeds a streamed delta and returns the blocks it completed, in order, as
-    /// source text without the trailing newline.
-    pub fn push(&mut self, delta: &str) -> Vec<String> {
+    /// Feeds a streamed delta and returns the blocks it completed, in order.
+    pub fn push(&mut self, delta: &str) -> Vec<Block> {
         self.buf.extend(delta.chars().filter(|&c| c != '\r'));
         let mut out = Vec::new();
         while let Some(off) = self.buf[self.scanned..].find('\n') {
@@ -115,6 +141,7 @@ impl MdStream {
                     let table_row = line.trim_start().starts_with('|');
                     if self.lines >= PROGRESSIVE_LINES && !table_row {
                         self.emit(next, &mut out);
+                        self.cut = true;
                     }
                 }
             }
@@ -127,13 +154,18 @@ impl MdStream {
         &self.buf
     }
 
+    /// Whether a block of this text has been emitted (since the last `finish`).
+    pub fn started(&self) -> bool {
+        self.started
+    }
+
     /// Whether the stream is inside an unclosed code fence.
     pub fn in_fence(&self) -> bool {
         self.fence.is_some()
     }
 
     /// Ends the message: everything left, as final blocks.
-    pub fn finish(&mut self) -> Vec<String> {
+    pub fn finish(&mut self) -> Vec<Block> {
         let mut out = if self.buf.is_empty() || self.buf.ends_with('\n') {
             Vec::new()
         } else {
@@ -142,22 +174,41 @@ impl MdStream {
         let end = self.buf.len();
         self.emit(end, &mut out);
         self.fence = None;
+        self.started = false;
         out
     }
 
     /// Moves `buf[..end]` out as a block (dropped when blank).
-    fn emit(&mut self, end: usize, out: &mut Vec<String>) {
+    fn emit(&mut self, end: usize, out: &mut Vec<Block>) {
         let block: String = self.buf.drain(..end).collect();
         self.scanned = 0;
         self.lines = 0;
         if !block.trim().is_empty() {
-            out.push(block.trim_end_matches('\n').to_string());
+            out.push(Block {
+                text: block.trim_end_matches('\n').to_string(),
+                gap: self.started && !self.cut,
+            });
+            self.started = true;
         }
+        self.cut = false;
     }
 }
 
+/// Lines for blocks of one text, with a blank line before each that has a gap.
+pub fn render_blocks(blocks: &[Block], width: usize) -> Vec<Line> {
+    let mut out = Vec::new();
+    for b in blocks {
+        if b.gap {
+            out.push(Line::default());
+        }
+        out.extend(render_block(b, width));
+    }
+    out
+}
+
 /// Lines for one block. Prose goes through a CommonMark parser (§11.5) and
-/// is word-wrapped to `width`: headings bold (the `#`s dim), emphasis, `code`
+/// is word-wrapped to `width`: headings bold (the first underlined, from the
+/// third on with their `#`s, as pi shows them), emphasis, `code`
 /// in cyan, links underlined with the URL after them, list markers as
 /// written with a hanging indent, quotes dim, tables as aligned columns.
 /// Fenced code keeps its fence lines (dim) and its code lines verbatim and
@@ -325,7 +376,8 @@ fn prose(src: &str, width: usize) -> Vec<Line> {
             Event::Rule => {
                 p.flush();
                 let (mut first, _) = p.prefixes();
-                first.push(src[range].trim(), muted());
+                let n = p.width.saturating_sub(first.width()).clamp(1, 80);
+                first.push("─".repeat(n), muted());
                 p.out.push(first);
             }
             Event::TaskListMarker(done) => p.text(if done { "[x] " } else { "[ ] " }),
@@ -403,9 +455,9 @@ impl Prose {
         let mut rows = std::mem::take(&mut self.rows);
         rows.push(std::mem::take(&mut self.cur));
         let (mut first, mut cont) = self.prefixes();
-        if let Some(n) = self.heading {
+        if let Some(n) = self.heading.filter(|&n| n >= 3) {
             let marks = format!("{} ", "#".repeat(n));
-            first.push(&marks, muted());
+            first.push(&marks, self.style());
             cont.push(" ".repeat(marks.len()), Style::new());
         }
         for (i, row) in rows.into_iter().enumerate() {
@@ -420,7 +472,12 @@ impl Prose {
             Tag::Heading { level, .. } => {
                 self.flush();
                 self.heading = Some(level as usize);
-                self.push_style(theme::style(Token::MdHeading).bold());
+                let st = theme::style(Token::MdHeading).bold();
+                self.push_style(if self.heading == Some(1) {
+                    st.underline()
+                } else {
+                    st
+                });
             }
             Tag::BlockQuote(_) => {
                 self.flush();
@@ -625,7 +682,7 @@ fn bold(l: &Line) -> Line {
 mod tests {
     use super::*;
 
-    fn feed(chunks: &[&str]) -> (Vec<String>, MdStream) {
+    fn feed(chunks: &[&str]) -> (Vec<Block>, MdStream) {
         let mut md = MdStream::new();
         let mut blocks = Vec::new();
         for c in chunks {
@@ -724,7 +781,20 @@ mod tests {
         assert_eq!(blocks[0].lines().count(), PROGRESSIVE_LINES);
         assert!(blocks[0].starts_with("- item 0\n"));
         assert!(blocks[1].starts_with("- item 20\n"));
+        // The pieces of one list join without a blank line.
+        assert!(!blocks[0].gap && !blocks[1].gap);
         assert_eq!(md.pending().lines().count(), 5);
+        assert!(!md.finish()[0].gap);
+        // A piece cut at the end of a list: what follows the list has a gap.
+        let mut md = MdStream::new();
+        md.push("para\n\n");
+        let mut pieces = Vec::new();
+        for i in 0..PROGRESSIVE_LINES {
+            pieces.extend(md.push(&format!("- item {i}\n")));
+        }
+        pieces.extend(md.push("\nafter\n\n"));
+        let gaps: Vec<bool> = pieces.iter().map(|b| b.gap).collect();
+        assert_eq!(gaps, [true, true]);
         // Inside a fence, nothing commits until it closes.
         let mut md = MdStream::new();
         let mut n = md.push("```\n").len();
@@ -737,10 +807,75 @@ mod tests {
 
     #[test]
     fn render_heading() {
+        // As pi shows them: no `#`s for the first two levels, the first
+        // underlined; from the third on the `#`s in the heading's style.
         let ls = render_block("## Big **deal**", 80);
-        assert_eq!(plain(&ls), ["## Big deal"]);
-        assert_eq!(ls[0].spans[0], crate::style::Span::new("## ", muted()));
-        assert!(ls[0].spans[1..].iter().all(|s| s.style.bold));
+        assert_eq!(plain(&ls), ["Big deal"]);
+        assert!(
+            ls[0]
+                .spans
+                .iter()
+                .all(|s| s.style.bold && !s.style.underline)
+        );
+        let ls = render_block("# Top", 80);
+        assert_eq!(plain(&ls), ["Top"]);
+        assert!(
+            ls[0]
+                .spans
+                .iter()
+                .all(|s| s.style.bold && s.style.underline)
+        );
+        let ls = render_block("### Third", 80);
+        assert_eq!(plain(&ls), ["### Third"]);
+        assert!(ls[0].spans.iter().all(|s| s.style.bold && !s.style.dim));
+    }
+
+    #[test]
+    fn blocks_have_a_gap_between_them() {
+        let (blocks, mut md) = feed(&["Intro.
+
+## Head
+text
+```
+code
+```
+---
+
+last"]);
+        let gaps: Vec<(&str, bool)> = blocks.iter().map(|b| (&*b.text, b.gap)).collect();
+        assert_eq!(
+            gaps,
+            [
+                ("Intro.", false),
+                ("## Head", true),
+                ("text", true),
+                ("```\ncode\n```", true),
+                ("---", true),
+            ]
+        );
+        let last = md.finish();
+        assert_eq!(last, ["last"]);
+        assert!(last[0].gap);
+        // After `finish` the next text starts fresh (the UI spaces it).
+        assert!(!md.started());
+        assert!(!md.push("again\n\n")[0].gap);
+        let lines = plain(&render_blocks(&blocks, 20));
+        assert_eq!(
+            lines,
+            [
+                "Intro.",
+                "",
+                "Head",
+                "",
+                "text",
+                "",
+                "```",
+                "code",
+                "```",
+                "",
+                &"─".repeat(20)
+            ]
+        );
     }
 
     #[test]
@@ -811,7 +946,12 @@ mod tests {
     #[test]
     fn render_quote_dim_and_rule() {
         let ls = render_block("> quoted words here\n---", 10);
-        assert_eq!(plain(&ls), ["> quoted", "> words", "> here", "---"]);
+        assert_eq!(
+            plain(&ls),
+            ["> quoted", "> words", "> here", &"─".repeat(10)]
+        );
+        // A rule stops at 80 columns, as in pi.
+        assert_eq!(plain(&render_block("***", 120)), ["─".repeat(80)]);
         assert!(ls.iter().all(|l| l.spans.iter().all(|s| s.style.dim)));
     }
 
@@ -883,7 +1023,7 @@ mod tests {
         );
         // Lines of one paragraph join and wrap together, as in markdown.
         assert_eq!(plain(&render_block("one\ntwo", 80)), ["one two"]);
-        assert_eq!(plain(&render_block("Title\n=====", 80)), ["# Title"]);
+        assert_eq!(plain(&render_block("Title\n=====", 80)), ["Title"]);
     }
 
     #[test]

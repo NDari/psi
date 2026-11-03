@@ -16,7 +16,10 @@ use psi_safety::policy::Mode;
 use psi_session::{Entry, EntryBody, Role, text_of};
 use psi_tui::term::{Activity, Term, title_for};
 use psi_tui::theme::{self, Token};
-use psi_tui::{Action, Editor, EditorEvent, Keymap, Line, MdStream, Renderer, Style, render_block};
+use psi_tui::{
+    Action, Editor, EditorEvent, Keymap, Line, MdStream, Renderer, Style, render_block,
+    render_blocks,
+};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -1658,9 +1661,7 @@ impl<W: Write> App<W> {
                         let mut md = MdStream::new();
                         let mut blocks = md.push(&t);
                         blocks.extend(md.finish());
-                        let lines: Vec<Line> =
-                            blocks.iter().flat_map(|b| render_block(b, w)).collect();
-                        self.commit(lines);
+                        self.commit(render_blocks(&blocks, w));
                     }
                     _ => {}
                 }
@@ -1797,7 +1798,7 @@ impl<W: Write> App<W> {
     fn flush_text(&mut self) {
         let w = self.width();
         let blocks = self.md.finish();
-        let lines: Vec<Line> = blocks.iter().flat_map(|b| render_block(b, w)).collect();
+        let lines = render_blocks(&blocks, w);
         if !lines.is_empty() {
             self.commit(lines);
         }
@@ -1822,13 +1823,13 @@ impl<W: Write> App<W> {
             }
             AgentEvent::TextDelta { text } => {
                 let w = self.width();
-                let first = self.md.pending().is_empty();
+                let first = !self.md.started() && self.md.pending().is_empty();
                 let done = self.md.push(&text);
                 let mut lines = Vec::new();
                 if first && !done.is_empty() {
                     lines.push(Line::default());
                 }
-                lines.extend(done.iter().flat_map(|b| render_block(b, w)));
+                lines.extend(render_blocks(&done, w));
                 if !lines.is_empty() {
                     self.commit(lines);
                 }
