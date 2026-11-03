@@ -457,6 +457,10 @@ impl<W: Write> App<W> {
                 self.on_msg(m);
                 dirty = true;
             }
+            if self.completer.take_fresh() {
+                self.refresh_completion();
+                dirty = true;
+            }
             if self.running.is_some() {
                 dirty = true; // the elapsed time on running calls
             }

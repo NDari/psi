@@ -13,6 +13,8 @@ full_moon = { version = "3.0.0", default-features = false, features = ["lua54"] 
 futures-util = "0.3.34"
 globset = "0.4.21"
 ignore = "0.4.34"
+# fzf-style fuzzy scoring for @ completion (Helix; Codex uses it too).
+nucleo-matcher = "0.3.1"
 regex = "1.13.1"
 # Plain HTTP for now (llama-server on localhost); TLS joins with remote providers.
 reqwest = { version = "0.13.5", default-features = false, features = ["stream", "json"] }

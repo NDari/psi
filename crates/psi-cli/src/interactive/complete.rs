@@ -2,6 +2,10 @@
 //! input, and `@` file references with fuzzy matching (§11.4).
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo_matcher::{Config, Matcher};
 
 use super::ui::COMMANDS;
 
@@ -22,9 +26,19 @@ pub enum Kind {
     File,
 }
 
+/// The project's files, walked in the background so typing never waits.
+#[derive(Default)]
+struct FileList {
+    files: Vec<String>,
+    walking: bool,
+    /// A walk finished since the list was last used.
+    fresh: bool,
+}
+
 pub struct Completer {
     root: PathBuf,
-    files: Option<Vec<String>>,
+    files: Arc<Mutex<FileList>>,
+    matcher: Matcher,
     items: Vec<Item>,
     kind: Option<Kind>,
     /// The box just took a selection; the next update keeps the list.
@@ -37,7 +51,8 @@ impl Completer {
     pub fn new(root: &Path) -> Self {
         Self {
             root: root.to_owned(),
-            files: None,
+            files: Arc::default(),
+            matcher: Matcher::new(Config::DEFAULT.match_paths()),
             items: Vec::new(),
             kind: None,
             hold: false,
@@ -82,17 +97,25 @@ impl Completer {
                 })
                 .collect();
         } else if let Some(q) = word.strip_prefix('@') {
+            // Each time the list opens, walk again: files come and go
+            // during a session. The previous list serves until then.
+            if self.kind != Some(Kind::File) {
+                self.walk();
+            }
             self.kind = Some(Kind::File);
-            let files = self.files.get_or_insert_with(|| list_files(&self.root));
-            let mut scored: Vec<(i64, &String)> = files
-                .iter()
-                .filter_map(|f| fuzzy(q, f).map(|s| (s, f)))
-                .collect();
-            scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.len().cmp(&b.1.len())));
+            let list = self.files.lock().map(|mut l| {
+                l.fresh = false;
+                l.files.clone()
+            });
+            let files = list.unwrap_or_default();
+            let pattern = Pattern::parse(q, CaseMatching::Smart, Normalization::Smart);
+            let mut scored = pattern.match_list(files.iter(), &mut self.matcher);
+            // Shorter paths first among equal scores.
+            scored.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.len().cmp(&b.0.len())));
             self.items = scored
                 .into_iter()
                 .take(MAX_ITEMS)
-                .map(|(_, f)| Item {
+                .map(|(f, _)| Item {
                     insert: format!("@{f}"),
                     detail: None,
                 })
@@ -100,6 +123,35 @@ impl Completer {
         } else {
             self.close();
         }
+    }
+}
+
+impl Completer {
+    /// Starts a walk of the project in the background, unless one is going.
+    fn walk(&self) {
+        let Ok(mut l) = self.files.lock() else { return };
+        if l.walking {
+            return;
+        }
+        l.walking = true;
+        let (files, root) = (self.files.clone(), self.root.clone());
+        std::thread::spawn(move || {
+            let list = list_files(&root);
+            if let Ok(mut l) = files.lock() {
+                l.files = list;
+                l.walking = false;
+                l.fresh = true;
+            }
+        });
+    }
+
+    /// A walk finished while the file list is open: the caller updates it.
+    pub fn take_fresh(&mut self) -> bool {
+        self.kind == Some(Kind::File)
+            && self
+                .files
+                .lock()
+                .is_ok_and(|mut l| std::mem::take(&mut l.fresh))
     }
 }
 
@@ -124,50 +176,49 @@ fn list_files(root: &Path) -> Vec<String> {
     out
 }
 
-/// A subsequence match score: higher is better, `None` when `q`'s
-/// characters don't all appear in order. Matches at the start of a path
-/// part and runs of adjacent matches score more.
-pub fn fuzzy(q: &str, s: &str) -> Option<i64> {
-    if q.is_empty() {
-        return Some(0);
-    }
-    let sc: Vec<char> = s.chars().collect();
-    let mut score = 0i64;
-    let mut last: Option<usize> = None;
-    let mut i = 0;
-    for qc in q.chars() {
-        let qc = qc.to_ascii_lowercase();
-        let pos = (i..sc.len()).find(|&k| sc[k].to_ascii_lowercase() == qc)?;
-        score += 1;
-        if pos == 0 || matches!(sc[pos - 1], '/' | '_' | '-' | '.') {
-            score += 8;
-        }
-        if last.is_some_and(|l| l + 1 == pos) {
-            score += 5;
-        }
-        last = Some(pos);
-        i = pos + 1;
-    }
-    // Prefer matches in the file name.
-    if let Some(slash) = s.rfind('/')
-        && last.is_some_and(|l| l > slash)
-    {
-        score += 3;
-    }
-    Some(score)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Opens the file list at `word` and waits for the background walk,
+    /// as the UI does.
+    fn open_files(c: &mut Completer, word: &str) {
+        c.close();
+        c.update(word, false);
+        let start = std::time::Instant::now();
+        while !c.take_fresh() {
+            assert!(start.elapsed().as_secs() < 5, "the walk never finished");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        c.update(word, false);
+    }
+
     #[test]
-    fn fuzzy_prefers_starts_and_runs() {
-        assert!(fuzzy("mn", "src/main.rs").is_some());
-        assert!(fuzzy("xyz", "src/main.rs").is_none());
-        let a = fuzzy("main", "src/main.rs").unwrap();
-        let b = fuzzy("main", "src/domain.rs").unwrap();
-        assert!(a > b);
+    fn file_names_rank_above_scattered_matches() {
+        let d = tempfile::tempdir().unwrap();
+        for f in ["src/main.rs", "src/domain.rs", "docs/maintenance/notes.md"] {
+            let p = d.path().join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "").unwrap();
+        }
+        let mut c = Completer::new(d.path());
+        open_files(&mut c, "@main");
+        assert_eq!(c.items()[0].insert, "@src/main.rs");
+        open_files(&mut c, "@xyz");
+        assert!(!c.active());
+    }
+
+    #[test]
+    fn files_made_during_the_session_show_up_next_time() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("old.txt"), "").unwrap();
+        let mut c = Completer::new(d.path());
+        open_files(&mut c, "@txt");
+        assert_eq!(c.items().len(), 1);
+        std::fs::write(d.path().join("new.txt"), "").unwrap();
+        open_files(&mut c, "@txt");
+        let names: Vec<&str> = c.items().iter().map(|i| i.insert.as_str()).collect();
+        assert_eq!(names, ["@new.txt", "@old.txt"]);
     }
 
     #[test]
@@ -181,7 +232,7 @@ mod tests {
         assert_eq!(c.items()[0].insert, "/undo");
         c.update("/un", false);
         assert!(!c.active());
-        c.update("@main", false);
+        open_files(&mut c, "@main");
         assert_eq!(c.items()[0].insert, "@src/main.rs");
         c.keep_open();
         c.update("@src/main.rs", false);

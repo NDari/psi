@@ -15,6 +15,7 @@ clap.workspace = true
 crossterm.workspace = true
 futures-util.workspace = true
 ignore.workspace = true
+nucleo-matcher.workspace = true
 jsonc-parser.workspace = true
 psi-agent = { path = "../psi-agent" }
 psi-ai = { path = "../psi-ai" }
