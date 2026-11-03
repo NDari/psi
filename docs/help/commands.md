@@ -22,3 +22,8 @@ yourself and gives its output to the model (!!cmd keeps it out). Rebind keys in
 
 File paths in tool calls and links in answers are clickable where the terminal supports
 it (OSC 8; in tmux 3.4+: set -as terminal-features ',*:hyperlinks').
+
+Shell completion for the psi command (flags, help topics, models, this directory's
+sessions with their first prompt, eval tasks, examples): in fish, add
+COMPLETE=fish psi | source to ~/.config/fish/config.fish. bash and zsh work the same
+way: source <(COMPLETE=bash psi), source <(COMPLETE=zsh psi).

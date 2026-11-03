@@ -1,3 +1,4 @@
+mod complete;
 mod interactive;
 mod run_mode;
 
@@ -5,7 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::engine::ArgValueCandidates;
 use psi_cli::config::{self, SettingsPaths};
 use psi_lab::eval::{self, Agent, RunConfig, Selection};
 use psi_lab::inspect;
@@ -25,7 +27,7 @@ struct Cli {
     json: bool,
 
     /// The model profile from ~/.psi/models.jsonc (default: the first, or llama-server on 9931).
-    #[arg(long)]
+    #[arg(long, add = ArgValueCandidates::new(complete::models))]
     model: Option<String>,
 
     /// Continue the latest session in this directory.
@@ -33,7 +35,7 @@ struct Cli {
     continue_last: bool,
 
     /// Continue this session file.
-    #[arg(long, value_name = "FILE")]
+    #[arg(long, value_name = "FILE", add = ArgValueCandidates::new(complete::sessions))]
     session: Option<PathBuf>,
 
     /// Model requests per run before it stops (default 40).
@@ -142,7 +144,10 @@ enum Command {
     /// List the installed packages.
     List,
     /// Short answers about psi's features, for you and the model.
-    Help { topic: Option<String> },
+    Help {
+        #[arg(add = ArgValueCandidates::new(complete::topics))]
+        topic: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -165,7 +170,10 @@ enum ExtCommand {
         verbose: bool,
     },
     /// List the example extensions, or print one with its tests.
-    Example { name: Option<String> },
+    Example {
+        #[arg(add = ArgValueCandidates::new(complete::examples))]
+        name: Option<String>,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -203,7 +211,7 @@ enum EvalCommand {
         #[command(flatten)]
         common: EvalCommon,
         /// quick, all, or task names separated by commas.
-        #[arg(long, default_value = "all")]
+        #[arg(long, default_value = "all", add = ArgValueCandidates::new(complete::tasks))]
         tasks: String,
         /// The psi binary graders may run (default: this one). It must run
         /// in the Debian image: `just eval-build` makes a static one.
@@ -217,7 +225,7 @@ enum EvalCommand {
         #[command(flatten)]
         common: EvalCommon,
         /// quick, all, or task names separated by commas.
-        #[arg(long, default_value = "quick")]
+        #[arg(long, default_value = "quick", add = ArgValueCandidates::new(complete::tasks))]
         tasks: String,
         #[arg(long, value_enum, default_value = "psi")]
         agent: AgentArg,
@@ -291,6 +299,9 @@ struct InspectArgs {
 }
 
 fn main() -> ExitCode {
+    // `COMPLETE=fish psi` prints the fish script; the shell then calls psi
+    // with COMPLETE set to get candidates, and this answers and exits.
+    clap_complete::CompleteEnv::with_factory(Cli::command).complete();
     let cli = Cli::parse();
     init_tracing();
     match run(cli) {
