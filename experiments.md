@@ -117,6 +117,8 @@ Flags worth sweeping: `-fa`, `-b`/`-ub`, `-ctk`/`-ctv` (KV cache type), `-t`, `-
 
 **Still open:** whether one system-prompt line naming the MCP tools and what they are for changes that (pi lists MCP servers in its system prompt); model-facing text, so a separate run. Projects big enough that grep misleads (many same-named symbols) would be the case where these tools should matter.
 
+## Done
+
 ### Prompt cache lost after a long final answer (added 2026-11-02)
 
 **Question:** why does the next turn re-read a long final answer instead of reusing it from the prompt cache, and can Psi avoid it?
@@ -128,6 +130,8 @@ Flags worth sweeping: `-fa`, `-b`/`-ub`, `-ctk`/`-ctv` (KV cache type), `-t`, `-
 - The model's own tokens differ from that re-tokenization. Each long answer took one token more than its text re-tokenizes to (1,900 against 1,899, 2,025 against 2,024), while every short answer, and all of pi's answers, match. So each long answer had one spot where the model wrote one usual token as two. The streamed chunks point to `Module/import` in the first and ` |>` in the second (code-like text). Most likely, not proven: that needs the raw token ids.
 - Why one odd token costs the whole answer: the 35B is a hybrid model, so llama-server can't cut its cache back to the exact point of difference; it restores the last checkpoint, which here sits 4 tokens before the end of the previous prompt (the "4 tokens" seen). As far as I know from llama.cpp, checkpoints are taken only while reading a prompt, not during generation (not checked in its source); the server's checkpoint flags (`--ctx-checkpoints`, `--checkpoint-min-step`) offer nothing for generation.
 - Pi isn't doing anything different (no sampling fields; its llama.cpp extension adds only thinking settings). Its answers happened to contain no such split. It's chance per answer, more likely in long and code-heavy answers.
+
+**Outcome (2026-11-03):** accepted as is, option 1 below.
 
 **Options, none built:**
 1. Accept it: about 3.5 s once after some long answers, no correctness cost.
@@ -198,8 +202,6 @@ Flags worth sweeping: `-fa`, `-b`/`-ub`, `-ctk`/`-ctv` (KV cache type), `-t`, `-
 **Line numbers cost a third more tokens (found 2026-11-03).** The owner noticed the slowness from the start too, before any clearing. Early steps reuse the cache fully, so the reading is the new tool output, and Psi's `read` numbers every line (§5, "line-numbered output"). Qwen's tokenizer splits numbers into single digits, so `1023\t` is 5 tokens before the code. The same seven files read in both runs (fn.go, env.go, parser.go, lexer.go, README.md, semantics.md, known-issues.md) took 31,559 tokens in Psi and 23,229 in pi, 35% more (20% to 49% by file). Pi's read has no line numbers. That slows every step that reads and fills the window sooner, which brings the clearing sooner. Built 2026-11-03: read shows lines without numbers, as pi does (offsets still come from the truncation notice; edit matches text, and still ignores numbers a model copies in). Plan §5 updated.
 
 **Built and run 2026-11-03, both changes:** read without numbers, and clearing down to 30% of the window (§7.4). Quick set on the 35B, one run each, correctness only: 64K (`~/.psi/evals/2026-11-03-1457-quick-64k-noline-clear30`) 7 pass, 3 model failures, no harness failures; 16K (`2026-11-03-1507-quick-16k-noline-clear30`, `--n-ctx 16384 --max-output 4096`) 5 pass, 5 model failures, no harness failures. Every failure's transcript shows wrong logic in the model's code, and all four tasks behind them flip between pass and fail across earlier 35B runs. No sign the missing numbers misled the model: no `cat -n` or `nl`, `grep -n` twice (6 times before); 5 of 31 edits failed on misremembered text or a double match (0 of 37 in the 64K run before), each followed by the fix the error named. Neither 64K run cleared anything (the tasks don't fill 64K); at 16K summaries were already the usual path, as in the earlier 16K runs, and `multi_split_package` hit the step cap in its known loop. The cog review again (`.../scratchpad-cog-/2026-11-03-1520_acb65aa4.*`): 2 clearings in 25 requests, each freeing about 28K, against 4 in 30 before; re-reading after them took 32 s against 114 s.
-
-## Done
 
 ### A faster 35B on the Mac for development (added 2026-11-01)
 
