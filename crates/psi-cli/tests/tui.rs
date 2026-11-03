@@ -872,6 +872,43 @@ fn file_paths_and_markdown_links_are_clickable() {
 }
 
 #[test]
+fn ctrl_r_finds_an_earlier_prompt_and_ctrl_s_stashes_the_draft() {
+    let (mut t, _s) = Tui::start(vec![text("one"), text("two")], |_| {});
+    t.wait_for("› ", SLOW);
+    t.typ("first question about parsers\r");
+    t.wait_for("one", SLOW);
+    t.typ("second question about lexers\r");
+    t.wait_for("two", SLOW);
+    t.send(b"\x12"); // Ctrl+R
+    t.wait_for("history: ", SLOW);
+    t.typ("pars");
+    t.wait_for("history: pars", SLOW);
+    // The committed prompt is on screen once; the box makes it twice.
+    let count = |t: &Tui| {
+        t.contents()
+            .matches("› first question about parsers")
+            .count()
+    };
+    let wait_count = |t: &Tui, n: usize| {
+        let start = Instant::now();
+        while count(t) != n && start.elapsed() < SLOW {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(count(t), n, "{}", t.contents());
+    };
+    wait_count(&t, 1);
+    t.typ("\r");
+    wait_count(&t, 2);
+    t.send(b"\x13"); // Ctrl+S
+    t.wait_for("draft stashed", SLOW);
+    wait_count(&t, 1);
+    t.send(b"\x13");
+    wait_count(&t, 2);
+    t.send(b"\x03");
+    t.quit();
+}
+
+#[test]
 fn themes_color_the_screen() {
     let (mut t, _s) = Tui::start(vec![text("ok")], |p| {
         let home = p.parent().unwrap().join("home/.psi");

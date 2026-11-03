@@ -11,7 +11,8 @@ Slash commands and keys in the interactive mode.
 
 Keys: Enter sends (while a run is going, it steers it), Alt+Enter queues a follow-up,
 Shift+Enter is a new line, Esc aborts, Ctrl+C clears (twice quits), Ctrl+D quits,
-Ctrl+Alt+P toggles plan mode, Ctrl+G edits the prompt in $VISUAL or $EDITOR. @path adds a file reference; !cmd runs a command
+Ctrl+Alt+P toggles plan mode, Ctrl+G edits the prompt in $VISUAL or $EDITOR,
+Ctrl+R searches earlier prompts, Ctrl+S puts the draft aside (again brings it back). @path adds a file reference; !cmd runs a command
 yourself and gives its output to the model (!!cmd keeps it out). Rebind keys in
 ~/.psi/keybindings.json (psi help keybindings).
 

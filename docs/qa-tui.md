@@ -30,6 +30,7 @@ yours.
 - [ ] Up and Down browse history at the first and last line; the unsent draft comes back.
 - [ ] Bracketed paste of many lines lands as one draft, not as several prompts.
 - [ ] Ctrl+C clears the input; on an empty input it asks, and a second Ctrl+C quits. Ctrl+D on an empty input quits.
+- [ ] Ctrl+R lists earlier prompts newest first; typing filters; Enter puts one in the box without sending; Esc leaves the box as it was. Ctrl+S stashes the draft and brings it back. (auto)
 - [ ] Ctrl+G opens the draft in `$VISUAL`/`$EDITOR` (nvim); saving and quitting puts the edited text back; the screen is intact afterwards. (auto: with a script as the editor)
 
 ## Dropdowns and modals (they go under the input box, never in its place)

@@ -33,6 +33,8 @@ pub enum Action {
     FollowUp,
     PlanToggle,
     ExternalEditor,
+    HistorySearch,
+    Stash,
 }
 
 const ALL: &[(Action, &str, &[&str], &str)] = &[
@@ -161,6 +163,18 @@ const ALL: &[(Action, &str, &[&str], &str)] = &[
         "app.editor.external",
         &["ctrl+g"],
         "edit the prompt in $VISUAL or $EDITOR",
+    ),
+    (
+        Action::HistorySearch,
+        "app.history.search",
+        &["ctrl+r"],
+        "search earlier prompts",
+    ),
+    (
+        Action::Stash,
+        "app.editor.stash",
+        &["ctrl+s"],
+        "put the draft aside; again to bring it back",
     ),
 ];
 

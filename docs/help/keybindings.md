@@ -9,4 +9,5 @@ ctrl+alt+p, f5, pageUp. Example:
 Actions: tui.editor.cursorUp/Down/Left/Right, cursorWordLeft/Right, cursorLineStart/End,
 deleteCharBackward/Forward, deleteWordBackward, deleteToLineStart/End;
 tui.input.newLine, tui.input.submit; app.interrupt, app.clear, app.exit,
-app.message.followUp, app.plan.toggle, app.editor.external. /help shows the keys in use.
+app.message.followUp, app.plan.toggle, app.editor.external, app.history.search,
+app.editor.stash. /help shows the keys in use.

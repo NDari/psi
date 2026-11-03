@@ -178,6 +178,12 @@ enum Picker {
     Plan {
         sel: usize,
     },
+    /// Ctrl+R: earlier prompts, newest first, filtered by `query`.
+    History {
+        query: String,
+        items: Vec<String>,
+        sel: usize,
+    },
 }
 
 const PLAN_CHOICES: [&str; 3] = ["Carry out the plan", "Stay in plan mode", "Refine the plan"];
@@ -252,6 +258,8 @@ pub struct App<W: Write> {
     /// A plan was proposed during this run: offer it when the run ends.
     plan_proposed: bool,
     keymap: Keymap,
+    /// A draft put aside with Ctrl+S.
+    stash: Option<String>,
     term: Term,
     notify: Notify,
     /// The working directory's name, for the title and notifications.
@@ -332,6 +340,7 @@ impl<W: Write> App<W> {
             plan: PlanState::default(),
             plan_proposed: false,
             keymap: p.keymap,
+            stash: None,
             term: p.term,
             notify: p.notify,
             dir: p.dir,
@@ -567,6 +576,19 @@ impl<W: Write> App<W> {
         if self.keymap.is(Action::ExternalEditor, &k) {
             return self.external_editor();
         }
+        if self.keymap.is(Action::HistorySearch, &k) {
+            self.completer.close();
+            let items = self.history_matches("");
+            self.picker = Some(Picker::History {
+                query: String::new(),
+                items,
+                sel: 0,
+            });
+            return;
+        }
+        if self.keymap.is(Action::Stash, &k) {
+            return self.stash_draft();
+        }
         if self.keymap.is(Action::Interrupt, &k) {
             if self.completer.active() {
                 self.completer.close();
@@ -749,12 +771,16 @@ impl<W: Write> App<W> {
     }
 
     fn picker_key(&mut self, k: KeyEvent) {
+        if matches!(self.picker, Some(Picker::History { .. })) {
+            return self.history_key(k);
+        }
         let Some(p) = &mut self.picker else { return };
         let (n, sel) = match p {
             Picker::Goto { items, sel, .. } | Picker::Fork { items, sel } => (items.len(), sel),
             Picker::Resume { items, sel } => (items.len(), sel),
             Picker::Select { items, sel, .. } => (items.len(), sel),
             Picker::Plan { sel } => (PLAN_CHOICES.len(), sel),
+            Picker::History { items, sel, .. } => (items.len(), sel),
         };
         match k.code {
             KeyCode::Up if n > 0 => *sel = (*sel + n - 1) % n,
@@ -800,10 +826,94 @@ impl<W: Write> App<W> {
                     1 => self.info("  still in plan mode"),
                     _ => self.info("  say what to change; plan mode stays on"),
                 },
-                None => {}
+                Some(Picker::History { .. }) | None => {}
             },
             _ => {}
         }
+    }
+
+    /// Earlier prompts holding every word of `query` (any case), newest
+    /// first, each once.
+    fn history_matches(&self, query: &str) -> Vec<String> {
+        let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+        let mut seen = std::collections::HashSet::new();
+        self.editor
+            .history()
+            .iter()
+            .rev()
+            .filter(|h| {
+                let h = h.to_lowercase();
+                words.iter().all(|w| h.contains(w.as_str()))
+            })
+            .filter(|h| seen.insert(h.as_str()))
+            .cloned()
+            .collect()
+    }
+
+    /// Keys in the Ctrl+R list: typing filters, Enter takes the prompt
+    /// into the box (without sending it), Esc leaves the box as it was.
+    fn history_key(&mut self, k: KeyEvent) {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let Some(Picker::History { query, items, sel }) = &mut self.picker else {
+            return;
+        };
+        let n = items.len();
+        match k.code {
+            KeyCode::Esc => self.picker = None,
+            KeyCode::Char('c') if ctrl => self.picker = None,
+            KeyCode::Up if n > 0 => *sel = (*sel + n - 1) % n,
+            KeyCode::Down if n > 0 => *sel = (*sel + 1) % n,
+            KeyCode::Char('r') if ctrl && n > 0 => *sel = (*sel + 1) % n,
+            KeyCode::Enter | KeyCode::Tab => {
+                if let Some(Picker::History { items, sel, .. }) = self.picker.take()
+                    && let Some(text) = items.get(sel)
+                {
+                    self.editor.set_text(text);
+                    self.refresh_completion();
+                }
+            }
+            KeyCode::Backspace => {
+                query.pop();
+                let q = query.clone();
+                self.refilter_history(q);
+            }
+            KeyCode::Char(c) if !ctrl => {
+                query.push(c);
+                let q = query.clone();
+                self.refilter_history(q);
+            }
+            _ => {}
+        }
+    }
+
+    fn refilter_history(&mut self, q: String) {
+        let matches = self.history_matches(&q);
+        if let Some(Picker::History { items, sel, .. }) = &mut self.picker {
+            *items = matches;
+            *sel = 0;
+        }
+    }
+
+    /// Ctrl+S: the draft goes aside and the box empties; again brings it
+    /// back. With text in both, they swap.
+    fn stash_draft(&mut self) {
+        let text = self.editor.text();
+        match (text.trim().is_empty(), self.stash.take()) {
+            (true, None) => self.info("  nothing stashed"),
+            (true, Some(s)) => self.editor.set_text(&s),
+            (false, None) => {
+                self.stash = Some(text);
+                self.editor.clear();
+                let key = self.keymap.first(Action::Stash).unwrap_or_default();
+                self.info(&format!("  draft stashed: {key} brings it back"));
+            }
+            (false, Some(s)) => {
+                self.stash = Some(text);
+                self.editor.set_text(&s);
+                self.info("  swapped the draft with the stashed one");
+            }
+        }
+        self.completer.close();
     }
 
     /// Esc on a picker: an extension's select answers nil.
@@ -1956,9 +2066,34 @@ impl<W: Write> App<W> {
                     live.push(Line::styled("  what next?", Style::default().bold()));
                     (PLAN_CHOICES.iter().map(|c| (*c).to_owned()).collect(), *sel)
                 }
+                Picker::History { query, items, sel } => {
+                    live.push(Line::styled(
+                        format!("  history: {query}▏"),
+                        Style::default().bold(),
+                    ));
+                    let shown = items
+                        .iter()
+                        .map(|h| {
+                            let mut lines = h.lines();
+                            let first = lines.next().unwrap_or("").to_owned();
+                            if lines.next().is_some() {
+                                first + " …"
+                            } else {
+                                first
+                            }
+                        })
+                        .collect();
+                    (shown, *sel)
+                }
             };
+            let empty = items.is_empty();
             live.extend(list(&items, sel, 10, w));
-            live.push(Line::styled("  ↑↓ choose · Enter go · Esc cancel", dim()));
+            let hint = match p {
+                Picker::History { .. } if empty => "  no earlier prompt matches · Esc cancel",
+                Picker::History { .. } => "  type to filter · ↑↓ choose · Enter take · Esc cancel",
+                _ => "  ↑↓ choose · Enter go · Esc cancel",
+            };
+            live.push(Line::styled(hint, dim()));
         } else if self.completer.active() {
             let items: Vec<String> = self
                 .completer
