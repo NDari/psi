@@ -117,7 +117,51 @@ Flags worth sweeping: `-fa`, `-b`/`-ub`, `-ctk`/`-ctv` (KV cache type), `-t`, `-
 
 **Still open:** whether one system-prompt line naming the MCP tools and what they are for changes that (pi lists MCP servers in its system prompt); model-facing text, so a separate run. Projects big enough that grep misleads (many same-named symbols) would be the case where these tools should matter.
 
+### The small reference models without line numbers (added 2026-11-03)
+
+**Question:** do Qwen3.5 4B and Gemma 4 12B cope with read output that has no line numbers (built 2026-11-03)? The eval after the change ran on the 35B only, and small models may lean on the numbers more: picking `offset`, or copying text for an edit.
+
+**How:** one quick-set run per model (`just llm-up qwen`, `just llm-up gemma`), then read the transcripts for workarounds (`cat -n`, `nl`, `grep -n` to find lines), edit failures on copied text, and reads with wrong offsets. Compare with the Phase 2 runs (`2026-10-31-1634-psi-qwen3.5-4b`, `2026-10-31-1646-psi-gemma4-12b-qat`) for those signs, not for scores. Roughly an hour of GPU for both.
+
+**Open:**
+- If a small model needs them, numbers could come back as a per-model setting rather than for every model.
+
+### A quantized KV cache for reading deep in the context (added 2026-11-03)
+
+**Question:** does an 8-bit KV cache (`-ctk q8_0 -ctv q8_0`) make the 35B read prompts faster deep in the context? The batch-size sweep showed speed falls with depth at every batch size (1,554 tok/s at 0, 656 at 40K), so the cost is attention over the cache, and a smaller cache means less memory to read per token.
+
+**How:** llama-bench as in the batch run (`-ub 2048 -b 4096 -p 4096 -n 0 -d 0,16384,40000 -r 2`) with and without `-ctk q8_0 -ctv q8_0`. About 10 minutes with the server stopped.
+
+**Open:**
+- A quantized cache can change output; if it reads faster, check quality with an eval run before adopting it.
+- Whether MTP drafting works with a quantized cache on this build.
+
+### The model card's sampling for the 35B (added 2026-11-03)
+
+**Question:** do the model card's non-thinking settings (`--temp 0.7 --top-p 0.8 --top-k 20 --min-p 0 --presence-penalty 1.5`) beat the server's defaults (temp 1.0, top-p 0.95, min-p 0.05)? Sharper sampling should mean fewer odd token splits (the cache losses after long answers) and higher MTP draft acceptance (a server log line on 2026-11-03 showed 0.45, against 0.84 on average on 2026-11-01).
+
+**How:** replay a fixed set of recorded requests against llama-server with each setting, as in the 2026-11-01 speed runs, and read generation tok/s and draft acceptance; count answers whose generated token count exceeds their re-tokenized length (the odd splits). Not pass rates: one run can't compare those.
+
+**Open:**
+- Presence penalty may hurt code (repeated identifiers); watch for it in the transcripts.
+
 ## Done
+
+### What the transcripts say about checking work and reading (added 2026-11-03)
+
+**Question:** two things, from the recorded eval runs, no GPU: how often does the model give its final answer after editing without running anything since the last edit (the "Everything works correctly" habit), and how much of what it reads is read again, or whole large files?
+
+**How:** a script over every `~/.psi/evals/*/*/trial-*/session.jsonl`: for each trial, whether files were changed, whether a bash call came after the last change, and the outcome; for reads, the share of read characters that were re-reads of a file already read (before and after a clearing or summary), and the share from whole-file reads of files over 200 lines.
+
+**Run 2026-11-03** (291 trials in 46 eval runs from 2026-10-31 to 2026-11-03: Psi 259, pi 32; scripts were in the session scratchpad). A "change" is a successful write or edit (bash edits not counted); a check is any bash call after the last change.
+- **Finishing without checking is rare.** The 35B in Psi checked after its last change in 159 of 165 trials that changed files; Gemma 27 of 33, Qwen 4B 40 of 46; pi's runs about the same. The few that didn't mostly failed (35B 1 of 6 passed).
+- **The failures come from checks that pass.** Of the 35B's 43 failures (step-cap hits left out) that checked after the last change, 40 ended with a clean last run and only 3 with a failing one; pi's 35B 2 of 2 clean. The model tests what it thought of, not what the task asks, as in `feat_query_paging` (descending order with missing values). A "you didn't run anything" nudge would catch almost nothing; "your last command failed" would catch the 3. The real gap is weak self-tests, which a harness can't see without the hidden checks.
+- **Reading at 64K is not where time goes in the evals.** Per trial the 35B read 11.5K characters in Psi and 13.7K in pi (Psi's still with line numbers then, which add about 15 to 20%). Re-reads of a file unchanged since the last read: 12% of Psi's reading against 4% of pi's; re-reads after the model's own change (checking an edit) 23%. Whole files over 200 lines: 30% in Psi, 55% in pi. The cog review's 113K against 65K was one interactive run in a much bigger repo, not the pattern here.
+- **At 16K, re-reading is most of it:** 54% of the 35B's reading came after a clearing or summary removed the earlier read, 21% more were plain re-reads; that is the known loop (`multi_split_package`, `long_api_docs`).
+- **The small models read more in Psi than in pi** (Gemma 14.0K against 7.6K characters per trial, Qwen 4B 13.1K against 8.4K, line numbers included), with more plain re-reads (22% against 16%, 13% against 6%). Those Psi runs are from Phases 2 to 6, and the task sets differ between runs, so this is a lead for the small-model run above, not a finding.
+
+**Outcome:** no harness nudge for checking (it would rarely fire); reading at 64K is not worth changing the prompt for on eval-sized tasks. Worth knowing: the eval tasks' repos are small, so they say little about reading in a large real project like cog.
+
 
 ### Prompt cache lost after a long final answer (added 2026-11-02)
 
