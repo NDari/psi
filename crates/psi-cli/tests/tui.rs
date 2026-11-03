@@ -29,6 +29,9 @@ struct Tui {
     /// The same output on a terminal too tall to scroll: everything ever
     /// committed, once each.
     tall: Arc<Mutex<vt100::Parser>>,
+    /// Every byte psi wrote, for sequences the screen doesn't keep (titles,
+    /// notifications).
+    raw: Arc<Mutex<Vec<u8>>>,
     child: Child,
     started: Instant,
 }
@@ -94,6 +97,11 @@ impl Tui {
             // Ctrl+G's editor: a script a test may write, never the developer's own.
             .env("VISUAL", home.join("editor.sh"))
             .env_remove("EDITOR")
+            // The terminal is the test's, not the one the tests run in.
+            .env_remove("TMUX")
+            .env_remove("KITTY_WINDOW_ID")
+            .env_remove("LC_TERMINAL")
+            .env_remove("TERM_PROGRAM")
             .env_remove("PSI_LOG")
             .current_dir(&project)
             .stdin(Stdio::from(slave.try_clone().unwrap()))
@@ -104,7 +112,8 @@ impl Tui {
         let screen = Arc::new(Mutex::new(vt100::Parser::new(nz(H), nz(W), 10_000)));
         let mut reader = std::fs::File::from(master.try_clone().unwrap());
         let tall = Arc::new(Mutex::new(vt100::Parser::new(nz(5000), nz(W), 0)));
-        let (s, t2) = (screen.clone(), tall.clone());
+        let raw = Arc::new(Mutex::new(Vec::new()));
+        let (s, t2, r2) = (screen.clone(), tall.clone(), raw.clone());
         std::thread::spawn(move || {
             let mut buf = [0u8; 65536];
             while let Ok(n) = reader.read(&mut buf) {
@@ -117,6 +126,7 @@ impl Tui {
                 let (mut a, mut b) = (s.lock().unwrap(), t2.lock().unwrap());
                 a.process(&buf[..n]);
                 b.process(&buf[..n]);
+                r2.lock().unwrap().extend_from_slice(&buf[..n]);
             }
         });
         let tui = Self {
@@ -126,6 +136,7 @@ impl Tui {
             master: std::fs::File::from(master),
             screen,
             tall,
+            raw,
             child,
             started,
         };
@@ -184,6 +195,22 @@ impl Tui {
             "waited {max:?} for {what:?}; the screen:\n{}",
             self.contents()
         );
+    }
+
+    fn raw(&self) -> String {
+        String::from_utf8_lossy(&self.raw.lock().unwrap()).into_owned()
+    }
+
+    /// Waits until psi has written `what` (raw bytes, escapes included).
+    fn wait_raw(&self, what: &str, max: Duration) {
+        let start = Instant::now();
+        while start.elapsed() < max {
+            if self.raw().contains(what) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("psi never wrote {what:?}; it wrote:\n{:?}", self.raw());
     }
 
     fn send(&mut self, bytes: &[u8]) {
@@ -799,6 +826,29 @@ fn ctrl_g_edits_the_prompt_in_the_editor() {
     assert!(t.contents().contains("keep me"));
     t.send(b"\x03"); // clear the input so Ctrl+D quits
     t.quit();
+}
+
+#[test]
+fn title_progress_and_a_notification_when_unfocused() {
+    let (mut t, _s) = Tui::start(vec![text("all done")], |_| {});
+    t.wait_raw("\x1b]2;ψ project\x1b\\", SLOW);
+    t.send(b"\x1b[O"); // focus lost
+    t.typ("go\r");
+    t.wait_for("all done", SLOW);
+    t.wait_raw("\x07\x1b]777;notify;psi · project;done\x1b\\", SLOW);
+    let raw = t.raw();
+    let working = raw
+        .find("\x1b]9;4;3\x1b\\")
+        .expect("progress while working");
+    assert!(raw.contains("\x1b]2;ψ project · working\x1b\\"));
+    assert!(
+        raw[working..].contains("\x1b]9;4;0\x1b\\"),
+        "progress removed when idle"
+    );
+    // Focused again: no notification for the next turn.
+    t.send(b"\x1b[I");
+    let all = t.quit();
+    assert!(all.contains("all done"));
 }
 
 #[test]

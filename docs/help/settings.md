@@ -15,6 +15,10 @@ Keys:
 - compaction: {"tail": tokens kept verbatim after a summary (default "auto"), "summary":
   "structured" (default) or "free"}. For experiments (H-07, H-11).
 - theme: a theme name (psi help themes).
+- notify: "auto" (default), "bell" or "off". When a turn ends or something waits for you
+  while the terminal is unfocused, auto rings the bell and sends a desktop notification.
+  Psi also shows working or waiting in the title and the tab's progress indicator. In tmux,
+  set -g focus-events on (to know about focus) and set -g allow-passthrough on.
 - skills, prompts: more directories of skills or prompt templates.
 - packages: installed packages (psi help packages).
 

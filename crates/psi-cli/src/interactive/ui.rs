@@ -14,6 +14,7 @@ use psi_agent::{AgentEvent, Queues, RunOutcome, Stop};
 use psi_ext::{ExtManager, Request as ExtRequest};
 use psi_safety::policy::Mode;
 use psi_session::{Entry, EntryBody, Role, text_of};
+use psi_tui::term::{Activity, Term, title_for};
 use psi_tui::theme::{self, Token};
 use psi_tui::{Action, Editor, EditorEvent, Keymap, Line, MdStream, Renderer, Style, render_block};
 use serde_json::Value;
@@ -189,6 +190,28 @@ struct Shown {
     is_error: bool,
 }
 
+/// The `notify` setting: what Psi does when a turn ends or something waits
+/// for the user while the terminal is unfocused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Notify {
+    /// The bell and a desktop notification.
+    Auto,
+    Bell,
+    Off,
+}
+
+impl Notify {
+    pub fn from_setting(v: &Value) -> Result<Self, String> {
+        match v.as_str() {
+            None if v.is_null() => Ok(Notify::Auto),
+            Some("auto") => Ok(Notify::Auto),
+            Some("bell") => Ok(Notify::Bell),
+            Some("off") => Ok(Notify::Off),
+            _ => Err("notify is \"auto\", \"bell\" or \"off\"".into()),
+        }
+    }
+}
+
 pub struct App<W: Write> {
     r: Renderer<W>,
     editor: Editor,
@@ -229,6 +252,12 @@ pub struct App<W: Write> {
     /// A plan was proposed during this run: offer it when the run ends.
     plan_proposed: bool,
     keymap: Keymap,
+    term: Term,
+    notify: Notify,
+    /// The working directory's name, for the title and notifications.
+    dir: String,
+    /// The activity the title and progress last showed.
+    shown_activity: Option<Activity>,
 }
 
 pub struct AppParts<W: Write> {
@@ -249,6 +278,9 @@ pub struct AppParts<W: Write> {
     pub ui_tx: UnboundedSender<UiMsg>,
     pub resources: Arc<psi_cli::resources::Resources>,
     pub keymap: Keymap,
+    pub term: Term,
+    pub notify: Notify,
+    pub dir: String,
 }
 
 impl<W: Write> App<W> {
@@ -300,6 +332,10 @@ impl<W: Write> App<W> {
             plan: PlanState::default(),
             plan_proposed: false,
             keymap: p.keymap,
+            term: p.term,
+            notify: p.notify,
+            dir: p.dir,
+            shown_activity: None,
             debug: std::env::var_os("PSI_DEBUG_RENDER").is_some(),
         }
     }
@@ -309,13 +345,55 @@ impl<W: Write> App<W> {
     }
 
     pub fn start(&mut self, banner: Vec<Line>) -> std::io::Result<()> {
+        let push = self.term.push_title();
+        self.write_raw(&push);
         self.r.start(true)?;
         self.r.commit(&banner)?;
         self.draw()
     }
 
     pub fn finish(&mut self) -> std::io::Result<()> {
+        let mut out = self.term.progress(Activity::Idle);
+        out.extend(self.term.pop_title());
+        self.write_raw(&out);
         self.r.finish(false)
+    }
+
+    /// Bytes for the terminal itself (title, progress, notifications),
+    /// outside the renderer's frames.
+    fn write_raw(&mut self, bytes: &[u8]) {
+        let out = self.r.get_mut();
+        let _ = out.write_all(bytes).and_then(|()| out.flush());
+    }
+
+    fn activity(&self) -> Activity {
+        let waiting = self.card.is_some()
+            || self.blocked.is_some()
+            || self.pause.is_some()
+            || self.ext_modal.is_some()
+            || matches!(
+                self.picker,
+                Some(Picker::Select { .. } | Picker::Plan { .. })
+            );
+        if waiting {
+            Activity::Waiting
+        } else if self.running.is_some() {
+            Activity::Working
+        } else {
+            Activity::Idle
+        }
+    }
+
+    /// The title and the progress indicator follow the activity.
+    fn show_activity(&mut self) {
+        let a = self.activity();
+        if self.shown_activity == Some(a) {
+            return;
+        }
+        self.shown_activity = Some(a);
+        let mut out = self.term.title(&title_for(&self.dir, a));
+        out.extend(self.term.progress(a));
+        self.write_raw(&out);
     }
 
     fn width(&self) -> usize {
@@ -334,11 +412,17 @@ impl<W: Write> App<W> {
         self.commit(vec![Line::styled(s, theme::style(Token::Error))]);
     }
 
-    fn bell(&mut self) {
-        if !self.focused {
-            let out = self.r.get_mut();
-            let _ = out.write_all(b"\x07").and_then(|()| out.flush());
+    /// While the terminal is unfocused: the bell, and with `notify: auto` a
+    /// desktop notification saying `what`.
+    fn bell(&mut self, what: &str) {
+        if self.focused || self.notify == Notify::Off {
+            return;
         }
+        let mut out = b"\x07".to_vec();
+        if self.notify == Notify::Auto {
+            out.extend(self.term.notification(&format!("psi · {}", self.dir), what));
+        }
+        self.write_raw(&out);
     }
 
     fn send(&mut self, c: Cmd) {
@@ -1132,17 +1216,17 @@ impl<W: Write> App<W> {
                     tx,
                     typing: None,
                 });
-                self.bell();
+                self.bell("an approval is waiting");
             }
             UiMsg::Blocked(req, tx) => {
                 self.flush_text();
                 self.blocked = Some((req, tx));
-                self.bell();
+                self.bell("a blocked command is waiting for your choice");
             }
             UiMsg::Pause(reason, tx) => {
                 self.flush_text();
                 self.pause = Some((reason, tx));
-                self.bell();
+                self.bell("paused: waiting for you");
             }
             UiMsg::RunDone(out) => {
                 self.flush_text();
@@ -1159,7 +1243,14 @@ impl<W: Write> App<W> {
                     Stop::Failed(r) => self.error(&format!("  failed: {r}")),
                 }
                 self.offer_plan();
-                self.bell();
+                let what = match &out.stop {
+                    Stop::Done if self.picker.is_some() => "a plan is ready".to_owned(),
+                    Stop::Done => "done".to_owned(),
+                    Stop::Aborted => "aborted".to_owned(),
+                    Stop::Budget(r) | Stop::Guard(r) => format!("stopped: {r}"),
+                    Stop::Failed(r) => format!("failed: {r}"),
+                };
+                self.bell(&what);
             }
             UiMsg::Info(s) => self.info(&format!("  {s}")),
             UiMsg::Error(s) => self.error(&format!("  {s}")),
@@ -1242,6 +1333,7 @@ impl<W: Write> App<W> {
     }
 
     fn on_ext(&mut self, ext: String, req: ExtRequest) {
+        let asking = format!("{ext} is asking");
         match req {
             ExtRequest::Notify { message, level } => {
                 let style = match level.as_str() {
@@ -1263,7 +1355,7 @@ impl<W: Write> App<W> {
                     message,
                     reply,
                 });
-                self.bell();
+                self.bell(&asking);
             }
             ExtRequest::Input { title, reply, .. } => {
                 self.flush_text();
@@ -1273,7 +1365,7 @@ impl<W: Write> App<W> {
                     text: String::new(),
                     reply,
                 });
-                self.bell();
+                self.bell(&asking);
             }
             ExtRequest::Select {
                 title,
@@ -1287,7 +1379,7 @@ impl<W: Write> App<W> {
                     sel: 0,
                     reply,
                 });
-                self.bell();
+                self.bell(&asking);
             }
             ExtRequest::Custom { id, reply } => {
                 self.flush_text();
@@ -1726,6 +1818,7 @@ impl<W: Write> App<W> {
     /// The live region: streaming text, running calls, queued messages,
     /// the status line, the input box, and below it a card or a list.
     fn draw(&mut self) -> std::io::Result<()> {
+        self.show_activity();
         let w = self.width();
         let mut live: Vec<Line> = Vec::new();
         let pending = self.md.pending();

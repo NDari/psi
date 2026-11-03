@@ -9,6 +9,7 @@ pub mod keys;
 pub mod markdown;
 pub mod render;
 pub mod style;
+pub mod term;
 pub mod theme;
 
 pub use editor::{Editor, EditorEvent};

@@ -21,6 +21,7 @@ yours.
 - [ ] Code blocks keep their fence lines (dimmed); copying a block from the terminal gives the exact code.
 - [ ] Thinking is never shown.
 - [ ] BEL rings when a run ends or an approval appears while the terminal window is unfocused (switch away, then back).
+- [ ] In ghostty inside tmux (`focus-events on`, `allow-passthrough on`): switching to another pane during a run gives a desktop notification when it ends or an approval appears; the tab shows progress while working; the pane title reads `ψ <dir> · working` / `· waiting`, and the old title is back after quitting. (auto: the sequences)
 
 ## Input
 
@@ -28,6 +29,7 @@ yours.
 - [ ] Up and Down browse history at the first and last line; the unsent draft comes back.
 - [ ] Bracketed paste of many lines lands as one draft, not as several prompts.
 - [ ] Ctrl+C clears the input; on an empty input it asks, and a second Ctrl+C quits. Ctrl+D on an empty input quits.
+- [ ] Ctrl+G opens the draft in `$VISUAL`/`$EDITOR` (nvim); saving and quitting puts the edited text back; the screen is intact afterwards. (auto: with a script as the editor)
 
 ## Dropdowns and modals (they go under the input box, never in its place)
 

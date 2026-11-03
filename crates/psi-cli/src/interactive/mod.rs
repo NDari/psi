@@ -26,7 +26,7 @@ use psi_tui::{Keymap, Line, Style};
 use crate::run_mode::{Prepared, RunArgs, prepare};
 use approver::TuiApprover;
 use complete::Completer;
-use ui::{App, AppParts};
+use ui::{App, AppParts, Notify};
 use view::Status;
 use worker::{Worker, forward};
 
@@ -99,6 +99,16 @@ fn with_terminal_released<T>(f: impl FnOnce() -> T) -> T {
     let out = f();
     let _ = enter_terminal();
     out
+}
+
+/// Removes the progress indicator and puts the title back (after a panic;
+/// a normal exit does this in `App::finish`).
+fn clear_terminal_status() {
+    let t = psi_tui::term::Term::detect(|k| std::env::var(k).ok());
+    let mut bytes = t.progress(psi_tui::term::Activity::Idle);
+    bytes.extend(t.pop_title());
+    let mut out = std::io::stdout();
+    let _ = out.write_all(&bytes);
 }
 
 fn restore_terminal() {
@@ -195,10 +205,15 @@ pub fn run(args: RunArgs) -> Result<ExitCode> {
             "no theme named '{wanted}' (in ~/.psi/themes); using the default"
         )),
     }
+    let notify = Notify::from_setting(&args.settings["notify"]).unwrap_or_else(|e| {
+        warnings.push(e);
+        Notify::Auto
+    });
     let (w, h) = terminal::size().unwrap_or((80, 24));
     enter_terminal().context("the terminal can't go into raw mode")?;
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |p| {
+        clear_terminal_status();
         restore_terminal();
         prev(p);
     }));
@@ -220,6 +235,12 @@ pub fn run(args: RunArgs) -> Result<ExitCode> {
         ui_tx,
         resources,
         keymap,
+        term: psi_tui::term::Term::detect(|k| std::env::var(k).ok()),
+        notify,
+        dir: cwd
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| cwd.display().to_string()),
     });
     let mut banner = vec![Line::styled(
         format!(
