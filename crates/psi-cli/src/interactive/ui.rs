@@ -25,6 +25,7 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use super::complete::Completer;
+use super::paste::{Pastes, strip_invisible};
 use super::view::{
     self, Status, approval_card, call_block, call_header, dim, git_diff_lines, list, status_line,
 };
@@ -260,6 +261,8 @@ pub struct App<W: Write> {
     keymap: Keymap,
     /// A draft put aside with Ctrl+S.
     stash: Option<String>,
+    /// Long pastes, shown in the box as placeholders.
+    pastes: Pastes,
     term: Term,
     notify: Notify,
     /// The working directory's name, for the title and notifications.
@@ -341,6 +344,7 @@ impl<W: Write> App<W> {
             plan_proposed: false,
             keymap: p.keymap,
             stash: None,
+            pastes: Pastes::default(),
             term: p.term,
             notify: p.notify,
             dir: p.dir,
@@ -499,9 +503,15 @@ impl<W: Write> App<W> {
                 if let Some(c) = &mut self.card
                     && let Some(t) = &mut c.typing
                 {
-                    t.push_str(&s.replace('\n', " "));
+                    t.push_str(&strip_invisible(&s).0.replace('\n', " "));
                 } else {
-                    self.editor.insert_str(&s);
+                    let (text, removed) = self.pastes.take(&s);
+                    if removed > 0 {
+                        self.info(&format!(
+                            "  removed {removed} invisible characters from the paste"
+                        ));
+                    }
+                    self.editor.insert_str(&text);
                     self.refresh_completion();
                 }
             }
@@ -625,7 +635,7 @@ impl<W: Write> App<W> {
             return;
         }
         if self.keymap.is(Action::FollowUp, &k) {
-            let text = self.editor.text();
+            let text = self.pastes.expand(&self.editor.text());
             if !text.trim().is_empty() {
                 self.editor.push_history(&text);
                 self.editor.clear();
@@ -665,8 +675,12 @@ impl<W: Write> App<W> {
             _ => {}
         }
         match self.editor.handle(k) {
-            EditorEvent::Submit(text) => {
+            EditorEvent::Submit(typed) => {
                 self.completer.close();
+                let text = self.pastes.expand(&typed);
+                if text != typed {
+                    self.editor.replace_last_history(&text);
+                }
                 self.submit(text, false);
             }
             EditorEvent::Changed => self.refresh_completion(),
@@ -689,7 +703,10 @@ impl<W: Write> App<W> {
             .prefix("psi-prompt-")
             .suffix(".md")
             .tempfile()
-            .and_then(|f| std::fs::write(f.path(), self.editor.text()).map(|()| f));
+            .and_then(|f| {
+                let text = self.pastes.expand(&self.editor.text());
+                std::fs::write(f.path(), text).map(|()| f)
+            });
         let file = match file {
             Ok(f) => f,
             Err(e) => return self.error(&format!("could not write the prompt to a file: {e}")),

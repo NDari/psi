@@ -4,6 +4,7 @@
 
 mod approver;
 mod complete;
+mod paste;
 mod ui;
 mod view;
 mod worker;

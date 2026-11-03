@@ -909,6 +909,30 @@ fn ctrl_r_finds_an_earlier_prompt_and_ctrl_s_stashes_the_draft() {
 }
 
 #[test]
+fn a_long_paste_shows_as_a_placeholder_and_is_sent_whole() {
+    let (mut t, s) = Tui::start(vec![text("got the log")], |_| {});
+    t.wait_for("› ", SLOW);
+    let log: String = (0..20).map(|i| format!("log line {i}\n")).collect();
+    t.typ("explain this: ");
+    t.send(format!("\x1b[200~{log}\x1b[201~").as_bytes());
+    t.wait_for("[Pasted text #1 +20 lines]", SLOW);
+    // Hidden tag characters spelling "hi" are dropped from a paste.
+    t.send("\x1b[200~ ok\u{E0068}\u{E0069}\x1b[201~".as_bytes());
+    t.wait_for("removed 2 invisible characters from the paste", SLOW);
+    t.typ("\r");
+    t.wait_for("got the log", SLOW);
+    let reqs = s.chat_requests();
+    let sent = reqs[0]["messages"].to_string();
+    assert!(
+        sent.contains("log line 0") && sent.contains("log line 19"),
+        "{sent}"
+    );
+    assert!(!sent.contains("Pasted text"), "{sent}");
+    assert!(!sent.contains('\u{E0068}'));
+    t.quit();
+}
+
+#[test]
 fn themes_color_the_screen() {
     let (mut t, _s) = Tui::start(vec![text("ok")], |p| {
         let home = p.parent().unwrap().join("home/.psi");

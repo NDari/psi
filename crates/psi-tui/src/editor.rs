@@ -195,6 +195,14 @@ impl Editor {
         self.history.push(s.to_string());
     }
 
+    /// Replaces the newest entry, when the text sent differs from the text
+    /// typed (a paste placeholder swapped back for the paste).
+    pub fn replace_last_history(&mut self, s: &str) {
+        if let Some(last) = self.history.last_mut() {
+            *last = s.to_owned();
+        }
+    }
+
     /// Replaces the history (oldest first).
     pub fn set_history(&mut self, h: Vec<String>) {
         self.history = h;
