@@ -52,6 +52,16 @@ impl ToolCtx {
     }
 
     pub(crate) fn resolve(&self, path: &str) -> PathBuf {
+        // The prompt says to keep files for later bash calls in $TMPDIR, and
+        // models write that in file-tool paths too: it means the session's
+        // TMPDIR, not a folder named `$TMPDIR` (2026-11-03).
+        for var in ["$TMPDIR", "${TMPDIR}"] {
+            if let Some(rest) = path.strip_prefix(var)
+                && (rest.is_empty() || rest.starts_with('/'))
+            {
+                return self.tmpdir.join(rest.trim_start_matches('/'));
+            }
+        }
         let p = Path::new(path);
         if p.is_absolute() {
             p.to_owned()

@@ -54,8 +54,8 @@ pub struct Policy {
     pub unisolated: Option<String>,
     /// The workspace root.
     pub root: PathBuf,
-    /// Psi's own configuration (`~/.psi`, `<root>/.psi`): file tools refuse
-    /// to write there (D-27).
+    /// Psi's own configuration (`~/.psi`, `<root>/.psi`): file tools ask
+    /// before writing there (D-27).
     pub protected: Vec<PathBuf>,
     /// The session's TMPDIR, writable without asking.
     pub tmpdir: PathBuf,
@@ -119,14 +119,18 @@ impl Policy {
     /// model wrote it, for the message.
     pub fn file_write(&self, tool: &str, path: &Path, shown: &str, facts: FileFacts) -> Decision {
         let real = resolve_path(path);
-        if let Some(p) = self.protected.iter().find(|p| real.starts_with(p)) {
-            return Decision::Refuse(format!(
-                "{shown} is inside {}, psi's own configuration, which file tools don't change. If it needs changing, tell the user what to change.",
-                p.display()
-            ));
-        }
         let mut reasons = Vec::new();
         let mut keys = Vec::new();
+        // The user decides each change to settings, extensions and skills
+        // (2026-11-03: refusing blocked building an extension the user asked
+        // for, and the model wrote it with bash instead).
+        if let Some(p) = self.protected.iter().find(|p| real.starts_with(p)) {
+            reasons.push(format!(
+                "{shown} is inside {}, psi's own configuration",
+                p.display()
+            ));
+            keys.push(format!("config:{}", real.display()));
+        }
         if !real.starts_with(&self.root) && !real.starts_with(&self.tmpdir) {
             reasons.push(format!(
                 "{shown} is outside the workspace, so checkpoints can't undo it"
@@ -312,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn psi_config_is_refused() {
+    fn psi_config_asks_each_file() {
         let p = policy(Mode::Auto);
         for path in [
             "/w/p/.psi/settings.jsonc",
@@ -321,9 +325,25 @@ mod tests {
         ] {
             let d = p.file_write("write", Path::new(path), path, FileFacts::default());
             assert!(
-                matches!(&d, Decision::Refuse(m) if m.contains("psi's own configuration")),
+                matches!(&d, Decision::Ask { reason, keys }
+                    if reason.contains("psi's own configuration")
+                        && keys[0].starts_with("config:")),
                 "{path}: {d:?}"
             );
         }
+        // A grant for one file doesn't cover another.
+        let a = p.file_write(
+            "write",
+            Path::new("/w/p/.psi/a.lua"),
+            "a",
+            FileFacts::default(),
+        );
+        let b = p.file_write(
+            "write",
+            Path::new("/w/p/.psi/b.lua"),
+            "b",
+            FileFacts::default(),
+        );
+        assert_ne!(keys(a), keys(b));
     }
 }

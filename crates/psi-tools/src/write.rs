@@ -122,6 +122,25 @@ mod tests {
     }
 
     #[test]
+    fn tmpdir_in_a_path_means_the_sessions_tmpdir() {
+        // Models write `$TMPDIR/...` in file paths as the prompt says to in
+        // bash; that is the session's TMPDIR, not a folder named `$TMPDIR`.
+        let d = tempfile::tempdir().unwrap();
+        let (cwd, tmp) = (d.path().join("project"), d.path().join("tmp"));
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&tmp).unwrap();
+        let c = ToolCtx::new(&cwd, &tmp, 1000);
+        call(run, &c, json!({"path": "$TMPDIR/a/x.txt", "text": "1"}));
+        call(run, &c, json!({"path": "${TMPDIR}/y.txt", "text": "2"}));
+        assert_eq!(std::fs::read_to_string(tmp.join("a/x.txt")).unwrap(), "1");
+        assert_eq!(std::fs::read_to_string(tmp.join("y.txt")).unwrap(), "2");
+        assert!(!cwd.join("$TMPDIR").exists());
+        // Only the variable on its own: `$TMPDIRS/z` is an ordinary name.
+        call(run, &c, json!({"path": "$TMPDIRS/z.txt", "text": "3"}));
+        assert!(cwd.join("$TMPDIRS/z.txt").exists());
+    }
+
+    #[test]
     fn overwrite_needs_a_current_read() {
         let d = tempfile::tempdir().unwrap();
         let c = ToolCtx::new(d.path(), d.path(), 1000);

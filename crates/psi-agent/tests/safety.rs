@@ -254,7 +254,7 @@ async fn approvals_once_session_and_deny_with_a_message() {
 }
 
 #[tokio::test]
-async fn file_tools_refuse_psi_config_and_ask_for_unrecoverable_paths() {
+async fn file_tools_ask_for_psi_config_and_unrecoverable_paths() {
     let fx = Fx::new();
     std::fs::write(fx.root.join(".gitignore"), "*.log\n").unwrap();
     let outside = fx.root.parent().unwrap().join("outside.txt");
@@ -293,9 +293,51 @@ async fn file_tools_refuse_psi_config_and_ask_for_unrecoverable_paths() {
         "{r:?}"
     );
     assert_eq!(r[3], ("Created src/ok.py (1 line).".into(), false));
-    assert_eq!(decisions(&a), ["refused", "denied", "denied"]);
+    // Headless, every ask is denied, with the reason.
+    assert_eq!(decisions(&a), ["denied", "denied", "denied"]);
     assert!(!fx.root.join(".psi/settings.jsonc").exists());
     assert!(!fx.root.join("debug.log").exists() && !outside.exists());
+}
+
+#[tokio::test]
+async fn an_approved_write_into_psi_config_goes_through() {
+    // Building an extension the user asked for (2026-11-03): the user
+    // approves each file, and a later edit of it asks again.
+    let fx = Fx::new();
+    let server = ReplayServer::start(vec![
+        call(
+            "write",
+            json!({"path": ".psi/extensions/x/init.lua", "text": "return {}\n"}),
+        ),
+        call(
+            "edit",
+            json!({"path": ".psi/extensions/x/init.lua", "old_text": "{}", "new_text": "{ name = 'x' }"}),
+        ),
+        text("ok"),
+    ])
+    .unwrap();
+    let approver = Arc::new(Scripted::default());
+    approver
+        .approvals
+        .lock()
+        .unwrap()
+        .extend([Approval::Once, Approval::Deny]);
+    let mut a = fx.agent(
+        &server,
+        fx.session(),
+        fx.safety(approver.clone(), None),
+        false,
+    );
+    a.run("go").await;
+    let file = fx.root.join(".psi/extensions/x/init.lua");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "return {}\n");
+    let asked = approver.asked.lock().unwrap();
+    assert_eq!(asked.len(), 2);
+    assert!(
+        asked[0].reason.contains("psi's own configuration"),
+        "{:?}",
+        asked[0].reason
+    );
 }
 
 #[tokio::test]
