@@ -1246,6 +1246,29 @@ fn the_stats_sit_under_the_input_box_and_user_text_is_white() {
 }
 
 #[test]
+fn the_input_box_is_pinned_to_the_bottom() {
+    let (mut t, _s) = Tui::start(
+        vec![call("read", json!({"path": "a.txt"})), text("ok")],
+        |p| std::fs::write(p.join("a.txt"), "x\n").unwrap(),
+    );
+    let at_bottom = |t: &Tui| {
+        let screen = t.contents();
+        let rows: Vec<&str> = screen.lines().collect();
+        // The stats line is the screen's last row, the box two above it.
+        rows.len() == usize::from(H) && rows[usize::from(H) - 3].starts_with("› ")
+    };
+    t.wait_for("› ", SLOW);
+    t.wait_screen("local", SLOW);
+    // From the start, with the banner at the top and empty rows between.
+    assert!(at_bottom(&t), "{}", t.contents());
+    t.typ("read it\r");
+    t.wait_for("ok", SLOW);
+    t.wait_screen("checkpoint", SLOW);
+    assert!(at_bottom(&t), "{}", t.contents());
+    t.quit();
+}
+
+#[test]
 fn call_marks_show_how_each_call_went() {
     let (mut t, _s) = Tui::start(
         vec![

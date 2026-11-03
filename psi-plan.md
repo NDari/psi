@@ -649,6 +649,7 @@ An inline TUI can't redraw the past, so each piece is committed once, in a form 
 - The output of `/inspect`, `/diff`, `/show` and `/help` opens in `$PAGER` (`less` with `LESS=R` when unset) instead of being committed, however short; the pager's own screen leaves the scrollback as it was (2026-11-02). If the pager can't run, the output is committed with a note.
 - Dropdowns and modals go **under** the input box, never in its place.
 - The input box has a line above and below it; dropdowns and cards come next, and the status line is last, at the bottom of the screen (2026-11-03, as in pi).
+- The input box is pinned to the bottom of the screen from the start (2026-11-03). The live region never shrinks: blank rows above it take the slack and committed lines take their place, so its last row stays the screen's last row while the output still goes to the terminal's own scrollback (no alternate screen). A resize grows or shrinks those blank rows; after a shrink the next frame is drawn up from the screen's last row, since terminals differ in what they do with the rows.
 - **What the box shows is what Enter runs.** Moving through a dropdown puts the selection in the box.
 - Use the terminal's 16 ANSI colors so the user's theme decides. Fenced code keeps dimmed fence lines, so a copy from the terminal is the code.
 - BEL when a turn ends or an approval appears while the terminal is unfocused. A "waiting for the model…" spinner before the first token.

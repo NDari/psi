@@ -32,6 +32,16 @@ pub struct Renderer<W: Write> {
     col: usize,
     /// Redraw the whole live region on the next draw.
     full: bool,
+    /// Keep the live region's last row at the bottom of the screen: the
+    /// region never shrinks, blank rows above it take the slack, and
+    /// committed lines take the place of those rows ([`Renderer::set_pinned`]).
+    pinned: bool,
+    /// Blank rows at the top of `prev` (pinned only).
+    pad: usize,
+    /// The screen got shorter while pinned: terminals differ in what they
+    /// do with the rows (cut the bottom, or scroll up), so the next draw
+    /// goes to the last row by absolute position and draws up from there.
+    anchor: bool,
     buf: Vec<u8>,
     last_draw: Duration,
 }
@@ -47,9 +57,20 @@ impl<W: Write> Renderer<W> {
             row: 0,
             col: 0,
             full: false,
+            pinned: false,
+            pad: 0,
+            anchor: false,
             buf: Vec::with_capacity(4096),
             last_draw: Duration::ZERO,
         }
+    }
+
+    /// Pins the live region to the bottom of the screen (from the next
+    /// [`Renderer::start`] with a cleared screen): the input stays at the
+    /// bottom however short the region is, as in a chat window, while
+    /// committed lines still go to the terminal's own scrollback.
+    pub fn set_pinned(&mut self, on: bool) {
+        self.pinned = on;
     }
 
     /// Starts rendering at the cursor. With `clear_screen`, first prints one newline
@@ -66,6 +87,13 @@ impl<W: Write> Renderer<W> {
             self.buf.push(b'\r');
         }
         self.prev.clear();
+        self.pad = 0;
+        // Pinned on an empty screen: the region is the whole screen, all
+        // blank rows until something is drawn.
+        if self.pinned && clear_screen {
+            self.pad = usize::from(self.height);
+            self.prev = vec![Line::default(); self.pad];
+        }
         self.cursor = None;
         self.row = 0;
         self.col = 0;
@@ -80,7 +108,23 @@ impl<W: Write> Renderer<W> {
         if lines.is_empty() {
             return Ok(());
         }
+        // Pinned: the committed rows take the place of blank rows at the top
+        // of the region, so its bottom stays where it is.
+        if self.pinned && self.pad > 0 {
+            let w = usize::from(self.width);
+            let rows: usize = lines.iter().map(|l| l.width().div_ceil(w).max(1)).sum();
+            let n = rows.min(self.pad);
+            self.prev.drain(..n);
+            self.pad -= n;
+            self.cursor = self.cursor.map(|(r, c)| (r.saturating_sub(n), c));
+        }
         self.begin_frame();
+        if self.anchor {
+            self.csi(usize::from(self.height), b'H');
+            self.row = self.prev.len().saturating_sub(1);
+            self.col = 0;
+            self.anchor = false;
+        }
         self.move_to(0);
         self.buf.extend_from_slice(CLEAR_BELOW);
         for line in lines {
@@ -113,10 +157,22 @@ impl<W: Write> Renderer<W> {
         let max_rows = usize::from(self.height).saturating_sub(1).max(1);
         let skip = live.len().saturating_sub(max_rows);
         let width = usize::from(self.width);
-        let new: Vec<Line> = live[skip..].iter().map(|l| l.truncate(width)).collect();
+        let mut new: Vec<Line> = live[skip..].iter().map(|l| l.truncate(width)).collect();
         let cursor = cursor
             .and_then(|(r, c)| Some((r.checked_sub(skip)?, c.min(width - 1))))
             .filter(|&(r, _)| r < new.len());
+        // Pinned: as tall as before (up to the screen), with blank rows on top.
+        let pad = if self.pinned {
+            let rows = new.len().max(self.prev.len()).min(usize::from(self.height));
+            rows.saturating_sub(new.len())
+        } else {
+            0
+        };
+        if pad > 0 {
+            new.splice(0..0, std::iter::repeat_n(Line::default(), pad));
+        }
+        self.pad = pad;
+        let cursor = cursor.map(|(r, c)| (r + pad, c));
 
         if !self.full && new == self.prev && cursor == self.cursor {
             self.last_draw = started.elapsed();
@@ -124,6 +180,13 @@ impl<W: Write> Renderer<W> {
         }
 
         self.begin_frame();
+        if self.anchor && self.full {
+            // The region's last row is the screen's last row.
+            self.csi(usize::from(self.height), b'H');
+            self.row = new.len().saturating_sub(1);
+            self.col = 0;
+            self.anchor = false;
+        }
         if self.full {
             self.move_to(0);
             self.buf.extend_from_slice(CLEAR_BELOW);
@@ -167,6 +230,24 @@ impl<W: Write> Renderer<W> {
             self.row = above + self.col / w;
         }
         self.row = self.row.min(usize::from(height) - 1);
+        // Pinned: the region grows or shrinks with the screen, by its blank
+        // rows, so its bottom stays at the bottom.
+        if self.pinned {
+            let (old, new) = (usize::from(self.height), usize::from(height));
+            if new > old {
+                let n = new - old;
+                self.prev
+                    .splice(0..0, std::iter::repeat_n(Line::default(), n));
+                self.pad += n;
+                self.cursor = self.cursor.map(|(r, c)| (r + n, c));
+            } else if new < old {
+                let n = (old - new).min(self.pad);
+                self.prev.drain(..n);
+                self.pad -= n;
+                self.cursor = self.cursor.map(|(r, c)| (r.saturating_sub(n), c));
+                self.anchor = true;
+            }
+        }
         self.width = width;
         self.height = height;
         self.full = true;
@@ -189,6 +270,7 @@ impl<W: Write> Renderer<W> {
         }
         self.buf.extend_from_slice(SHOW_CURSOR);
         self.prev.clear();
+        self.pad = 0;
         self.cursor = None;
         self.row = 0;
         self.col = 0;
@@ -404,6 +486,80 @@ mod tests {
         let bytes = t.draw(&["alpha row", "BETA CHANGED", "gamma row"], Some((0, 3)));
         assert!(!bytes.contains("row"));
         assert_eq!(t.cursor(), (0, 3));
+    }
+
+    /// A pinned renderer on a cleared `w` x `h` screen.
+    fn pinned(w: u16, h: u16) -> Term {
+        let mut t = Term::new(w, h);
+        t.r.set_pinned(true);
+        t.r.start(true).unwrap();
+        t.sync();
+        t
+    }
+
+    #[test]
+    fn pinned_region_sits_at_the_bottom() {
+        let mut t = pinned(20, 6);
+        t.draw(&["> ", "status"], Some((0, 2)));
+        assert_eq!(t.screen(), ["", "", "", "", "> ", "status"]);
+        assert_eq!(t.cursor(), (4, 2));
+        // Committed lines fill from the top; the region stays at the bottom.
+        t.commit(&["banner"]);
+        t.commit(&["one", "two"]);
+        assert_eq!(t.screen(), ["banner", "one", "two", "", "> ", "status"]);
+        assert_eq!(t.cursor(), (4, 2));
+        // Growing takes the blank rows first, then scrolls.
+        t.draw(&["spinner", "> ", "status"], Some((1, 2)));
+        assert_eq!(
+            t.screen(),
+            ["banner", "one", "two", "spinner", "> ", "status"]
+        );
+        t.draw(&["call", "spinner", "> ", "status"], Some((2, 2)));
+        assert_eq!(
+            t.screen(),
+            ["one", "two", "call", "spinner", "> ", "status"]
+        );
+        // Shrinking leaves blank rows above, not below.
+        t.draw(&["> ", "status"], Some((0, 2)));
+        assert_eq!(t.screen(), ["one", "two", "", "", "> ", "status"]);
+        assert_eq!(t.cursor(), (4, 2));
+        t.commit(&["three"]);
+        assert_eq!(t.screen(), ["one", "two", "three", "", "> ", "status"]);
+        // Nothing blank went into the scrollback, and nothing twice.
+        // (The first row is the one the cleared screen pushed up at start.)
+        let h = t.history();
+        assert_eq!(
+            h[h.len() - 7..],
+            ["banner", "one", "two", "three", "", "> ", "status"]
+        );
+    }
+
+    #[test]
+    fn pinned_region_follows_the_bottom_on_resize() {
+        let mut t = pinned(20, 6);
+        t.commit(&["banner"]);
+        t.draw(&["> ", "status"], Some((0, 2)));
+        t.p.screen_mut().set_size(nz(8), nz(20));
+        t.r.resize(20, 8);
+        t.draw(&["> ", "status"], Some((0, 2)));
+        assert_eq!(t.screen()[6..], ["> ", "status"]);
+        assert_eq!(t.screen()[0], "banner");
+        t.p.screen_mut().set_size(nz(5), nz(20));
+        t.r.resize(20, 5);
+        t.draw(&["> ", "status"], Some((0, 2)));
+        assert_eq!(t.screen()[3..], ["> ", "status"]);
+        // This terminal scrolls up when it gets shorter: the banner went
+        // into the scrollback, and the region is still at the bottom.
+        assert_eq!(t.screen(), ["", "", "", "> ", "status"]);
+        assert_eq!(t.cursor(), (3, 2));
+        // A commit straight after a shrink lands above the region too.
+        t.p.screen_mut().set_size(nz(4), nz(20));
+        t.r.resize(20, 4);
+        t.commit(&["after"]);
+        assert_eq!(t.screen(), ["", "after", "> ", "status"]);
+        let h = t.history();
+        assert_eq!(h.iter().filter(|l| *l == "banner").count(), 1, "{h:?}");
+        assert_eq!(h.iter().filter(|l| *l == "status").count(), 1, "{h:?}");
     }
 
     #[test]

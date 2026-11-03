@@ -319,8 +319,11 @@ impl<W: Write> App<W> {
             .map(|(n, d, _)| (format!("/{n}"), d))
             .collect();
         completer.extra.extend(p.resources.commands());
+        // The input box stays at the bottom of the screen (§11.2).
+        let mut r = Renderer::new(p.out, p.width, p.height);
+        r.set_pinned(true);
         Self {
-            r: Renderer::new(p.out, p.width, p.height),
+            r,
             editor,
             md: MdStream::new(),
             status: p.status,
