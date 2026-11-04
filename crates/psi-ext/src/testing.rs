@@ -948,7 +948,7 @@ mod tests {
             test.case("not_contains", function() test.not_contains("abc", "b") end)
             test.case("matches", function() test.matches("abc", "^%d") end)
             test.case("errors", function() test.errors(function() end) end)
-            test.case("errors text", function() test.errors(function() error("x") end, "y") end)
+            test.case("errors text", function() test.errors(function() error("x") end, "qqq") end)
             test.case("answer", function() test.ui.answer("exec", function() end) end)
             "#,
         )
@@ -967,7 +967,7 @@ mod tests {
             "expected \"abc\" not to contain \"b\"",
             "expected \"abc\" to match the Lua pattern \"^%d\"",
             "expected an error, but the function returned",
-            "expected an error containing \"y\"",
+            "expected an error containing \"qqq\"",
             "test.ui.answer(\"exec\", ...): the answer must be a plain value",
         ];
         for (got, want) in errors[1..].iter().zip(want) {

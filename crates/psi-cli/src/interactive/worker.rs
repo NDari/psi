@@ -192,7 +192,7 @@ impl Worker {
         if self.ext_sources.project.is_none() {
             return true;
         }
-        let Some(print) = psi_cli::trust::fingerprint(&self.cwd) else {
+        let Some(print) = psi_cli::trust::snapshot(&self.cwd) else {
             return true;
         };
         let Some(home) = self.ext_sources.home.as_deref() else {
@@ -201,7 +201,10 @@ impl Worker {
         if psi_cli::trust::is_trusted(home, &self.cwd, &print) {
             return true;
         }
-        let what = psi_cli::trust::describe(&self.cwd);
+        let mut what = psi_cli::trust::describe(&self.cwd);
+        for c in psi_cli::trust::changes(home, &self.cwd, &print) {
+            what.push_str(&format!("\n{c}"));
+        }
         let (tx, rx) = tokio::sync::oneshot::channel();
         if ui.send(UiMsg::Trust(what, tx)).is_err() || !rx.await.unwrap_or(false) {
             return false;

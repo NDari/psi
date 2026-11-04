@@ -118,6 +118,37 @@ pub fn check(command: &str) -> Result<(), String> {
     script(&mut parser, command, 0)
 }
 
+/// The program of the last simple command in `command`, through wrappers
+/// (`timeout 5 grep x` is `grep`), with git's subcommand (`git grep`): the
+/// command whose exit status bash reports in the common shapes
+/// (`cd x && grep y f`, `ls | grep y`). None when it can't be told.
+pub fn last_program(command: &str) -> Option<String> {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_bash::LANGUAGE.into())
+        .ok()?;
+    let tree = parser.parse(command, None)?;
+    if error_line(tree.root_node()).is_some() {
+        return None;
+    }
+    let mut commands = Vec::new();
+    collect(tree.root_node(), command, &mut commands);
+    let mut argv = commands.pop()?;
+    loop {
+        let (prog, args) = argv.split_first()?;
+        let name = basename(prog.lit.as_deref()?).to_owned();
+        match runs(&name, args).as_slice() {
+            [Inner::Command(inner)] if WRAPPERS.contains(&name.as_str()) => argv = inner.clone(),
+            _ if name == "git" => {
+                let (i, _) = options(args, "Cc", &[]);
+                let sub = args.get(i)?.lit.clone()?;
+                return Some(format!("git {sub}"));
+            }
+            _ => return Some(name),
+        }
+    }
+}
+
 fn script(parser: &mut Parser, src: &str, depth: usize) -> Result<(), String> {
     let tree = parser
         .parse(src, None)
@@ -692,6 +723,24 @@ mod tests {
             assert_eq!(check(c), Ok(()), "{c}");
             sh(c);
             assert_eq!(snapshot(w), before, "{c} changed a file");
+        }
+    }
+
+    #[test]
+    fn last_program_is_the_one_whose_status_bash_reports() {
+        for (cmd, want) in [
+            ("grep -n x f", Some("grep")),
+            ("cd src && grep -rn x .", Some("grep")),
+            ("cat f | grep x", Some("grep")),
+            ("grep x f | head -5", Some("head")),
+            ("timeout 5 rg x", Some("rg")),
+            ("/usr/bin/grep x f", Some("grep")),
+            ("git -C repo grep -n x", Some("git grep")),
+            ("git status", Some("git status")),
+            ("$CMD x", None),
+            ("grep 'x", None),
+        ] {
+            assert_eq!(last_program(cmd).as_deref(), want, "{cmd}");
         }
     }
 }

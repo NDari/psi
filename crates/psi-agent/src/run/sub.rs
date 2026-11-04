@@ -111,6 +111,9 @@ impl Agent {
             .with_safety(safety)
             .with_extensions(self.ext.clone())
             .with_mcp(self.mcp.clone());
+        if let Some(hook) = &self.on_config_write {
+            child = child.with_config_write(hook.clone());
+        }
         if def.tools.is_some() {
             let allowed = child
                 .tool_names()

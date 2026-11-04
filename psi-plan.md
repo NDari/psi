@@ -443,7 +443,7 @@ Windows via WSL.
 ### 8.6 Guardrails
 
 - **Repeated failures:** the same tool and arguments failing 3× in a row inject one line: "this tool failed the same way 3 times; change the call or try another approach." At 5×, pause and ask the user. (H-12) Nudges are appended to that call's result; a pause in a headless run stops it (`stop: guard`, exit 3).
-- **Error streaks:** after `max_consecutive_errors`, inject a nudge to re-read and re-plan; after 2× that, pause.
+- **Error streaks:** after `max_consecutive_errors`, inject a nudge to re-read and re-plan; after 2× that, pause. A search that found nothing isn't an error: when the last command is `grep`, `rg`, `git grep` (or `cmp`) and it exits 1 with no output, the result says so ("[exit code 1: grep says no line matched]") and doesn't count (2026-11-04: 98 of a scout's 125 errors were such greps, and the streak paused it).
 - **No-progress heuristic:** N turns with no file change, no new read and no answer trigger a nudge (**[G-12]**). First cut: 6 turns in which every call repeats an earlier one and no checkpoint saw a change.
 - **Announced stop (headless):** an answer whose last paragraph announces a next step ("Now I will examine money.py.") and asks nothing gets one line, once per run: make the call, or answer if done. Gemma 4 12B ended eval runs this way in Phases 2 and 3 (added 2026-10-31). Interactive runs skip it; the user can say "go on".
 - **Cut-off answer:** a reply that hits the output limit before any tool call is not an answer; it gets one line and another turn, at most twice per run (Gemma 4 12B, Phase 3 eval, multi_split_package).
@@ -495,7 +495,7 @@ return {
 
 **Trust (D-25):** before public release, **all extensions are trusted**, like pi's. Lua extensions get the full Lua standard library (`io`, `os`), plus host APIs. Their own file writes inside the workspace are still captured by the next checkpoint. Memory and instruction limits stay on to catch bugs.
 
-**Project trust** (pi parity): project-local extensions and settings require a one-time trust prompt per project, and a re-prompt when they change on disk.
+**Project trust** (pi parity): project-local extensions and settings require a one-time trust prompt per project, and a re-prompt when they change on disk. `~/.psi/trust.json` keeps a SHA-256 per file, so the prompt names what is new, changed or removed; an extension's `*_test.lua` files don't count (only `psi ext test` runs them); and a write or edit to `.psi` that the user approved in a session records that file as trusted, so only changes from bash or outside Psi ask again (2026-11-04: in the cog trial every edit the model made to its own extensions, tests included, asked again at the next start, and the prompt didn't say what changed).
 
 **Extension tools** declare annotations (`read_only`, `destructive`, `open_world`), can mark themselves always-ask, and go through the same policy.
 

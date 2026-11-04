@@ -424,6 +424,18 @@ pub async fn prepare(args: &RunArgs, approver: Arc<dyn Approver>) -> Result<Prep
         .with_server(server)
         .with_compaction(compaction)
         .with_mcp(mcp);
+    // A write to the project's .psi that the user approved keeps its trust
+    // (§9.3): the next start or /reload asks only about other changes.
+    if args.project_trusted
+        && let Some(h) = home.clone()
+    {
+        let project = cwd.clone();
+        agent = agent.with_config_write(Arc::new(move |file: &std::path::Path| {
+            if let Err(e) = psi_cli::trust::trust_file(&h, &project, file) {
+                tracing::warn!("could not record trust for {}: {e:#}", file.display());
+            }
+        }));
+    }
     if args.settings["subagents"].as_bool() == Some(true) {
         let defs = psi_agent::subagent::with_built_in(resources.agents.clone());
         agent = agent.with_subagents(defs);

@@ -2374,11 +2374,17 @@ impl<W: Write> App<W> {
             cursor = None;
         } else if let Some((what, _)) = &self.trust {
             let y = theme::style(Token::Warning);
-            live.push(Line::styled(format!("┌ /reload: {what}"), y));
+            let mut lines = what.lines();
+            let first = lines.next().unwrap_or_default();
+            live.push(Line::styled(format!("┌ /reload: {first}"), y));
             live.push(Line::styled(
-                "│ new or changed since you last trusted it",
+                "│ new or changed since you last trusted it:",
                 Style::default(),
             ));
+            for l in lines {
+                let l = view::cut(l, w.saturating_sub(6));
+                live.push(Line::styled(format!("│   {l}"), Style::default()));
+            }
             if let Some((items, safe)) = self.card_choices() {
                 live.extend(view::choices(&items, self.ask.sel, safe, y));
             }

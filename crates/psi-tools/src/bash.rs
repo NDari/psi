@@ -67,8 +67,37 @@ pub async fn run(args: Map<String, Value>, ctx: &ToolCtx, outside: bool) -> Tool
     let timeout = int_arg(&args, "timeout")
         .unwrap_or(DEFAULT_TIMEOUT_S)
         .clamp(1, MAX_TIMEOUT_S) as u64;
-    let argv = vec!["bash".to_owned(), "-c".to_owned(), command];
-    exec(&argv, None, timeout, ctx, outside).await
+    let argv = vec!["bash".to_owned(), "-c".to_owned(), command.clone()];
+    let out = exec(&argv, None, timeout, ctx, outside).await;
+    quiet_answer(&command, out)
+}
+
+/// Programs whose exit code 1 with no output is an answer, not a failure.
+const QUIET_ANSWERS: &[(&str, &str)] = &[
+    ("grep", "no line matched"),
+    ("egrep", "no line matched"),
+    ("fgrep", "no line matched"),
+    ("zgrep", "no line matched"),
+    ("rg", "no line matched"),
+    ("git grep", "no line matched"),
+    ("cmp", "the files differ"),
+];
+
+/// A search that found nothing says so and isn't a failed call: in the
+/// cog trial 98 of a scout's 125 "failed" calls were greps that matched
+/// nothing ("(no output) [exit code 1]"), and the error-streak guard
+/// counted them until it paused the run.
+fn quiet_answer(command: &str, out: ToolOutput) -> ToolOutput {
+    if !(out.is_error && out.text == "(no output)\n[exit code 1]") {
+        return out;
+    }
+    let Some(prog) = psi_safety::read_only::last_program(command) else {
+        return out;
+    };
+    match QUIET_ANSWERS.iter().find(|(p, _)| *p == prog) {
+        Some((p, what)) => ToolOutput::ok(format!("(no output)\n[exit code 1: {p} says {what}]")),
+        None => out,
+    }
 }
 
 /// A script tool (D-22): `argv` inside the same boundary as bash, with the
@@ -513,6 +542,31 @@ mod tests {
         let out = bash("echo out; echo err >&2; echo out2; exit 3", None).await;
         assert_eq!(out, ToolOutput::err("out\nerr\nout2\n[exit code 3]"));
         assert_eq!(bash("true", None).await, ToolOutput::ok("(no output)"));
+    }
+
+    #[tokio::test]
+    async fn a_search_that_finds_nothing_is_not_a_failure() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("a.txt"), "hello\n").unwrap();
+        let run = |cmd: &str| {
+            let mut args = Map::new();
+            args.insert("command".into(), Value::String(cmd.into()));
+            let ctx = ToolCtx::new(d.path(), &d.path().join("tmp"), 10_000);
+            async move { super::run(args, &ctx, false).await }
+        };
+        let nothing = ToolOutput::ok("(no output)\n[exit code 1: grep says no line matched]");
+        assert_eq!(run("grep zzz a.txt").await, nothing);
+        assert_eq!(run("cd . && grep -n zzz a.txt").await, nothing);
+        assert_eq!(run("cat a.txt | grep zzz").await, nothing);
+        assert_eq!(run("timeout 5 grep zzz a.txt").await, nothing);
+        // A real failure stays one: an error message, or another program.
+        assert!(run("grep zzz missing.txt").await.is_error);
+        assert_eq!(
+            run("false").await,
+            ToolOutput::err("(no output)\n[exit code 1]")
+        );
+        // A match is an ordinary result.
+        assert_eq!(run("grep hel a.txt").await, ToolOutput::ok("hello"));
     }
 
     #[tokio::test]

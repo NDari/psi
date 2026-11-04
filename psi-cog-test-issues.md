@@ -70,23 +70,6 @@ The `cog_run` tool, built for exactly this, was offered in every request and nev
 - **`cog_run` was never called** after it was built, in about 250 later requests.
 - **Went well:** the post-edit check ran 56 times (15 s in all) and its 7 failures were all real (the red tests, the stale `docs/words.md`); failed edits (two "not found", one "matches 3 places", one write refused after a `sed -i`) each recovered in one or two calls; reads came in parallel batches of up to five; always-ask caught `git push` and a `sudo chmod` on `/etc/ssh`; the status-line extension showed in the footer as written; scout found the real high-priority bug.
 
-### Psi asks to trust cog again and again (added 2026-11-04)
-
-Starting Psi in cog keeps asking "`.psi` has settings, 5 extension(s), which run as you, MCP servers, which run as you, new or changed since you last trusted it. Load it? [y/N]". How it works (`crates/psi-cli/src/trust.rs`, `project_trusted` in `crates/psi-cli/src/main.rs`, plan §9.3): one hash over every file in `.psi/settings.jsonc`, `.psi/mcp.json`, `.psi/extensions/`, skills, prompts, themes, agents and `.agents/skills`, kept per project in `~/.psi/trust.json`; any change to any of them asks again, before the TUI starts, with no word on what changed.
-
-What the files show: nothing in cog's `.psi` has changed since 2026-11-03 17:50 (the model's last edit to `test-cmd`), `~/.psi/trust.json` was last written 2026-11-04 08:40 (the yes this morning), and cog counts as trusted now (`psi mcp list` loads gopls without asking). So this morning's ask came from yesterday's edits by the model. Confirmed: it doesn't ask when nothing changed (no ask after `just install` and a resume, 2026-11-04), so the asks come from changes only.
-
-Why it asks more than it needs to:
-- **The model's own edits count as changes.** In the trial the model built and fixed extensions in `.psi/extensions/` (writes there ask the owner per file since D-27's 2026-11-03 change), and every edit, including to `*_test.lua` files that never load in a session, means another trust prompt at the next start.
-- **The prompt doesn't say what changed,** so the owner can't tell a known edit from a surprise and says yes by habit, which defeats the check.
-- **The hash isn't stable across Rust releases:** `DefaultHasher` may change its algorithm with the toolchain, so a Psi built with a new Rust would ask again for every project.
-
-Possible fixes:
-- Keep a hash per file and name the changed files in the prompt ("changed: extensions/test-cmd/init.lua"), or show a diff on request.
-- Leave out files that don't load: `*_test.lua` in extensions (and anything `psi ext test` alone reads).
-- When the owner approved a write into `.psi` in a session (the per-file grant), update the stored hash for that file, so a change the owner saw doesn't ask again; changes from bash or outside Psi still ask.
-- Use a stable hash (SHA-256 via `sha2`, or `blake3`) for `trust.json`.
-
 ### A sub-agent stopped at a pause returns nothing (added 2026-11-04, from the second session)
 
 Scout 02 (read the docs and compare them for contradictions) spent about 5 minutes and 191 requests and returned "(no answer)". It went looking for where `?` is defined and ran the same few `grep`s on `env.go` dozens of times (`?` is defined in `stdlib.go`); the no-progress and error-streak guards fired 12 times, then came the pause at 20 failed calls in a row. That pause was answered "stop" 22 ms after it was raised (guard entry at ...145047, scout's result at ...145069), too fast for a person to choose: the owner was probably typing in the prompt, and a keystroke answered the card (see "Cards answer to single keys" under Fixed). Everything scout had read was lost, and the parent read the docs again itself.
@@ -101,7 +84,7 @@ Possible fixes:
 - When a sub-agent stops on a guard or a limit, make one last request without tools ("Stop now. Report what you found so far, with paths and line numbers.") and return that, marked as cut short.
 - For `grep`, `rg`, `git grep` (and `diff`, `cmp`), exit code 1 with no stderr means "no match" or "differs": say so ("grep found no matches (exit code 1)") and don't count it toward the error streak.
 
-**Status 2026-11-04:** the pause that answered itself is fixed (cards are lists that ignore keys at first). Still open: the last report when a sub-agent stops, and `grep` with no match counted as a failure.
+**Status 2026-11-04:** the pause that answered itself is fixed (cards are lists that ignore keys at first). Also fixed 2026-11-04: when the last command is `grep`, `rg`, `git grep` (or `cmp`) and it exits 1 with no output, the result says "[exit code 1: grep says no line matched]" and isn't an error, so the streak doesn't count it (plan §8.6, with tests). Still open: the last report when a sub-agent stops.
 
 ### Notes from the second session, no action yet (added 2026-11-04)
 
@@ -370,3 +353,22 @@ Possible fixes:
 - Or apply the entries that match and report the one that didn't (pi fails the whole call, as Psi does now). All-or-none keeps a file from being half changed, so the message alone is probably enough.
 
 **Fixed 2026-11-04:** every entry that didn't match is named, and when others did: "The other 11 edits matched, but nothing was changed. Send them again with edits[11] fixed or left out." Still all or none. With tests.
+
+### Psi asks to trust cog again and again (added 2026-11-04)
+
+Starting Psi in cog keeps asking "`.psi` has settings, 5 extension(s), which run as you, MCP servers, which run as you, new or changed since you last trusted it. Load it? [y/N]". How it works (`crates/psi-cli/src/trust.rs`, `project_trusted` in `crates/psi-cli/src/main.rs`, plan §9.3): one hash over every file in `.psi/settings.jsonc`, `.psi/mcp.json`, `.psi/extensions/`, skills, prompts, themes, agents and `.agents/skills`, kept per project in `~/.psi/trust.json`; any change to any of them asks again, before the TUI starts, with no word on what changed.
+
+What the files show: nothing in cog's `.psi` has changed since 2026-11-03 17:50 (the model's last edit to `test-cmd`), `~/.psi/trust.json` was last written 2026-11-04 08:40 (the yes this morning), and cog counts as trusted now (`psi mcp list` loads gopls without asking). So this morning's ask came from yesterday's edits by the model. Confirmed: it doesn't ask when nothing changed (no ask after `just install` and a resume, 2026-11-04), so the asks come from changes only.
+
+Why it asks more than it needs to:
+- **The model's own edits count as changes.** In the trial the model built and fixed extensions in `.psi/extensions/` (writes there ask the owner per file since D-27's 2026-11-03 change), and every edit, including to `*_test.lua` files that never load in a session, means another trust prompt at the next start.
+- **The prompt doesn't say what changed,** so the owner can't tell a known edit from a surprise and says yes by habit, which defeats the check.
+- **The hash isn't stable across Rust releases:** `DefaultHasher` may change its algorithm with the toolchain, so a Psi built with a new Rust would ask again for every project.
+
+Possible fixes:
+- Keep a hash per file and name the changed files in the prompt ("changed: extensions/test-cmd/init.lua"), or show a diff on request.
+- Leave out files that don't load: `*_test.lua` in extensions (and anything `psi ext test` alone reads).
+- When the owner approved a write into `.psi` in a session (the per-file grant), update the stored hash for that file, so a change the owner saw doesn't ask again; changes from bash or outside Psi still ask.
+- Use a stable hash (SHA-256 via `sha2`, or `blake3`) for `trust.json`.
+
+**Fixed 2026-11-04:** `trust.json` keeps a SHA-256 per file (an entry from an older Psi asks once more, saying so); the startup prompt and the `/reload` card list what is new, changed or removed (up to 8, then "and N more"); `*_test.lua` in extensions don't count; a write or edit to `.psi` that the user approved records that file as trusted (the agent calls a hook the CLI sets for a trusted project; sub-agents too). Plan §9.3, with tests.

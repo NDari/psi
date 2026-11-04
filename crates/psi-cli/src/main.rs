@@ -391,7 +391,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
 /// Whether this project's own .psi may load (§9.3): trusted before with the
 /// same files, or the user says yes now. Headless runs don't ask.
 fn project_trusted(home: Option<&Path>, cwd: &Path, interactive: bool, flag: bool) -> Result<bool> {
-    let Some(print) = psi_cli::trust::fingerprint(cwd) else {
+    let Some(print) = psi_cli::trust::snapshot(cwd) else {
         return Ok(true);
     };
     let Some(home) = home else { return Ok(false) };
@@ -409,7 +409,11 @@ fn project_trusted(home: Option<&Path>, cwd: &Path, interactive: bool, flag: boo
         );
         return Ok(false);
     }
-    eprint!("psi: {what}, new or changed since you last trusted it. Load it? [y/N] ");
+    eprintln!("psi: {what}.");
+    for c in psi_cli::trust::changes(home, cwd, &print) {
+        eprintln!("  {c}");
+    }
+    eprint!("Load it? [y/N] ");
     let mut answer = String::new();
     std::io::stdin()
         .read_line(&mut answer)

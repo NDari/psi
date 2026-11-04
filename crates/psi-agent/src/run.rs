@@ -205,6 +205,9 @@ pub struct Agent {
     compact_failed_at: Option<u64>,
     /// `Compacting` was sent and its `Compacted` not yet.
     compacting: bool,
+    /// Called with each file in a `.psi` folder that a write or edit
+    /// changed (the user approved it: those writes always ask).
+    on_config_write: Option<ConfigWriteHook>,
     /// MCP servers (§10.2), and their tools as taken at the start of the
     /// run: the list never changes inside a run (D-42).
     mcp: Arc<McpManager>,
@@ -221,6 +224,9 @@ pub struct Agent {
 /// A call after the shape-fix pipeline: the tool and its arguments, or the
 /// refusal sent back instead.
 type Planned = Result<(Callable, serde_json::Map<String, Value>), String>;
+
+/// See [`Agent::with_config_write`].
+pub type ConfigWriteHook = Arc<dyn Fn(&Path) + Send + Sync>;
 
 /// A call an extension's gate refused. It names the extension and says
 /// the call didn't run: in the cog trial a model took "Blocked: Do not edit
@@ -317,6 +323,7 @@ impl Agent {
             last_request: None,
             compact_failed_at: None,
             compacting: false,
+            on_config_write: None,
             mcp: McpManager::empty(),
             mcp_tools: Vec::new(),
             mcp_waited: false,
@@ -695,6 +702,14 @@ impl Agent {
                 }
                 _ => None,
             })
+    }
+
+    /// What to do when a write or edit changed a file in a `.psi` folder:
+    /// the CLI records it as trusted, so a change the user approved doesn't
+    /// ask again at the next start (§9.3).
+    pub fn with_config_write(mut self, hook: ConfigWriteHook) -> Self {
+        self.on_config_write = Some(hook);
+        self
     }
 
     /// The project's check command, run after turns that edited files.
@@ -1553,6 +1568,18 @@ impl Agent {
         }
         self.post_edit_check(&planned, &mut outputs).await?;
         reload_notes(&planned, &mut outputs);
+        if let Some(hook) = &self.on_config_write {
+            for ((_, p), o) in planned.iter().zip(&outputs) {
+                if let Ok((Callable::Core(Tool::Write | Tool::Edit), args)) = p
+                    && !o.is_error
+                {
+                    let path = Path::new(args.get("path").and_then(Value::as_str).unwrap_or(""));
+                    if path.components().any(|c| c.as_os_str() == ".psi") {
+                        hook(&self.ctx.cwd.join(path));
+                    }
+                }
+            }
+        }
 
         for ((call, p), o) in planned.iter().zip(outputs) {
             let name = match p {

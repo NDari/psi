@@ -393,15 +393,23 @@ async fn an_approved_write_into_psi_config_goes_through() {
         .lock()
         .unwrap()
         .extend([Approval::Once, Approval::Deny]);
-    let mut a = fx.agent(
+    let a = fx.agent(
         &server,
         fx.session(),
         fx.safety(approver.clone(), None),
         false,
     );
+    // The CLI records an approved write as trusted; here, the paths it gets.
+    let written = Arc::new(Mutex::new(Vec::new()));
+    let w = written.clone();
+    let mut a = a.with_config_write(Arc::new(move |p: &std::path::Path| {
+        w.lock().unwrap().push(p.to_path_buf());
+    }));
     a.run("go").await;
     let file = fx.root.join(".psi/extensions/x/init.lua");
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "return {}\n");
+    // Only the write that went through, not the denied edit.
+    assert_eq!(*written.lock().unwrap(), std::slice::from_ref(&file));
     // The write that went through says it loads on /reload; the denied
     // edit doesn't.
     let r = results(&a);

@@ -1543,6 +1543,7 @@ dependencies = [
  "psi-tui",
  "rustix",
  "serde_json",
+ "sha2",
  "similar",
  "tempfile",
  "tokio",
