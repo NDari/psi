@@ -14,8 +14,8 @@ Each directory here is copied into every psi trial's `~/.psi` with
   (headless trials deny calls that ask). The records show whether the
   model calls them, with what arguments, and what came back.
 - `no-tail` (H-07): compaction keeps only the last user message or step
-  verbatim after a summary, instead of the default tail (the larger of
-  20% of the window and 20K, capped at half the room left). Run it at a
+  verbatim after a summary, instead of the default tail (10K since 2026-11-04,
+  capped at half the room left). Run it at a
   small window (`--n-ctx 16384`) so trials compact.
 - `free-summary` (H-11): compaction summaries in plain prose with the
   same content, instead of the fixed headings. Also at `--n-ctx 16384`.

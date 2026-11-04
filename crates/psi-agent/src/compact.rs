@@ -317,13 +317,19 @@ pub const STATE_HEADER: &str = "[Recorded by the harness for the earlier convers
 /// The most files of each kind the harness state lists (the latest ones).
 const MAX_STATE_FILES: usize = 30;
 
-/// Tokens kept as they are after a summary: the larger of 20% of the
-/// window and 20K (pi's keepRecentTokens), but at most half of what is
-/// left under the trigger after `overhead` (system prompt, tools,
-/// summaries), so a compaction leaves room to work before the next one.
-/// `set` (the `tail` setting) replaces the default size, under the same cap.
-pub(crate) fn tail_tokens(n_ctx: u64, trigger: u64, overhead: u64, set: Option<u64>) -> u64 {
-    set.unwrap_or((n_ctx / 5).max(20_000))
+/// The tail's default size. It was pi's keepRecentTokens (20K, or 20% of
+/// a larger window) until 2026-11-04: at 64K that left about 20K of room
+/// per summary, and the cog trial summarized 5 times, the last two 2
+/// minutes apart.
+const DEFAULT_TAIL: u64 = 10_000;
+
+/// Tokens kept as they are after a summary: [`DEFAULT_TAIL`], but at most
+/// half of what is left under the trigger after `overhead` (system prompt,
+/// tools, summaries), so a compaction leaves room to work before the next
+/// one. `set` (the `tail` setting) replaces the default size, under the
+/// same cap.
+pub(crate) fn tail_tokens(trigger: u64, overhead: u64, set: Option<u64>) -> u64 {
+    set.unwrap_or(DEFAULT_TAIL)
         .min(trigger.saturating_sub(overhead) / 2)
 }
 
@@ -767,15 +773,15 @@ mod tests {
     }
 
     #[test]
-    fn the_tail_is_pis_size_unless_the_window_is_small() {
-        // 64K: 20K, as in pi.
-        assert_eq!(tail_tokens(65_536, 45_875, 3000, None), 20_000);
+    fn the_tail_is_10k_unless_the_window_is_small() {
+        // 64K: 10K (half pi's 20K).
+        assert_eq!(tail_tokens(45_875, 3000, None), 10_000);
         // 16K: half of what is left under the trigger.
-        assert_eq!(tail_tokens(16_384, 9831, 1831, None), 4000);
+        assert_eq!(tail_tokens(9831, 1831, None), 4000);
         // The setting replaces the size, under the same cap.
-        assert_eq!(tail_tokens(65_536, 45_875, 3000, Some(0)), 0);
-        assert_eq!(tail_tokens(16_384, 9831, 1831, Some(2000)), 2000);
-        assert_eq!(tail_tokens(16_384, 9831, 1831, Some(50_000)), 4000);
+        assert_eq!(tail_tokens(45_875, 3000, Some(0)), 0);
+        assert_eq!(tail_tokens(9831, 1831, Some(2000)), 2000);
+        assert_eq!(tail_tokens(9831, 1831, Some(50_000)), 4000);
     }
 
     #[test]

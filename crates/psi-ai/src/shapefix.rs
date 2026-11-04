@@ -173,12 +173,20 @@ pub fn fix_call(
     }
     rename_keys(&mut args, tool, &mut notes);
     coerce(&mut args, tool, &mut notes)?;
-    let missing: Vec<&str> = tool
+    let mut missing: Vec<&str> = tool
         .params
         .iter()
         .filter(|p| p.required && !args.contains_key(p.name))
         .map(|p| p.name)
         .collect();
+    // edit: old_text and new_text are needed unless edits holds the changes.
+    if tool.param("edits").is_some() && !args.contains_key("edits") {
+        for p in ["old_text", "new_text"] {
+            if tool.param(p).is_some() && !args.contains_key(p) {
+                missing.push(p);
+            }
+        }
+    }
     // An edit with new_text and no old_text is usually a whole-file rewrite
     // (Gemma sent 15 in a row, 2026-11-01). The text may be a fragment, so
     // don't turn it into a write; say which tool does that.
@@ -323,15 +331,24 @@ fn unwrap_wrapper(args: &mut Map<String, Value>, tool: &ToolSchema, notes: &mut 
 }
 
 /// pi-style `edits: [{oldText, newText}]` (seen from Gemma 4 in pi trials):
-/// one real replacement is accepted as old_text/new_text; a top-level pair
-/// whose old and new text are equal is a no-op and dropped.
+/// one real replacement is accepted as old_text/new_text; several become
+/// `edits` with Psi's names, where the tool takes it; a top-level pair
+/// whose old and new text are equal is a no-op and dropped. A list sent as
+/// a JSON string, or one edit sent as an object, is read as the list.
 fn fold_edit_list(
     args: &mut Map<String, Value>,
     tool: &ToolSchema,
     notes: &mut Vec<String>,
 ) -> Result<(), String> {
-    let Some(Value::Array(edits)) = args.get("edits").cloned() else {
-        return Ok(());
+    let edits = match args.get("edits").cloned() {
+        Some(Value::Array(a)) => a,
+        Some(Value::String(s)) => match serde_json::from_str::<Value>(&s) {
+            Ok(Value::Array(a)) => a,
+            Ok(o @ Value::Object(_)) => vec![o],
+            _ => return Ok(()),
+        },
+        Some(o @ Value::Object(_)) => vec![o],
+        _ => return Ok(()),
     };
     let pick = |m: &Map<String, Value>, names: &[&str]| -> Option<Value> {
         m.iter()
@@ -341,12 +358,26 @@ fn fold_edit_list(
     let olds = ["oldtext", "oldstring", "old"];
     let news = ["newtext", "newstring", "new"];
     let mut real = Vec::new();
-    for e in &edits {
-        let Value::Object(m) = e else { continue };
-        if let (Some(o), Some(n)) = (pick(m, &olds), pick(m, &news))
-            && o != n
-        {
-            real.push((o, n, pick(m, &["path", "filepath", "file"])));
+    for (i, e) in edits.iter().enumerate() {
+        let Value::Object(m) = e else {
+            return Err(format!(
+                "{}: edits[{i}] must be an object with old_text and new_text. {}",
+                tool.name,
+                tool.example_line()
+            ));
+        };
+        match (pick(m, &olds), pick(m, &news)) {
+            (Some(o), Some(n)) if o != n => {
+                real.push((o, n, pick(m, &["path", "filepath", "file"])))
+            }
+            (Some(_), Some(_)) => {}
+            _ => {
+                return Err(format!(
+                    "{}: edits[{i}] needs old_text and new_text. {}",
+                    tool.name,
+                    tool.example_line()
+                ));
+            }
         }
     }
     let top = (pick(args, &olds), pick(args, &news));
@@ -357,10 +388,34 @@ fn fold_edit_list(
         real.push((o, n, None));
     }
     if real.len() > 1 {
-        return Err(format!(
-            "edit makes one replacement per call, given as old_text and new_text. Make one call per change. {}",
-            tool.example_line()
-        ));
+        if tool.param("edits").is_none() {
+            return Err(format!(
+                "edit makes one replacement per call, given as old_text and new_text. Make one call per change. {}",
+                tool.example_line()
+            ));
+        }
+        let path = real.iter().find_map(|(_, _, p)| p.clone());
+        let list: Vec<Value> = real
+            .into_iter()
+            .map(|(o, n, _)| serde_json::json!({"old_text": o, "new_text": n}))
+            .collect();
+        let canonical = args.get("edits") == Some(&Value::Array(list.clone()));
+        args.retain(|k, _| {
+            let k = norm(k);
+            k != "edits" && !olds.contains(&k.as_str()) && !news.contains(&k.as_str())
+        });
+        args.insert("edits".into(), Value::Array(list));
+        if let Some(p) = path
+            && !args
+                .keys()
+                .any(|k| ["path", "filepath", "file"].contains(&norm(k).as_str()))
+        {
+            args.insert("path".into(), p);
+        }
+        if !canonical {
+            notes.push("edit: read the replacements in 'edits' with Psi's names".into());
+        }
+        return Ok(());
     }
     let Some((o, n, path)) = real.pop() else {
         return Ok(());
@@ -532,10 +587,12 @@ mod tests {
             ToolSchema {
                 name: "edit",
                 description: String::new(),
+                // As psi-tools has it: old_text and new_text, or edits.
                 params: vec![
                     Param::new("path", ParamKind::String, "").path(),
-                    Param::new("old_text", ParamKind::String, ""),
-                    Param::new("new_text", ParamKind::String, ""),
+                    Param::new("old_text", ParamKind::String, "").optional(),
+                    Param::new("new_text", ParamKind::String, "").optional(),
+                    Param::new("edits", ParamKind::Array, "").optional(),
                     Param::new("intent", ParamKind::String, "").optional(),
                 ],
                 example: json!({"path": "app.py", "old_text": "x = 1", "new_text": "x = 2"}),
@@ -693,6 +750,65 @@ mod tests {
         assert!(
             err.starts_with("edit is missing 'old_text'. Example:"),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn several_edits_pass_with_psis_names() {
+        // pi's names, several replacements: Psi's names, as one list.
+        let c = fix(
+            "edit",
+            r#"{"path":"a.py","edits":[{"oldText":"a","newText":"b"},{"oldText":"c","newText":"d"},{"oldText":"e","newText":"e"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            c.args["edits"],
+            json!([{"old_text": "a", "new_text": "b"}, {"old_text": "c", "new_text": "d"}])
+        );
+        assert!(!c.args.contains_key("old_text"));
+        assert_eq!(
+            c.notes,
+            ["edit: read the replacements in 'edits' with Psi's names"]
+        );
+        // Already in Psi's form: untouched, no note.
+        let c = fix(
+            "edit",
+            r#"{"path":"a.py","edits":[{"old_text":"a","new_text":"b"},{"old_text":"c","new_text":"d"}]}"#,
+        )
+        .unwrap();
+        assert!(c.notes.is_empty(), "{:?}", c.notes);
+        // A list sent as a JSON string is read as the list.
+        let c = fix(
+            "edit",
+            r#"{"path":"a.py","edits":"[{\"old_text\":\"a\",\"new_text\":\"b\"},{\"old_text\":\"c\",\"new_text\":\"d\"}]"}"#,
+        )
+        .unwrap();
+        assert_eq!(c.args["edits"].as_array().unwrap().len(), 2);
+        // One edit in the list becomes old_text and new_text, as before.
+        let c = fix(
+            "edit",
+            r#"{"path":"a.py","edits":[{"old_text":"a","new_text":"b"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            (c.args["old_text"].as_str(), c.args.contains_key("edits")),
+            (Some("a"), false)
+        );
+        // An item without new_text is refused, not dropped.
+        let e = fix(
+            "edit",
+            r#"{"path":"a.py","edits":[{"old_text":"a","new_text":"b"},{"old_text":"c"}]}"#,
+        )
+        .unwrap_err();
+        assert!(
+            e.starts_with("edit: edits[1] needs old_text and new_text."),
+            "{e}"
+        );
+        // Neither form: old_text and new_text are missing.
+        let e = fix("edit", r#"{"path":"a.py"}"#).unwrap_err();
+        assert!(
+            e.starts_with("edit is missing 'old_text', 'new_text'."),
+            "{e}"
         );
     }
 

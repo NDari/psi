@@ -214,6 +214,34 @@ async fn gemma_edit_shapes_from_real_transcripts() {
     }
 }
 
+/// The 35B's two-replacement edit in pi's shape, from a pi eval trial
+/// (`2026-11-01-1516-pi-qwen3.6-35b/fix_invoice_rounding`, path made
+/// relative): Psi takes both, against the file as it was.
+#[tokio::test]
+async fn several_replacements_in_one_edit_call() {
+    let args = json!({"path": "billing/tax.py", "edits": [
+        {"oldText": "\"\"\"VAT.\"\"\"\nimport re", "newText": "\"\"\"VAT.\"\"\"\nimport math\nimport re"},
+        {"oldText": "    return round(net_cents * float(rate) / 100)", "newText": "    return math.floor(net_cents * float(rate) / 100 + 0.5)"},
+    ]});
+    let f = Fixture::new(vec![call("edit", args), text("done")]);
+    let repo =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../evals/code/fix_invoice_rounding/repo");
+    copy_dir(&repo, &f.cwd);
+    let (_, a) = f.run("fix it").await;
+    let (text, is_error) = &tool_results(&a)[0];
+    assert!(!is_error, "{text}");
+    assert!(
+        text.starts_with("Edited billing/tax.py: 2 replacements, at lines "),
+        "{text}"
+    );
+    let tax = std::fs::read_to_string(f.cwd.join("billing/tax.py")).unwrap();
+    assert!(tax.contains("import math\nimport re"), "{tax}");
+    assert!(
+        tax.contains("math.floor(net_cents * float(rate) / 100 + 0.5)"),
+        "{tax}"
+    );
+}
+
 #[tokio::test]
 async fn shape_refusal_goes_back_to_the_model() {
     let f = Fixture::new(vec![
@@ -566,10 +594,45 @@ async fn old_tool_results_are_cleared_past_the_trigger() {
     assert!(tool_results(&a).iter().all(|(t, _)| t.contains("line 249")));
 }
 
+/// Clearing that leaves about what a summary would is enough, though it
+/// doesn't reach 30% of the window (the cog trial: at 64K Psi summarized
+/// at every trigger, when clearing alone would have done as well).
+#[tokio::test]
+async fn clearing_that_matches_a_summary_is_used_instead_of_one() {
+    let mut replies = reads(5);
+    replies.push(text("done"));
+    let f = Fixture::new(replies);
+    write_files(&f.cwd, 5, 350);
+    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    let out = a.run("read the files").await;
+    assert_eq!(out.stop, Stop::Done, "{:?}", out.stop);
+    let k = kinds(&a);
+    assert!(k.contains(&"cleared 2".to_owned()), "{k:?}");
+    assert!(!k.contains(&"compaction".to_owned()), "{k:?}");
+    // No summary request: five reads and the answer.
+    assert_eq!(f.server.chat_requests().len(), 6);
+    // It left more than 30% of the window: the old rule would have summarized.
+    let left: Vec<u64> = a
+        .session()
+        .entries()
+        .iter()
+        .filter_map(|e| match &e.body {
+            EntryBody::ClearedResults {
+                tokens_before,
+                tokens_freed,
+                ..
+            } => Some(tokens_before - tokens_freed),
+            _ => None,
+        })
+        .collect();
+    assert!(left.iter().all(|&t| t > 16_384 * 3 / 10), "{left:?}");
+}
+
 #[tokio::test]
 async fn a_step_keeps_only_the_results_the_context_can_hold() {
     // Six full reads at once in a 16K window (the 2026-11-01 re-read
-    // loop): three fit, the rest are held back with the way on.
+    // loop): three fit, the rest are held back with the way on. 430 lines
+    // stay under the result cap, so the three fit with room to spare.
     let f = Fixture::new(vec![
         Reply::Chat(ScriptedReply {
             tool_calls: (0..6)
@@ -585,7 +648,7 @@ async fn a_step_keeps_only_the_results_the_context_can_hold() {
         call("read", json!({"path": "f3.txt"})),
         text("done"),
     ]);
-    write_files(&f.cwd, 6, 600);
+    write_files(&f.cwd, 6, 430);
     let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
     let out = a.run("read the files").await;
     assert_eq!(out.stop, Stop::Done, "{:?}", out.stop);

@@ -1,4 +1,6 @@
-//! edit: replace one exact piece of a file (D-10).
+//! edit: replace exact pieces of a file (D-10): one with `old_text` and
+//! `new_text`, or several with `edits`, each matched against the file as
+//! it was before the call, all or none.
 //!
 //! 1. An exact, unique match applies.
 //! 2. A unique match that differs only in trailing whitespace or line
@@ -7,38 +9,88 @@
 //! 4. Anything else, indentation included, does not apply: the result shows
 //!    the closest region and names the difference.
 
+use std::sync::LazyLock;
+
 use psi_ai::{Param, ParamKind, ToolSchema};
 use serde_json::{Map, Value, json};
 
 use crate::text::lines;
 use crate::{ToolCtx, ToolOutput, str_arg};
 
+/// `edits`: a list of `{old_text, new_text}` (pi has the same, as `edits[]`).
+static EDITS_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {"old_text": {"type": "string"}, "new_text": {"type": "string"}},
+            "required": ["old_text", "new_text"],
+        },
+    })
+});
+
 pub(crate) fn schema() -> ToolSchema {
     ToolSchema {
         name: "edit",
-        description: "Replace one piece of a file. old_text must match the file exactly (including indentation) and only once; include a few surrounding lines to make it unique. One replacement per call.".into(),
+        description: "Replace old_text with new_text in a file, or make several changes with edits [{old_text, new_text}, ...]. Each old_text must match the file as it was before the call, exactly (including indentation) and only once; include a few surrounding lines to make it unique.".into(),
         params: vec![
             Param::new("path", ParamKind::String, "File path, relative to the working directory or absolute").path(),
-            Param::new("old_text", ParamKind::String, "The exact text to replace"),
-            Param::new("new_text", ParamKind::String, "The text to put in its place"),
+            // Required unless edits is given; the shape fixes check (fix_call).
+            Param::new("old_text", ParamKind::String, "The exact text to replace").optional(),
+            Param::new("new_text", ParamKind::String, "The text to put in its place").optional(),
+            Param::new("edits", ParamKind::Array, "").optional().with_schema(&EDITS_SCHEMA),
             Param::new("intent", ParamKind::String, "Optional: one line on why").optional(),
         ],
         example: json!({"path": "app.py", "old_text": "    return a - b", "new_text": "    return a + b"}),
     }
 }
 
+/// The replacements asked for: `edits`, or `old_text` and `new_text`.
+fn pairs(args: &Map<String, Value>) -> Result<Vec<(&str, &str)>, String> {
+    let Some(Value::Array(list)) = args.get("edits") else {
+        return Ok(vec![(str_arg(args, "old_text"), str_arg(args, "new_text"))]);
+    };
+    list.iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let field = |k: &str| e.get(k).and_then(Value::as_str);
+            match (field("old_text"), field("new_text")) {
+                (Some(o), Some(n)) => Ok((o, n)),
+                _ => Err(format!(
+                    "edits[{i}] needs old_text and new_text, both strings."
+                )),
+            }
+        })
+        .collect()
+}
+
 pub(crate) fn run(args: &Map<String, Value>, ctx: &ToolCtx) -> ToolOutput {
     let shown = str_arg(args, "path");
-    let old = str_arg(args, "old_text");
-    let new = str_arg(args, "new_text");
     let path = ctx.resolve(shown);
-    if old.is_empty() {
-        return ToolOutput::err(
-            "old_text is empty. To create a file or replace all of it, use write.",
-        );
-    }
-    if old == new {
-        return ToolOutput::err("old_text and new_text are the same, so nothing would change.");
+    let pairs = match pairs(args) {
+        Ok(p) if p.is_empty() => {
+            return ToolOutput::err("edits is empty: give at least one {old_text, new_text}.");
+        }
+        Ok(p) => p,
+        Err(e) => return ToolOutput::err(e),
+    };
+    let many = pairs.len() > 1;
+    for (i, (old, new)) in pairs.iter().enumerate() {
+        let which = if many {
+            format!("edits[{i}]: ")
+        } else {
+            String::new()
+        };
+        if old.is_empty() {
+            return ToolOutput::err(format!(
+                "{which}old_text is empty. To create a file or replace all of it, use write."
+            ));
+        }
+        if old == new {
+            return ToolOutput::err(format!(
+                "{which}old_text and new_text are the same, so nothing would change."
+            ));
+        }
     }
     let bytes = match std::fs::read(&path) {
         Ok(b) => b,
@@ -50,45 +102,114 @@ pub(crate) fn run(args: &Map<String, Value>, ctx: &ToolCtx) -> ToolOutput {
     let Ok(content) = String::from_utf8(bytes) else {
         return ToolOutput::err(format!("{shown} is not a text file."));
     };
-    let (updated, note) = match apply(&content, old, new) {
+    let (text, applied) = match apply_all(&content, &pairs) {
         Ok(r) => r,
         Err(msg) => return ToolOutput::err(msg.replace("{path}", shown)),
     };
-    if let Err(e) = std::fs::write(&path, &updated.text) {
+    if let Err(e) = std::fs::write(&path, &text) {
         return ToolOutput::err(format!("Cannot write {shown}: {e}"));
     }
     if let Ok(mut f) = ctx.files.lock()
         && f.was_read(&path)
     {
-        f.record(&path, updated.text.as_bytes());
+        f.record(&path, text.as_bytes());
     }
-    let mut msg = format!(
-        "Edited {shown}: replaced {} at line {} with {}.",
-        lines(updated.old_lines),
-        updated.line,
-        lines(updated.new_lines)
-    );
-    if let Some(n) = note {
-        msg.push_str(&format!(" ({n})"));
+    let mut msg = match applied.as_slice() {
+        [a] => format!(
+            "Edited {shown}: replaced {} at line {} with {}.",
+            lines(a.old_lines),
+            a.line,
+            lines(a.new_lines)
+        ),
+        all => {
+            let at: Vec<String> = all.iter().map(|a| a.line.to_string()).collect();
+            format!(
+                "Edited {shown}: {} replacements, at lines {} of the file as it was.",
+                all.len(),
+                at.join(", ")
+            )
+        }
+    };
+    let mut notes: Vec<&str> = applied.iter().filter_map(|a| a.note).collect();
+    notes.dedup();
+    if !notes.is_empty() {
+        msg.push_str(&format!(" ({})", notes.join("; ")));
     }
     ToolOutput::ok(msg)
 }
 
+/// Every replacement matched against `content` as it is, then made
+/// together: none overlap, and none is made unless all match.
+pub(crate) fn apply_all(
+    content: &str,
+    pairs: &[(&str, &str)],
+) -> Result<(String, Vec<Applied>), String> {
+    let many = pairs.len() > 1;
+    let mut found = Vec::new();
+    for (i, (old, new)) in pairs.iter().enumerate() {
+        match locate(content, old, new) {
+            Ok((mut a, note)) => {
+                a.note = note;
+                found.push((i, a));
+            }
+            Err(e) if many => return Err(format!("edits[{i}]: {e} Nothing was changed.")),
+            Err(e) => return Err(e),
+        }
+    }
+    let mut order: Vec<usize> = (0..found.len()).collect();
+    order.sort_by_key(|&k| found[k].1.start);
+    for w in order.windows(2) {
+        let (a, b) = (&found[w[0]], &found[w[1]]);
+        if b.1.start < a.1.end {
+            return Err(format!(
+                "edits[{}] and edits[{}] overlap (lines {} and {}). Merge them into one edit. Nothing was changed.",
+                a.0, b.0, a.1.line, b.1.line
+            ));
+        }
+    }
+    let mut text = content.to_owned();
+    for &k in order.iter().rev() {
+        let a = &found[k].1;
+        text.replace_range(a.start..a.end, &a.replacement);
+    }
+    Ok((text, found.into_iter().map(|f| f.1).collect()))
+}
+
 #[derive(Debug, PartialEq)]
 pub(crate) struct Applied {
-    pub text: String,
+    /// The bytes of `content` replaced, and what goes in their place.
+    pub start: usize,
+    pub end: usize,
+    pub replacement: String,
     /// 1-based line where the replacement starts.
     pub line: usize,
     pub old_lines: usize,
     pub new_lines: usize,
+    /// How it matched, when not exactly.
+    pub note: Option<&'static str>,
 }
 
-/// The matching rules, on strings. Errors use `{path}` for the file name.
+/// One replacement made, for the tests.
+#[cfg(test)]
 pub(crate) fn apply(
     content: &str,
     old: &str,
     new: &str,
-) -> Result<(Applied, Option<&'static str>), String> {
+) -> Result<(String, Option<&'static str>), String> {
+    let (a, note) = locate(content, old, new)?;
+    Ok((
+        format!(
+            "{}{}{}",
+            &content[..a.start],
+            a.replacement,
+            &content[a.end..]
+        ),
+        note,
+    ))
+}
+
+/// The matching rules, on strings. Errors use `{path}` for the file name.
+fn locate(content: &str, old: &str, new: &str) -> Result<(Applied, Option<&'static str>), String> {
     if let Some(r) = try_match(content, old, new)? {
         return Ok(r);
     }
@@ -115,13 +236,15 @@ fn try_match(
     let exact: Vec<usize> = content.match_indices(old).map(|(i, _)| i).collect();
     if exact.len() == 1 {
         let at = exact[0];
-        let text = format!("{}{new}{}", &content[..at], &content[at + old.len()..]);
         return Ok(Some((
             Applied {
-                text,
+                start: at,
+                end: at + old.len(),
+                replacement: new.to_owned(),
                 line: line_of(content, at),
                 old_lines: old.lines().count().max(1),
                 new_lines: new.lines().count(),
+                note: None,
             },
             None,
         )));
@@ -158,19 +281,23 @@ fn try_match(
             if crlf {
                 replacement = replacement.replace('\n', "\r\n") + "\r";
             }
-            let mut out: Vec<String> = file_lines[..i].iter().map(|s| s.to_string()).collect();
-            out.push(replacement);
-            out.extend(
-                file_lines[i + old_norm.len()..]
+            // The bytes of lines i to i + len - 1, without the last one's '\n'.
+            let start: usize = file_lines[..i].iter().map(|l| l.len() + 1).sum();
+            let end = start
+                + file_lines[i..i + old_norm.len()]
                     .iter()
-                    .map(|s| s.to_string()),
-            );
+                    .map(|l| l.len() + 1)
+                    .sum::<usize>()
+                - 1;
             Ok(Some((
                 Applied {
-                    text: out.join("\n"),
+                    start,
+                    end,
+                    replacement,
                     line: i + 1,
                     old_lines: old_norm.len(),
                     new_lines: new.lines().count(),
+                    note: None,
                 },
                 Some("matched after ignoring trailing whitespace and line endings"),
             )))
@@ -281,8 +408,7 @@ mod tests {
     use super::*;
 
     fn ok(content: &str, old: &str, new: &str) -> (String, Option<&'static str>) {
-        let (a, n) = apply(content, old, new).unwrap();
-        (a.text, n)
+        apply(content, old, new).unwrap()
     }
 
     #[test]
@@ -383,6 +509,92 @@ mod tests {
             run(missing.as_object().unwrap(), &c)
                 .text
                 .contains("To create it, use write")
+        );
+    }
+
+    #[test]
+    fn several_edits_match_the_file_as_it_was() {
+        let content = "a = 1\nb = 2\nc = 3\n";
+        // The second's old_text is the first's new_text: matched against
+        // the original, it is the original "b = 2".
+        let (t, applied) = apply_all(
+            content,
+            &[("a = 1", "b = 2"), ("b = 2", "B = 2"), ("c = 3", "c = 4")],
+        )
+        .unwrap();
+        assert_eq!(t, "b = 2\nB = 2\nc = 4\n");
+        assert_eq!(
+            applied.iter().map(|a| a.line).collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        // Overlapping edits are refused; a failing one changes nothing.
+        let e = apply_all(content, &[("a = 1\nb", "x"), ("b = 2", "y")]).unwrap_err();
+        assert!(
+            e.starts_with("edits[0] and edits[1] overlap (lines 1 and 2)"),
+            "{e}"
+        );
+        let e = apply_all(content, &[("a = 1", "x"), ("zzz qqq", "y")]).unwrap_err();
+        assert!(e.starts_with("edits[1]: old_text was not found"), "{e}");
+        assert!(e.ends_with("Nothing was changed."), "{e}");
+        // Trailing whitespace still matches, per edit.
+        let (t, applied) = apply_all(
+            "x = 1  \ny = 2\n",
+            &[("x = 1\n", "x = 9\n"), ("y = 2", "y = 8")],
+        )
+        .unwrap();
+        assert_eq!(t, "x = 9\ny = 8\n");
+        assert!(applied[0].note.is_some() && applied[1].note.is_none());
+    }
+
+    #[test]
+    fn run_takes_several_edits_all_or_none() {
+        let d = tempfile::tempdir().unwrap();
+        let c = ToolCtx::new(d.path(), d.path(), 1000);
+        let f = d.path().join("m.py");
+        std::fs::write(&f, "a = 1\nb = 2\nc = 3\n").unwrap();
+        let args = json!({"path": "m.py", "edits": [
+            {"old_text": "a = 1", "new_text": "a = 10"},
+            {"old_text": "c = 3", "new_text": "c = 30"},
+        ]});
+        let out = run(args.as_object().unwrap(), &c);
+        assert_eq!(
+            out,
+            ToolOutput::ok("Edited m.py: 2 replacements, at lines 1, 3 of the file as it was.")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&f).unwrap(),
+            "a = 10\nb = 2\nc = 30\n"
+        );
+        let bad = json!({"path": "m.py", "edits": [
+            {"old_text": "b = 2", "new_text": "b = 20"},
+            {"old_text": "nope nope", "new_text": "x"},
+        ]});
+        let out = run(bad.as_object().unwrap(), &c);
+        assert!(
+            out.is_error
+                && out
+                    .text
+                    .starts_with("edits[1]: old_text was not found in m.py"),
+            "{}",
+            out.text
+        );
+        assert_eq!(
+            std::fs::read_to_string(&f).unwrap(),
+            "a = 10\nb = 2\nc = 30\n"
+        );
+        let same = json!({"path": "m.py", "edits": [
+            {"old_text": "b = 2", "new_text": "b = 20"},
+            {"old_text": "c = 30", "new_text": "c = 30"},
+        ]});
+        assert!(
+            run(same.as_object().unwrap(), &c)
+                .text
+                .starts_with("edits[1]: old_text and new_text are the same")
+        );
+        let half = json!({"path": "m.py", "edits": [{"old_text": "b = 2"}]});
+        assert_eq!(
+            run(half.as_object().unwrap(), &c).text,
+            "edits[0] needs old_text and new_text, both strings."
         );
     }
 }

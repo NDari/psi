@@ -7,6 +7,12 @@ use serde_json::Value;
 
 /// Output lines of a failed check the model sees; errors usually come first.
 pub const MAX_LINES: usize = 20;
+/// A longer line is cut in the middle: test libraries print whole values on
+/// one line (testify's expected and actual made two results of 16K
+/// characters in the cog trial, 2026-11-03).
+const MAX_LINE_CHARS: usize = 200;
+/// The kept lines together, at most.
+const MAX_CHARS: usize = 3000;
 const DEFAULT_TIMEOUT_S: u64 = 120;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,14 +76,21 @@ pub fn summary(command: &str, out: &ToolOutput) -> String {
     };
     let lines: Vec<&str> = body.lines().collect();
     let mut s = format!("[post-edit check failed: `{command}`]");
+    let (mut kept, mut chars) = (0, 0);
     for l in lines.iter().take(MAX_LINES) {
+        let l = cut_line(l);
+        if kept > 0 && chars + l.chars().count() > MAX_CHARS {
+            break;
+        }
+        chars += l.chars().count();
+        kept += 1;
         s.push('\n');
-        s.push_str(l);
+        s.push_str(&l);
     }
-    if lines.len() > MAX_LINES {
+    if lines.len() > kept {
         s.push_str(&format!(
             "\n[... {} more lines; run the command to see them]",
-            lines.len() - MAX_LINES
+            lines.len() - kept
         ));
     }
     if let Some(st) = status {
@@ -85,6 +98,18 @@ pub fn summary(command: &str, out: &ToolOutput) -> String {
         s.push_str(st);
     }
     s
+}
+
+/// `line`, or its start and end around a note when it is over [`MAX_LINE_CHARS`].
+fn cut_line(line: &str) -> String {
+    let n = line.chars().count();
+    if n <= MAX_LINE_CHARS {
+        return line.to_owned();
+    }
+    let half = MAX_LINE_CHARS / 2;
+    let head: String = line.chars().take(half).collect();
+    let tail: String = line.chars().skip(n - half).collect();
+    format!("{head} [... {} characters cut ...] {tail}", n - 2 * half)
 }
 
 #[cfg(test)]
@@ -125,6 +150,37 @@ mod tests {
         assert_eq!(lines[21], "[... 5 more lines; run the command to see them]");
         assert_eq!(lines[22], "[exit code 2]");
         assert_eq!(lines.len(), 23);
+    }
+
+    #[test]
+    fn long_lines_are_cut_and_the_whole_is_capped() {
+        // testify's shape (the cog trial): whole values on one line each.
+        let value = format!("\"| a | {} |\"", "x".repeat(6000));
+        let body = [
+            "--- FAIL: TestWordDocumentationCurrent (0.00s)".to_owned(),
+            format!("        expected: {value}"),
+            format!("        actual  : {value}"),
+            "        -| ? | ( -- value ) |".to_owned(),
+            "        +| ? | ( quote -- ) |".to_owned(),
+        ];
+        let out = ToolOutput::err(format!("{}\n[exit code 1]", body.join("\n")));
+        let s = summary("go test ./...", &out);
+        assert!(s.chars().count() < 1000, "{} chars", s.chars().count());
+        assert!(s.contains("characters cut ...]"), "{s}");
+        assert!(
+            s.contains("-| ? | ( -- value ) |") && s.ends_with("[exit code 1]"),
+            "{s}"
+        );
+        // Past the total, the rest is counted instead.
+        let many: Vec<String> = (0..20)
+            .map(|i| format!("{i} {}", "y".repeat(500)))
+            .collect();
+        let s = summary("t", &ToolOutput::err(many.join("\n")));
+        assert!(s.chars().count() <= 3300, "{} chars", s.chars().count());
+        assert!(
+            s.contains("more lines; run the command to see them]"),
+            "{s}"
+        );
     }
 
     #[test]

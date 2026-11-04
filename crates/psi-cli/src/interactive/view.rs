@@ -166,11 +166,25 @@ pub fn call_block(
         ));
     }
     if name == "edit" && !is_error {
-        let old = args.get("old_text").and_then(Value::as_str).unwrap_or("");
-        let new = args.get("new_text").and_then(Value::as_str).unwrap_or("");
-        out.extend(diff_lines(old, new, DIFF_LINES, width));
+        let (old, new) = edit_texts(args);
+        out.extend(diff_lines(&old, &new, DIFF_LINES, width));
     }
     out
+}
+
+/// An edit's old and new text; several edits one after the other, so their
+/// diff shows each change in order.
+fn edit_texts(args: &Value) -> (String, String) {
+    let text = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
+    let Some(list) = args.get("edits").and_then(Value::as_array) else {
+        return (text(args, "old_text"), text(args, "new_text"));
+    };
+    let joined = |k: &str| {
+        list.iter()
+            .map(|e| format!("{}\n", text(e, k).trim_end_matches('\n')))
+            .collect::<String>()
+    };
+    (joined("old_text"), joined("new_text"))
 }
 
 /// A colored unified-style diff of two texts, cut to `max` lines. Within a
@@ -475,6 +489,21 @@ mod tests {
         );
         assert_eq!(short_tokens(65536), "64K");
         assert_eq!(short_tokens(1024), "1K");
+    }
+
+    #[test]
+    fn several_edits_show_each_change_in_order() {
+        let args = serde_json::json!({"path": "a.py", "edits": [
+            {"old_text": "a = 1", "new_text": "a = 2"},
+            {"old_text": "c = 3\n", "new_text": "c = 4\n"},
+        ]});
+        let (old, new) = super::edit_texts(&args);
+        assert_eq!(
+            (old.as_str(), new.as_str()),
+            ("a = 1\nc = 3\n", "a = 2\nc = 4\n")
+        );
+        let one = serde_json::json!({"old_text": "x", "new_text": "y"});
+        assert_eq!(super::edit_texts(&one), ("x".into(), "y".into()));
     }
 
     /// The words shown in reverse video on each line.

@@ -397,7 +397,10 @@ fn is_noop_edit(c: &Call) -> bool {
     same(&a["old_text"], &a["new_text"])
         || same(&a["oldText"], &a["newText"])
         || a["edits"].as_array().is_some_and(|es| {
-            !es.is_empty() && es.iter().all(|e| same(&e["oldText"], &e["newText"]))
+            !es.is_empty()
+                && es.iter().all(|e| {
+                    same(&e["oldText"], &e["newText"]) || same(&e["old_text"], &e["new_text"])
+                })
         })
 }
 

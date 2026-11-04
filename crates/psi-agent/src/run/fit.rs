@@ -42,6 +42,24 @@ pub(crate) fn clear_target(n_ctx: u64, trigger: u64) -> u64 {
     (n_ctx * 3 / 10).min(trigger.saturating_sub(n_ctx / 5))
 }
 
+/// Whether clearing `freed` tokens of a `tokens`-token context is enough:
+/// down to [`clear_target`], or to within a twentieth of the window of what
+/// a summary would leave (`after_summary`). A summary can't go below its
+/// tail, so at 64K the target is out of its reach too, and Psi summarized
+/// every time, though clearing alone would have done as well, without the
+/// summary call and with the conversation kept word for word (the cog
+/// trial, 2026-11-03: summaries left 22K to 28K, clearing would have left
+/// about 28K).
+pub(crate) fn clearing_will_do(
+    tokens: u64,
+    freed: u64,
+    need: u64,
+    after_summary: u64,
+    n_ctx: u64,
+) -> bool {
+    freed >= need || tokens.saturating_sub(freed) <= after_summary + n_ctx / 20
+}
+
 impl Agent {
     /// Past the trigger, clear old tool results if that frees enough;
     /// otherwise summarize, and clear in what is left if still needed.
@@ -53,7 +71,13 @@ impl Agent {
         }
         let clearing = self.plan_clearing(tokens, at);
         if let Some((ids, freed)) = &clearing
-            && *freed >= self.room_needed(tokens, at)
+            && clearing_will_do(
+                tokens,
+                *freed,
+                self.room_needed(tokens, at),
+                self.after_summary(),
+                self.cfg.n_ctx,
+            )
         {
             return self
                 .record_clearing(ids.clone(), tokens, *freed)
@@ -98,6 +122,17 @@ impl Agent {
             .filter(|s| offered.iter().any(|n| n == s.name))
             .map(|s| s.to_openai().to_string().len())
             .sum()
+    }
+
+    /// About what a summary would leave, in tokens: the system prompt,
+    /// tools and summaries so far, a new summary at its full length (about
+    /// 7 characters a word) and the tail.
+    fn after_summary(&self) -> u64 {
+        let chain = summary_chain(&self.session.branch());
+        let overhead = self.overhead(&chain);
+        let n_ctx = self.cfg.n_ctx;
+        let tail = tail_tokens(self.trigger(), overhead, self.compaction.tail);
+        overhead + summary_words(n_ctx) * 7 / CHARS_PER_TOKEN + tail
     }
 
     /// The system prompt, tools and summaries, in tokens.
@@ -226,7 +261,7 @@ impl Agent {
         let from = chain.keep_from;
         let overhead = self.overhead(&chain);
         let set = self.compaction;
-        let tail = tail_tokens(n_ctx, self.trigger(), overhead, set.tail);
+        let tail = tail_tokens(self.trigger(), overhead, set.tail);
         let Some(cut) = plan_cut(&branch, from, tail) else {
             return Ok(Compacted::Nothing);
         };
@@ -397,8 +432,22 @@ fn extends_request(last: &ChatRequest, new: &ChatRequest) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::clear_target;
+    use super::{clear_target, clearing_will_do};
     use crate::compact::trigger;
+
+    #[test]
+    fn clearing_does_when_it_matches_a_summary() {
+        let n = 65_536;
+        let at = trigger(n, 8192, 9830);
+        let need = 45_900 - clear_target(n, at);
+        // The cog trial's first trigger: 18K clearable of 26K needed, and a
+        // summary would leave about 25.7K: clearing to 27.9K is as good.
+        assert!(clearing_will_do(45_900, 18_000, need, 25_700, n));
+        // Clearing that leaves much more than a summary is not.
+        assert!(!clearing_will_do(45_900, 8_000, need, 25_700, n));
+        // Reaching the target is always enough.
+        assert!(clearing_will_do(45_900, need, need, 0, n));
+    }
 
     #[test]
     fn clearing_frees_room_for_many_steps() {
