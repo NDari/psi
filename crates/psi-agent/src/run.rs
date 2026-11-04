@@ -866,23 +866,27 @@ impl Agent {
             .await;
         let start = Instant::now();
         let b = self.cfg.budgets.clone();
+        // A limit the user goes past in the TUI moves on by the same amount.
+        let (mut turn_limit, mut call_limit) = (b.max_turns, b.max_tool_calls);
         let mut guards = Guards::new(b.max_consecutive_errors);
         let mut overflow_retries = 0u32;
         loop {
             if self.ctx.cancel.is_cancelled() {
                 return Ok(Stop::Aborted);
             }
-            if out.turns >= b.max_turns {
-                return Ok(Stop::Budget(format!(
-                    "reached the limit of {} model requests in one run",
-                    b.max_turns
-                )));
+            if out.turns >= turn_limit {
+                let reason = format!("reached the limit of {turn_limit} model requests in one run");
+                if let Some(stop) = self.budget_reached(reason).await {
+                    return Ok(stop);
+                }
+                turn_limit = turn_limit.saturating_add(b.max_turns);
             }
-            if out.tool_calls >= b.max_tool_calls {
-                return Ok(Stop::Budget(format!(
-                    "reached the limit of {} tool calls in one run",
-                    b.max_tool_calls
-                )));
+            if out.tool_calls >= call_limit {
+                let reason = format!("reached the limit of {call_limit} tool calls in one run");
+                if let Some(stop) = self.budget_reached(reason).await {
+                    return Ok(stop);
+                }
+                call_limit = call_limit.saturating_add(b.max_tool_calls);
             }
             if let Some(w) = b.max_wall
                 && start.elapsed() >= w
@@ -1050,6 +1054,19 @@ impl Agent {
             for s in Queues::take(&self.queues.steering) {
                 self.record(Self::user_message(&s))?;
             }
+        }
+    }
+
+    /// A budget ran out: headless runs stop; in the TUI the run pauses and
+    /// asks (§5), and going on gives it as much again.
+    async fn budget_reached(&self, reason: String) -> Option<Stop> {
+        if !self.safety.approver.interactive() {
+            return Some(Stop::Budget(reason));
+        }
+        match self.pause_run(reason.clone()).await {
+            None => None,
+            Some(Stop::Aborted) => Some(Stop::Aborted),
+            Some(_) => Some(Stop::Budget(reason)),
         }
     }
 

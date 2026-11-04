@@ -31,6 +31,8 @@ struct Scripted {
     blocked: Mutex<VecDeque<BlockedChoice>>,
     asked: Mutex<Vec<ApprovalRequest>>,
     pauses: Mutex<Vec<String>>,
+    /// Answers to pauses, in order: true goes on (default: stop).
+    go_on: Mutex<VecDeque<bool>>,
 }
 
 impl Approver for Scripted {
@@ -55,7 +57,8 @@ impl Approver for Scripted {
     }
     fn pause(&self, reason: String) -> BoxFuture<'static, bool> {
         self.pauses.lock().unwrap().push(reason);
-        Box::pin(async { false })
+        let go = self.go_on.lock().unwrap().pop_front().unwrap_or(false);
+        Box::pin(async move { go })
     }
     fn interactive(&self) -> bool {
         true
@@ -116,6 +119,17 @@ impl Fx {
         safety: Safety,
         sandbox: bool,
     ) -> Agent {
+        self.agent_with(server, session, safety, sandbox, Budgets::default())
+    }
+
+    fn agent_with(
+        &self,
+        server: &ReplayServer,
+        session: SessionFile,
+        safety: Safety,
+        sandbox: bool,
+        budgets: Budgets,
+    ) -> Agent {
         let mut ctx = ToolCtx::new(&self.root, &self.tmpdir, 20_000);
         if sandbox {
             let cfg = SandboxConfig {
@@ -135,7 +149,7 @@ impl Fx {
             max_output: 512,
             n_ctx: 8192,
             enable_thinking: None,
-            budgets: Budgets::default(),
+            budgets,
             system_prompt: "sys".into(),
             tools: core_tools(false),
             home: Some(self.home.clone()),
@@ -297,6 +311,42 @@ async fn file_tools_ask_for_psi_config_and_unrecoverable_paths() {
     assert_eq!(decisions(&a), ["denied", "denied", "denied"]);
     assert!(!fx.root.join(".psi/settings.jsonc").exists());
     assert!(!fx.root.join("debug.log").exists() && !outside.exists());
+}
+
+#[tokio::test]
+async fn a_budget_pauses_in_the_tui_and_going_on_gives_as_much_again() {
+    // §5: hitting a budget pauses and asks; headless runs stop (2026-11-03:
+    // a long cog run ended at 40 requests instead).
+    let fx = Fx::new();
+    let ls = || call("bash", json!({"command": "true"}));
+    let server = ReplayServer::start(vec![ls(), ls(), ls(), ls(), ls(), text("done")]).unwrap();
+    let approver = Arc::new(Scripted::default());
+    approver.go_on.lock().unwrap().push_back(true);
+    let budgets = Budgets {
+        max_turns: 2,
+        ..Budgets::default()
+    };
+    let mut a = fx.agent_with(
+        &server,
+        fx.session(),
+        fx.safety(approver.clone(), None),
+        false,
+        budgets,
+    );
+    let out = a.run("go").await;
+    // Paused at 2 (went on), then at 4 (stopped).
+    let pauses = approver.pauses.lock().unwrap().clone();
+    assert_eq!(pauses.len(), 2, "{pauses:?}");
+    assert!(
+        pauses[0].contains("limit of 2 model requests"),
+        "{pauses:?}"
+    );
+    assert!(
+        pauses[1].contains("limit of 4 model requests"),
+        "{pauses:?}"
+    );
+    assert!(matches!(out.stop, Stop::Budget(_)), "{:?}", out.stop);
+    assert_eq!(out.turns, 4);
 }
 
 #[tokio::test]

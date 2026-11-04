@@ -38,7 +38,7 @@ struct Cli {
     #[arg(long, value_name = "FILE", add = ArgValueCandidates::new(complete::sessions))]
     session: Option<PathBuf>,
 
-    /// Model requests per run before it stops (default 40).
+    /// Model requests per run: print runs stop there (default 40); the TUI pauses and asks (default: no limit).
     #[arg(long, value_name = "N")]
     max_turns: Option<u32>,
 

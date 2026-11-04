@@ -390,8 +390,16 @@ pub async fn prepare(args: &RunArgs, approver: Arc<dyn Approver>) -> Result<Prep
     let mut ctx = ToolCtx::new(&cwd, &tmpdir, result_chars(n_ctx));
     ctx.sandbox = sandbox;
     let mut budgets = Budgets::default();
-    if let Some(n) = args.max_turns {
-        budgets.max_turns = n;
+    match args.max_turns {
+        Some(n) => budgets.max_turns = n,
+        // The TUI has no cap on requests or tool calls unless one is asked
+        // for (pi parity): Esc stops a run and the guards still pause it.
+        // Print runs keep the default as a backstop against a runaway loop.
+        None if mode == "interactive" => {
+            budgets.max_turns = u32::MAX;
+            budgets.max_tool_calls = u32::MAX;
+        }
+        None => {}
     }
     let cfg = AgentConfig {
         model: profile.id.clone(),

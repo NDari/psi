@@ -228,7 +228,7 @@ Mirrors pi's lifecycle; see pi's `docs/extensions.md` for the reference flow.
 - **A turn** is one model request plus execution of the tool calls it returns. Read-only calls in one response run in parallel. Mutating calls on the same path are serialized.
 - **Queues** (pi parity): *steering* messages are injected before the next turn; *follow-up* messages wait until the run settles.
 - **Abort:** Esc cancels the in-flight request and tools, and records partial results.
-- **Budgets:** max turns per run (default 40; H-13), max tool calls, wall time, max consecutive errors. Hitting one pauses and asks; in headless modes it stops.
+- **Budgets:** max turns per run (default 40; H-13), max tool calls, wall time, max consecutive errors. Hitting one pauses and asks; in headless modes it stops. (2026-11-03: the TUI has no turn or tool-call limit unless `--max-turns` sets one, as in pi, since a long interactive run hit 40 and the code stopped instead of pausing; Esc stops a run and the guards still pause it. A limit reached in the TUI now pauses, and going on gives as much again. Print runs keep 40 as a backstop; evals set their own.)
 - **Nested sessions:** running `psi` itself from bash is on the always-ask list (§8.3).
 - **Events** are emitted at every stage for extensions (§9.3) and for recording (§12.1).
 

@@ -1246,6 +1246,23 @@ fn the_stats_sit_under_the_input_box_and_user_text_is_white() {
 }
 
 #[test]
+fn the_tui_has_no_request_limit_by_default() {
+    // 2026-11-03: a long cog run stopped at 40 model requests, the print
+    // runs' backstop; the TUI has none unless --max-turns asks for one.
+    let mut replies: Vec<Reply> = (0..45)
+        .map(|_| call("read", json!({"path": "a.txt"})))
+        .collect();
+    replies.push(text("all done"));
+    let (mut t, s) = Tui::start(replies, |p| std::fs::write(p.join("a.txt"), "x\n").unwrap());
+    t.wait_for("› ", SLOW);
+    t.typ("read it a lot\r");
+    t.wait_for("all done", Duration::from_secs(30));
+    assert!(!t.all().contains("stopped:"), "{}", t.all());
+    assert_eq!(s.chat_requests().len(), 46);
+    t.quit();
+}
+
+#[test]
 fn starts_without_a_model_server_and_connects_when_it_is_up() {
     // A port nothing listens on yet.
     let port = std::net::TcpListener::bind("127.0.0.1:0")
