@@ -409,6 +409,22 @@ Dimmed text.
 
 Returns `string`.
 
+### psi.bash
+
+#### psi.bash.writes
+
+```
+psi.bash.writes(command: string): string?
+```
+
+Why a bash command may change something, or nil when it only reads: every program in it (through pipes, `&&`, substitutions and `sh -c`) is a known reader such as `cat`, `grep` or `git diff`, and nothing is redirected into a file. Plan mode uses the same check. A `tool_call` gate can block writes to a file and let reads of it through: `if cmd:find("docs/words.md", 1, true) and psi.bash.writes(cmd) then ... end`.
+
+| Param | Type | Optional |
+|---|---|---|
+| `command` | `string` |  |
+
+Returns `string?`.
+
 ### psi.http
 
 #### psi.http.request

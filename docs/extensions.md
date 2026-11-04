@@ -58,6 +58,12 @@ directory. `ctx.execute_tool` runs a tool as the model would, through the
 policy, and returns what the model would see (`read` numbers its lines),
 so it is not a way to get a file's contents.
 
+The model sees a tool's name in the system prompt's tool list and its
+description in the request. Say in the description when to use the tool
+instead of bash ("Run Cog source given inline or as a file; use this
+rather than `go run` in bash"): a tool that only repeats what one bash
+command does goes unused.
+
 ### Batteries
 
 Rust-backed modules for what Lua lacks (D-45; every signature is in
@@ -72,6 +78,12 @@ Rust-backed modules for what Lua lacks (D-45; every signature is in
   `os.execute` are not available: they would skip the sandbox and the
   approval rules. An extension that must run outside the sandbox needs the
   user's settings: `"extensions": {"<name>": {"unsandboxed": true}}`.
+- `psi.bash.writes(command)` is nil when a bash command only reads (plan
+  mode's check) and otherwise says why it may write. A `tool_call` gate
+  that guards a file should block only when it is non-nil, so the model
+  can still read the file: a gate that refused every command naming a
+  file made the model take the refusal for the file's contents (see the
+  `keep-generated` example).
 - `psi.http.request{ url, method, headers, query, body, json, timeout_ms,
   max_bytes }` and `psi.http.get(url)` return `{ status, ok, headers, body,
   truncated, json() }`. A transport failure is an error, any status is a

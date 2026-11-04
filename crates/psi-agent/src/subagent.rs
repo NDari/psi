@@ -11,9 +11,11 @@ pub const TOOL: &str = "agent";
 /// Added to every sub-agent's system prompt, before its own.
 pub const SUB_NOTE: &str = "You are a sub-agent: another agent gave you this task and sees only your last answer. End with everything it needs.";
 
-/// The most model requests one sub-agent call makes before it pauses (TUI)
-/// or stops. 100 since a broad scout review in the cog trial needed 134
-/// (2026-11-03); a setting comes later.
+/// The most model requests one sub-agent call makes in a print run or an
+/// eval before it stops. 100 since a broad scout review in the cog trial
+/// needed 134 (2026-11-03). In the TUI a sub-agent has no limit, like the
+/// main run: worker paused six times at 100 in the second trial
+/// (2026-11-04), each waiting on the user.
 pub const MAX_TURNS: u32 = 100;
 
 /// One agent: a name, when to use it, its tools and its instructions

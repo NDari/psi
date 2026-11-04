@@ -51,6 +51,11 @@ pub enum AgentEvent {
     Compacting {
         tokens: u64,
     },
+    /// The summary that `Compacting` announced is done, failed or was
+    /// stopped; `done` when the conversation was summarized.
+    Compacted {
+        done: bool,
+    },
     /// A request failed in a way that may pass, and is sent once more. Text
     /// streamed for the failed attempt is void.
     Retrying {

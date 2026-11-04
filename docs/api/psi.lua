@@ -242,6 +242,9 @@ psi.ui = {}
 ---@class psi.style
 psi.style = {}
 
+---@class psi.bash
+psi.bash = {}
+
 ---@class psi.http
 psi.http = {}
 
@@ -440,6 +443,11 @@ function psi.log(message) end
 ---@param opts? ExecOptions
 ---@return ExecResult
 function psi.exec(argv, opts) end
+
+--- Why a bash command may change something, or nil when it only reads: every program in it (through pipes, `&&`, substitutions and `sh -c`) is a known reader such as `cat`, `grep` or `git diff`, and nothing is redirected into a file. Plan mode uses the same check. A `tool_call` gate can block writes to a file and let reads of it through: `if cmd:find("docs/words.md", 1, true) and psi.bash.writes(cmd) then ... end`.
+---@param command string
+---@return string?
+function psi.bash.writes(command) end
 
 --- Make an HTTP or HTTPS request. Errors when the network is off (the `network` setting), on a bad URL, or when the connection fails or times out; any status is a response. Esc stops it.
 ---@async

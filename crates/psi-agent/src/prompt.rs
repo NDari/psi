@@ -31,7 +31,7 @@ pub fn system_prompt(
     let mut s = format!(
         "You are a coding agent running inside psi in the user's terminal. You can read files, write and edit files, and run shell commands to complete the user's task.
 
-Tools: {}
+{}
 
 How to work:
 - Understand before you change: read the relevant code first, and look for existing helpers, conventions and tests.
@@ -44,7 +44,7 @@ How to work:
 - If you are stuck or unsure what the user wants, ask a short question instead of guessing.
 - When asked about psi itself, first run `psi help topics` and the relevant `psi help <topic>`, and answer from their output.
 ",
-        tools.join(", "),
+        tools_line(tools, &[], &[]),
         if facts.checkpoints {
             "- Your changes inside the workspace are checkpointed and can be undone, so act confidently there. Some actions (like git push or publishing) always need the user's approval.\n"
         } else {
@@ -71,6 +71,38 @@ How to work:
     }
     s.push_str(&format!("\nCurrent working directory: {}", cwd.display()));
     s
+}
+
+/// The `Tools:` line: the harness's own tools, then those extensions and
+/// MCP servers add, so the prompt names every tool the request offers
+/// (the cog trial's model never called `cog_run` when this line named only
+/// the core tools).
+pub fn tools_line<S: AsRef<str>>(own: &[S], extensions: &[S], mcp: &[S]) -> String {
+    let join = |v: &[S]| v.iter().map(AsRef::as_ref).collect::<Vec<_>>().join(", ");
+    let mut s = format!("Tools: {}", join(own));
+    if !extensions.is_empty() {
+        s.push_str(&format!("; from extensions: {}", join(extensions)));
+    }
+    if !mcp.is_empty() {
+        s.push_str(&format!("; from MCP servers: {}", join(mcp)));
+    }
+    s
+}
+
+/// `prompt` with its `Tools:` line replaced by `line`; unchanged when it
+/// has none (a prompt an extension or a test built by hand).
+pub fn with_tools_line(prompt: &str, line: &str) -> String {
+    let start = if prompt.starts_with("Tools: ") {
+        0
+    } else if let Some(i) = prompt.find("\nTools: ") {
+        i + 1
+    } else {
+        return prompt.to_owned();
+    };
+    let end = prompt[start..]
+        .find('\n')
+        .map_or(prompt.len(), |i| start + i);
+    format!("{}{line}{}", &prompt[..start], &prompt[end..])
 }
 
 /// AGENTS.md files (CLAUDE.md where a directory has no AGENTS.md), pi
@@ -134,6 +166,30 @@ mod tests {
         assert!(p.contains("doesn't carry over.\n- Calls that only read"));
         assert!(p.contains("\n- When asked about psi itself, first run `psi help topics`"));
         assert!(!p.contains("Skills:"));
+    }
+
+    #[test]
+    fn tools_line_names_extension_and_mcp_tools() {
+        let line = tools_line(
+            &["read", "bash", "agent"],
+            &["cog_run"],
+            &["mcp__gopls__go_search"],
+        );
+        assert_eq!(
+            line,
+            "Tools: read, bash, agent; from extensions: cog_run; from MCP servers: mcp__gopls__go_search"
+        );
+        let p = system_prompt(
+            &["read", "bash"],
+            Path::new("/w"),
+            &[],
+            &[],
+            PromptFacts::default(),
+        );
+        let q = with_tools_line(&p, &line);
+        assert!(q.contains(&format!("\n\n{line}\n\nHow to work:")), "{q}");
+        assert_eq!(with_tools_line(&q, "Tools: read, bash"), p);
+        assert_eq!(with_tools_line("no line", &line), "no line");
     }
 
     #[test]

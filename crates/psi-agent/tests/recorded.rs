@@ -135,13 +135,20 @@ async fn qwen_retrying_blocked_commands_in_other_forms() {
         .filter(|(t, e)| *e && t.contains("is on the always-ask list"))
         .map(|(t, _)| t)
         .collect();
-    assert_eq!(denied.len(), 4, "{r:#?}");
+    // Five since `git checkout` asks too (2026-11-04): its plain
+    // `git checkout` retry used to run.
+    assert_eq!(denied.len(), 5, "{r:#?}");
     assert!(
         denied
             .iter()
             .all(|t| t.contains("Don't retry it in another form"))
     );
     assert!(denied.iter().any(|t| t.contains("`git clean`")));
+    assert!(
+        denied
+            .iter()
+            .any(|t| t.starts_with("Not run: `git checkout` is"))
+    );
     assert_eq!(fx.git(&["rev-parse", "HEAD"]), head);
     assert!(fx.cwd.join("README.md").exists());
 }

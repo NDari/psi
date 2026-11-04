@@ -230,6 +230,20 @@ pub(crate) fn re_escape(lua: &Lua, s: mlua::LuaString) -> mlua::Result<mlua::Lua
     lua.create_string(regex::escape(&self::text(&s)).as_bytes())
 }
 
+// ---- Bash ------------------------------------------------------------------
+
+/// Plan mode's read-only check (psi-plan.md §10): nil when the command only
+/// reads, else why it may write.
+pub(crate) fn bash_writes(
+    lua: &Lua,
+    command: mlua::LuaString,
+) -> mlua::Result<Option<mlua::LuaString>> {
+    match psi_safety::read_only::check(&text(&command)) {
+        Ok(()) => Ok(None),
+        Err(why) => lua.create_string(why.as_bytes()).map(Some),
+    }
+}
+
 // ---- Paths -----------------------------------------------------------------
 
 fn out_path(lua: &Lua, p: &Path) -> mlua::Result<mlua::LuaString> {

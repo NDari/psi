@@ -4,7 +4,7 @@
 
 use std::time::Instant;
 
-use psi_ai::{AiError, ChatMessage, ChatRequest, RawToolCall, Response};
+use psi_ai::{AiError, ChatMessage, ChatRequest, Delta, RawToolCall, Response};
 use psi_ext::Gate;
 use psi_session::EntryBody;
 use psi_tools::ToolOutput;
@@ -244,6 +244,20 @@ impl Agent {
         tokens: u64,
         focus: Option<&str>,
     ) -> Result<Compacted, String> {
+        let r = self.write_summary(tokens, focus).await;
+        if self.compacting {
+            self.compacting = false;
+            let done = matches!(r, Ok(Compacted::Done));
+            self.emit(AgentEvent::Compacted { done });
+        }
+        r
+    }
+
+    async fn write_summary(
+        &mut self,
+        tokens: u64,
+        focus: Option<&str>,
+    ) -> Result<Compacted, String> {
         let gate = self
             .ext
             .gate(
@@ -251,7 +265,7 @@ impl Agent {
                 json!({"tokens": tokens, "reason": "summary"}),
             )
             .await;
-        if let Gate::Block(why) = gate {
+        if let Gate::Block { reason: why, .. } = gate {
             tracing::info!("an extension stopped compaction: {why}");
             return Ok(Compacted::Blocked(why));
         }
@@ -278,6 +292,7 @@ impl Agent {
         drop(branch);
 
         self.emit(AgentEvent::Compacting { tokens });
+        self.compacting = true;
         let started = Instant::now();
         let req = self.build_request();
         let extends = self
@@ -414,9 +429,28 @@ impl Agent {
         }
     }
 
-    /// Sends a summary request; its text is not streamed anywhere.
+    /// Sends a summary request; its text is not streamed anywhere, but how
+    /// far the server has read the prompt is, for the spinner.
     async fn summary_request(&self, req: &ChatRequest) -> Result<Response, AiError> {
-        self.client.chat(req, &self.ctx.cancel, &mut |_| {}).await
+        let events = self.events.clone();
+        let mut on_delta = move |d: Delta| {
+            if let (
+                Delta::PromptProgress {
+                    total,
+                    cache,
+                    processed,
+                },
+                Some(tx),
+            ) = (d, &events)
+            {
+                let _ = tx.send(AgentEvent::PromptProgress {
+                    total,
+                    cache,
+                    processed,
+                });
+            }
+        };
+        self.client.chat(req, &self.ctx.cancel, &mut on_delta).await
     }
 }
 

@@ -57,6 +57,14 @@ pub const EXAMPLES: &[Example] = &[
         ],
     },
     Example {
+        name: "keep-generated",
+        shows: "a tool_call gate that refuses writes to generated files and lets reads through (psi.bash.writes)",
+        files: &[
+            file!("keep-generated", "init.lua"),
+            file!("keep-generated", "keep_generated_test.lua"),
+        ],
+    },
+    Example {
         name: "llama-box",
         shows: "a provider (another OpenAI-compatible server)",
         files: &[

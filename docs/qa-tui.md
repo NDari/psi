@@ -38,8 +38,8 @@ yours.
 
 - [ ] `/` at the start lists commands; Up/Down put the selection in the box (what the box shows is what Enter runs); Tab accepts; Esc closes. (auto)
 - [ ] `@` lists files fuzzily, .gitignore-aware; Tab inserts the path. (auto)
-- [ ] The approval card appears under the input box and the draft stays; `y`, `s`, `n`, and `e` (type a message, Enter) all work. (auto: n)
-- [ ] A blocked write (try `echo x > /etc/psi-test` in bash via the model) shows the blocked card: `r`, `a`, `n`.
+- [ ] The approval card appears under the input box and the draft stays; its list starts on "No", ignores keys for a moment, and each answer works with ↑↓ and Enter ("No, and tell the model why" takes a message, Enter); Esc says no; typing letters doesn't answer it. (auto)
+- [ ] A blocked write (try `echo x > /etc/psi-test` in bash via the model) shows the blocked card: rerun once outside, make the folder writable, or leave it (↑↓, Enter; Esc leaves it).
 - [ ] `/rewind` and `/tree` pickers: Up/Down, Enter, Esc. (auto: rewind)
 - [ ] `/resume` lists this directory's sessions and opens one, replaying its messages.
 

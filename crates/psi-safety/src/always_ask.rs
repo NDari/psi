@@ -20,11 +20,13 @@ pub enum RuleError {
 }
 
 /// One always-ask entry, e.g. "git push": a program and words that must all appear after it, in any order.
+/// A word written `!list` must not appear: "git stash !list" asks for `git stash` but not `git stash list`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rule {
     pub id: String,
     program: String,
     words: Vec<String>,
+    not: Vec<String>,
 }
 
 impl Rule {
@@ -32,12 +34,14 @@ impl Rule {
         let Some((prog, args)) = argv.split_first() else {
             return false;
         };
+        let has = |want: &str| {
+            args.iter()
+                .filter_map(|a| a.lit.as_deref())
+                .any(|got| word_matches(want, got))
+        };
         prog.lit.as_deref().map(basename) == Some(self.program.as_str())
-            && self.words.iter().all(|want| {
-                args.iter()
-                    .filter_map(|a| a.lit.as_deref())
-                    .any(|got| word_matches(want, got))
-            })
+            && self.words.iter().all(|w| has(w))
+            && !self.not.iter().any(|w| has(w))
     }
 }
 
@@ -159,13 +163,16 @@ impl Rules {
     }
 
     /// Parse one entry string like "git branch -D" (program then words). Error on empty.
+    /// Words written `!word` must not appear; the id leaves them out.
     pub fn parse_entry(s: &str) -> Result<Rule, RuleError> {
-        let parts: Vec<&str> = s.split_whitespace().collect();
+        let (not, parts): (Vec<&str>, Vec<&str>) =
+            s.split_whitespace().partition(|w| w.starts_with('!'));
         let (program, words) = parts.split_first().ok_or(RuleError::Empty)?;
         Ok(Rule {
             id: parts.join(" "),
             program: basename(program).to_string(),
             words: words.iter().map(|w| w.to_string()).collect(),
+            not: not.iter().map(|w| w[1..].to_string()).collect(),
         })
     }
 
@@ -617,6 +624,9 @@ mod tests {
                 "git branch --delete --force",
                 "git stash drop",
                 "git stash clear",
+                "git stash",
+                "git checkout",
+                "git restore",
                 "npm publish",
                 "cargo publish",
                 "docker push",
@@ -631,6 +641,39 @@ mod tests {
                 "rm .git",
             ]
         );
+    }
+
+    #[test]
+    fn git_commands_that_set_aside_or_discard_work_ask() {
+        // A sub-agent stashed and checked out files in the owner's tree to
+        // compare old and new behavior, and left two stashes behind with
+        // its parent's changes in them (cog trial, 2026-11-04).
+        let rules = Rules::shipped();
+        for (cmd, want) in [
+            ("git stash", ask(&["git stash"])),
+            ("git stash push -m wip", ask(&["git push", "git stash"])),
+            ("git stash -u && go test ./...", ask(&["git stash"])),
+            ("git -C repo stash save", ask(&["git stash"])),
+            ("git checkout env.go", ask(&["git checkout"])),
+            ("git checkout -- .", ask(&["git checkout"])),
+            ("git restore src/a.rs", ask(&["git restore"])),
+            ("git stash drop", ask(&["git stash drop"])),
+            ("git stash list", Verdict::Clear),
+            ("git stash show -p stash@{0}", Verdict::Clear),
+            ("git stash pop", Verdict::Clear),
+            ("git stash apply", Verdict::Clear),
+            ("git show HEAD:env.go", Verdict::Clear),
+            ("git status", Verdict::Clear),
+        ] {
+            assert_eq!(classify(cmd, &rules), want, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn not_words_are_left_out_of_the_id() {
+        let r = Rules::parse_entry("git stash !list !show").unwrap();
+        assert_eq!(r.id, "git stash");
+        assert!(Rules::names(&r.id, "git-stash"));
     }
 
     #[test]
@@ -784,7 +827,7 @@ mod tests {
         // Any-order matching sees "push" as the subcommand. Acceptable: it only asks.
         let cases = [
             ("git log --grep push", ask(&["git push"])),
-            ("git checkout push", ask(&["git push"])),
+            ("git checkout push", ask(&["git push", "git checkout"])),
             // A short-flag cluster with an attached value can contain the letter.
             ("psi -mllama-pro", ask(&["psi -p"])),
         ];

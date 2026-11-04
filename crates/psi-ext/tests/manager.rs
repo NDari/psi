@@ -95,7 +95,13 @@ async fn tools_events_commands_and_ui() {
             json!({"id": "c1", "name": "bash", "args": {"command": "rm -rf /"}}),
         )
         .await;
-    assert_eq!(g, Gate::Block("not that".into()));
+    assert_eq!(
+        g,
+        Gate::Block {
+            by: "demo".into(),
+            reason: "not that".into()
+        }
+    );
     let g = m
         .gate(
             "tool_call",
@@ -190,7 +196,7 @@ async fn a_runaway_handler_is_stopped_and_the_gate_fails_closed() {
         .await;
     let took = start.elapsed();
     ticker.abort();
-    let Gate::Block(reason) = g else {
+    let Gate::Block { reason, .. } = g else {
         panic!("{g:?}")
     };
     assert!(reason.contains("ran too long"), "{reason}");
@@ -255,10 +261,11 @@ async fn a_gate_whose_extension_stopped_blocks() {
         Gate::Allow(_)
     ));
     m.shutdown();
-    let Gate::Block(reason) = m.gate("tool_call", call).await else {
+    let Gate::Block { by, reason } = m.gate("tool_call", call).await else {
         panic!("a stopped gate let the call through");
     };
     assert!(reason.contains("the gate extension failed"), "{reason}");
+    assert_eq!(by, "gate");
 }
 
 #[tokio::test(flavor = "multi_thread")]

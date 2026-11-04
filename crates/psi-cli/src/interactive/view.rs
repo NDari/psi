@@ -6,6 +6,7 @@ use psi_agent::approval::ApprovalRequest;
 use psi_tui::theme::{self, Token};
 use psi_tui::{Line, Style};
 use serde_json::Value;
+use std::time::Duration;
 
 /// Output lines a committed tool call shows (`/show <n>` has the rest).
 const OUTPUT_LINES: usize = 4;
@@ -345,6 +346,31 @@ pub fn short_tokens(n: u64) -> String {
     }
 }
 
+/// The spinner's text and timer: what the run waits for, and for how long.
+/// A summary counts from its own start and says Esc stops it (a summary at
+/// 100K tokens took 47 s in the cog trial, with nothing on screen moving).
+pub fn spinner_text(
+    progress: Option<(u64, u64, u64)>,
+    compacting: Option<(Duration, u64)>,
+    since_start: Duration,
+) -> String {
+    let reading = progress.map(prompt_progress);
+    match compacting {
+        Some((took, tokens)) => {
+            let mut s = format!("summarizing about {} tokens", short_tokens(tokens));
+            if let Some(r) = reading {
+                s.push_str(&format!(" · {r}"));
+            }
+            format!("{s} ({:.0}s) · Esc stops", took.as_secs_f64())
+        }
+        None => format!(
+            "{} ({:.0}s)",
+            reading.unwrap_or_else(|| "waiting for the model…".into()),
+            since_start.as_secs_f64()
+        ),
+    }
+}
+
 /// The spinner's text while the server reads the prompt: the share of
 /// the new tokens done (cached ones take no time).
 pub fn prompt_progress((total, cache, processed): (u64, u64, u64)) -> String {
@@ -358,8 +384,47 @@ pub fn prompt_progress((total, cache, processed): (u64, u64, u64)) -> String {
     s
 }
 
+/// The approval card's answers; "No" is the safe one.
+pub const APPROVAL_CHOICES: [&str; 4] = [
+    "Yes, once",
+    "Yes, for this session",
+    "No",
+    "No, and tell the model why",
+];
+pub const APPROVAL_SAFE: usize = 2;
+
+/// A card's answers as a list, the selected one marked, and the keys
+/// (cards used to take single letters, which typing could answer).
+pub fn choices(items: &[String], sel: usize, safe: usize, border: Style) -> Vec<Line> {
+    let mut out = Vec::new();
+    for (i, it) in items.iter().enumerate() {
+        let mut l = Line::default();
+        l.push("│ ", border);
+        if i == sel {
+            l.push(format!("▸ {it}"), theme::style(Token::Accent).bold());
+        } else {
+            l.push(format!("  {it}"), dim());
+        }
+        out.push(l);
+    }
+    let esc = items
+        .get(safe)
+        .map(|s| s.to_lowercase())
+        .unwrap_or_default();
+    let mut keys = Line::default();
+    keys.push("└ ", border);
+    keys.push(format!("↑↓ choose · Enter confirm · Esc {esc}"), dim());
+    out.push(keys);
+    out
+}
+
 /// The approval card under the input box (§8.7).
-pub fn approval_card(req: &ApprovalRequest, typing: Option<&str>, width: usize) -> Vec<Line> {
+pub fn approval_card(
+    req: &ApprovalRequest,
+    typing: Option<&str>,
+    sel: usize,
+    width: usize,
+) -> Vec<Line> {
     let (tool, args, reason) = (req.tool.as_str(), &req.args, req.reason.as_str());
     let (intent, preceding) = (req.intent.as_deref(), req.preceding_text.as_str());
     let w = width.saturating_sub(4);
@@ -399,21 +464,19 @@ pub fn approval_card(req: &ApprovalRequest, typing: Option<&str>, width: usize) 
         None => {}
     }
     body(&mut out, "why: ", reason, Style::default());
-    let mut keys = Line::default();
-    keys.push("└ ", border);
     match typing {
         Some(t) => {
+            let mut keys = Line::default();
+            keys.push("└ ", border);
             keys.push("message to the model: ", dim());
             keys.push(t, Style::default());
+            out.push(keys);
         }
         None => {
-            keys.push(
-                "y once · s this session · n deny · e deny with a message",
-                dim(),
-            );
+            let items: Vec<String> = APPROVAL_CHOICES.iter().map(|s| (*s).to_owned()).collect();
+            out.extend(choices(&items, sel, APPROVAL_SAFE, border));
         }
     }
-    out.push(keys);
     out
 }
 
@@ -489,6 +552,28 @@ mod tests {
         );
         assert_eq!(short_tokens(65536), "64K");
         assert_eq!(short_tokens(1024), "1K");
+    }
+
+    #[test]
+    fn the_spinner_says_when_it_is_summarizing() {
+        let s = Duration::from_secs;
+        assert_eq!(
+            spinner_text(None, None, s(3)),
+            "waiting for the model… (3s)"
+        );
+        assert_eq!(
+            spinner_text(Some((800, 0, 200)), None, s(3)),
+            "reading the prompt: 25% of 800 tokens (3s)"
+        );
+        // A summary has its own timer, and says how to stop it.
+        assert_eq!(
+            spinner_text(None, Some((s(12), 100_352)), s(90)),
+            "summarizing about 98K tokens (12s) · Esc stops"
+        );
+        assert_eq!(
+            spinner_text(Some((6000, 0, 3000)), Some((s(4), 100_352)), s(90)),
+            "summarizing about 98K tokens · reading the prompt: 50% of 5.9K tokens (4s) · Esc stops"
+        );
     }
 
     #[test]

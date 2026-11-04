@@ -108,7 +108,7 @@ impl Fx {
             n_ctx: 32_768,
             enable_thinking: None,
             budgets: Budgets::default(),
-            system_prompt: "sys".into(),
+            system_prompt: "sys\nTools: read\nmore".into(),
             tools: core_tools(false),
             home: Some(home),
         };
@@ -168,6 +168,14 @@ async fn read_only_tools_run_and_others_ask() {
         .collect();
     assert_eq!(declared.len(), 2);
     assert_eq!(declared[0]["function"]["name"], "mcp__gh__search");
+    // The prompt's tool line names them too, not only the core tools.
+    let system = reqs[0]["messages"][0]["content"].as_str().unwrap();
+    assert!(
+        system.contains(
+            "\nTools: read, write, edit, bash; from MCP servers: mcp__gh__search, mcp__gh__close\nmore"
+        ),
+        "{system}"
+    );
     assert_eq!(
         declared[0]["function"]["parameters"]["properties"]["labels"],
         json!({"type": "array", "items": {"type": "string"}})

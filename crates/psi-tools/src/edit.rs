@@ -138,6 +138,32 @@ pub(crate) fn run(args: &Map<String, Value>, ctx: &ToolCtx) -> ToolOutput {
     ToolOutput::ok(msg)
 }
 
+/// Why a multi-edit changed nothing: each entry that didn't match, and,
+/// when others did, that they can be sent again without it. In the cog
+/// trial a bare "edits[11] ... Nothing was changed" made the model drop the
+/// whole batch ("the first 11 edits didn't apply") and edit one at a time.
+fn failed_edits(failed: &[(usize, String)], matched: usize) -> String {
+    let mut out: Vec<String> = failed
+        .iter()
+        .map(|(i, e)| format!("edits[{i}]: {e}"))
+        .collect();
+    if matched == 0 {
+        out.push("Nothing was changed.".into());
+    } else {
+        let names: Vec<String> = failed.iter().map(|(i, _)| format!("edits[{i}]")).collect();
+        let (others, them) = if matched == 1 {
+            ("The other edit".to_owned(), "it")
+        } else {
+            (format!("The other {matched} edits"), "them")
+        };
+        out.push(format!(
+            "{others} matched, but nothing was changed. Send {them} again with {} fixed or left out.",
+            names.join(" and ")
+        ));
+    }
+    out.join("\n")
+}
+
 /// Every replacement matched against `content` as it is, then made
 /// together: none overlap, and none is made unless all match.
 pub(crate) fn apply_all(
@@ -146,15 +172,19 @@ pub(crate) fn apply_all(
 ) -> Result<(String, Vec<Applied>), String> {
     let many = pairs.len() > 1;
     let mut found = Vec::new();
+    let mut failed = Vec::new();
     for (i, (old, new)) in pairs.iter().enumerate() {
         match locate(content, old, new) {
             Ok((mut a, note)) => {
                 a.note = note;
                 found.push((i, a));
             }
-            Err(e) if many => return Err(format!("edits[{i}]: {e} Nothing was changed.")),
+            Err(e) if many => failed.push((i, e)),
             Err(e) => return Err(e),
         }
+    }
+    if !failed.is_empty() {
+        return Err(failed_edits(&failed, found.len()));
     }
     let mut order: Vec<usize> = (0..found.len()).collect();
     order.sort_by_key(|&k| found[k].1.start);
@@ -535,7 +565,25 @@ mod tests {
         );
         let e = apply_all(content, &[("a = 1", "x"), ("zzz qqq", "y")]).unwrap_err();
         assert!(e.starts_with("edits[1]: old_text was not found"), "{e}");
-        assert!(e.ends_with("Nothing was changed."), "{e}");
+        assert!(
+            e.ends_with(
+                "\nThe other edit matched, but nothing was changed. Send it again with edits[1] fixed or left out."
+            ),
+            "{e}"
+        );
+        // Every miss is named; with none matched, nothing more to say.
+        let pairs = [("a = 1", "x"), ("zzz", "y"), ("c = 3", "z"), ("qqq", "w")];
+        let e = apply_all(content, &pairs).unwrap_err();
+        assert!(
+            e.contains("edits[1]: ") && e.contains("\nedits[3]: "),
+            "{e}"
+        );
+        assert!(
+            e.ends_with("The other 2 edits matched, but nothing was changed. Send them again with edits[1] and edits[3] fixed or left out."),
+            "{e}"
+        );
+        let e = apply_all(content, &[("zzz", "y"), ("qqq", "w")]).unwrap_err();
+        assert!(e.ends_with("\nNothing was changed."), "{e}");
         // Trailing whitespace still matches, per edit.
         let (t, applied) = apply_all(
             "x = 1  \ny = 2\n",

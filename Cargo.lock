@@ -1576,6 +1576,7 @@ dependencies = [
  "globset",
  "ignore",
  "mlua",
+ "psi-safety",
  "regex",
  "serde",
  "serde_json",

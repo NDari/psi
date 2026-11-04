@@ -143,10 +143,7 @@ impl Worker {
                 },
                 Cmd::Compact(focus) => {
                     let focus = (!focus.is_empty()).then_some(focus.as_str());
-                    match self.agent.compact_now(focus).await {
-                        Ok(m) => UiMsg::Info(m),
-                        Err(e) => UiMsg::Error(e),
-                    }
+                    UiMsg::Compacted(self.agent.compact_now(focus).await)
                 }
                 Cmd::Entries => UiMsg::Entries {
                     entries: self.agent.session().entries().to_vec(),

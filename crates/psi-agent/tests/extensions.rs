@@ -174,7 +174,7 @@ async fn extension_tools_gates_rewrites_and_results() {
     assert_eq!(
         results[2],
         (
-            "Blocked: the build directory is shared; ask the user".into(),
+            "Blocked by the helper extension (the call did not run): the build directory is shared; ask the user\nDon't work around the block; if it seems wrong, tell the user.".into(),
             true
         )
     );

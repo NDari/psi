@@ -1466,7 +1466,10 @@ async fn plan_mode_off_says_so_once() {
 #[tokio::test]
 async fn compact_by_hand_puts_back_the_harness_state() {
     let f = Fixture::new(vec![text(SUMMARY), text("done")]);
-    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut a = f
+        .agent_sized(Budgets::default(), core_tools(false), 16_384, 7372)
+        .with_events(tx);
     prefill(&mut a, 30);
     let s = a.session_mut();
     s.append(EntryBody::Message {
@@ -1501,6 +1504,17 @@ async fn compact_by_hand_puts_back_the_harness_state() {
     prefill(&mut a, 25);
     let msg = a.compact_now(Some("the parser")).await.unwrap();
     assert!(msg.starts_with("compacted: about"), "{msg}");
+    // The TUI's spinner starts and ends with these two.
+    let mut seen = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        match ev {
+            AgentEvent::Compacting { .. } => seen.push("compacting"),
+            AgentEvent::Compacted { done: true } => seen.push("done"),
+            AgentEvent::Compacted { done: false } => seen.push("not done"),
+            _ => {}
+        }
+    }
+    assert_eq!(seen, ["compacting", "done"]);
     // No request yet in this process, so the summary is a plain request.
     let reqs = f.server.chat_requests();
     let body = reqs[0]["messages"][1]["content"].as_str().unwrap();

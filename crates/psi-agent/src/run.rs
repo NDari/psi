@@ -30,6 +30,7 @@ use crate::guards::{GuardAction, Guards};
 use crate::messages::{build_messages, plan_drop};
 use crate::plan::{self, PlanState};
 use crate::post_edit::{self, PostEditCheck};
+use crate::prompt;
 use crate::subagent::{self, AgentDef};
 use psi_ext::{AgentRequest, ExtManager, Gate, ToolInfo};
 use psi_mcp::{McpManager, McpTool};
@@ -202,6 +203,8 @@ pub struct Agent {
     /// The context size when summarizing last failed: no new try until it
     /// grows by a tenth of the window.
     compact_failed_at: Option<u64>,
+    /// `Compacting` was sent and its `Compacted` not yet.
+    compacting: bool,
     /// MCP servers (§10.2), and their tools as taken at the start of the
     /// run: the list never changes inside a run (D-42).
     mcp: Arc<McpManager>,
@@ -218,6 +221,41 @@ pub struct Agent {
 /// A call after the shape-fix pipeline: the tool and its arguments, or the
 /// refusal sent back instead.
 type Planned = Result<(Callable, serde_json::Map<String, Value>), String>;
+
+/// A call an extension's gate refused. It names the extension and says
+/// the call didn't run: in the cog trial a model took "Blocked: Do not edit
+/// docs/words.md ..." for the output of its `grep` and edited code to match,
+/// and earlier one got past the same gate on purpose.
+fn blocked_by_extension(by: &str, reason: &str) -> String {
+    format!(
+        "Blocked by the {by} extension (the call did not run): {reason}\nDon't work around the block; if it seems wrong, tell the user."
+    )
+}
+
+/// What a write into an extensions folder needs before it counts: the
+/// model built and fixed an extension in the cog trial and never said that
+/// it loads only on `/reload`.
+const RELOAD_NOTE: &str = "Extensions load on /reload; tell the user to run it.";
+
+/// Adds [`RELOAD_NOTE`] to each write or edit that changed a file in a
+/// `.psi/extensions` folder (the project's or `~/.psi`'s).
+fn reload_notes(planned: &[(RawToolCall, Planned)], outputs: &mut [ToolOutput]) {
+    for ((_, p), o) in planned.iter().zip(outputs.iter_mut()) {
+        let Ok((Callable::Core(Tool::Write | Tool::Edit), args)) = p else {
+            continue;
+        };
+        let path = args.get("path").and_then(Value::as_str).unwrap_or("");
+        let in_ext = Path::new(path)
+            .components()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|w| w[0].as_os_str() == ".psi" && w[1].as_os_str() == "extensions");
+        if in_ext && !o.is_error {
+            o.text.push_str("\n\n");
+            o.text.push_str(RELOAD_NOTE);
+        }
+    }
+}
 
 /// A call's identity for the guards: the tool and its arguments, without
 /// the free-text intent.
@@ -278,6 +316,7 @@ impl Agent {
             reads_only: false,
             last_request: None,
             compact_failed_at: None,
+            compacting: false,
             mcp: McpManager::empty(),
             mcp_tools: Vec::new(),
             mcp_waited: false,
@@ -363,20 +402,37 @@ impl Agent {
     /// The tools offered to the model, core first. Plan mode leaves out
     /// write and edit (pi parity).
     fn tool_names(&self) -> Vec<String> {
+        let [own, ext, mcp] = self.tool_groups();
+        [own, ext, mcp].concat()
+    }
+
+    /// The offered tools by where they come from: Psi's own (with `agent`),
+    /// extensions', MCP servers'.
+    fn tool_groups(&self) -> [Vec<String>; 3] {
         let planning = self.plan.enabled;
-        let all = self
+        let keep = |n: &String| self.active.as_ref().is_none_or(|a| a.contains(n));
+        let own = self
             .cfg
             .tools
             .iter()
             .filter(|t| !(planning && matches!(t, Tool::Write | Tool::Edit)))
             .map(|t| t.name().to_owned())
-            .chain(self.ext_tools.iter().map(|(t, _)| t.name.clone()))
             .chain(self.offers_agents().then(|| subagent::TOOL.to_owned()))
-            .chain(self.mcp_tools.iter().map(|t| t.name.clone()));
-        match &self.active {
-            Some(a) => all.filter(|n| a.contains(n)).collect(),
-            None => all.collect(),
-        }
+            .filter(keep)
+            .collect();
+        let ext = self
+            .ext_tools
+            .iter()
+            .map(|(t, _)| t.name.clone())
+            .filter(keep)
+            .collect();
+        let mcp = self
+            .mcp_tools
+            .iter()
+            .map(|t| t.name.clone())
+            .filter(keep)
+            .collect();
+        [own, ext, mcp]
     }
 
     /// Every schema the shape fixes may resolve to, offered or not.
@@ -876,14 +932,14 @@ impl Agent {
             }
             if out.turns >= turn_limit {
                 let reason = format!("reached the limit of {turn_limit} model requests in one run");
-                if let Some(stop) = self.budget_reached(reason).await {
+                if let Some(stop) = self.budget_reached(reason).await? {
                     return Ok(stop);
                 }
                 turn_limit = turn_limit.saturating_add(b.max_turns);
             }
             if out.tool_calls >= call_limit {
                 let reason = format!("reached the limit of {call_limit} tool calls in one run");
-                if let Some(stop) = self.budget_reached(reason).await {
+                if let Some(stop) = self.budget_reached(reason).await? {
                     return Ok(stop);
                 }
                 call_limit = call_limit.saturating_add(b.max_tool_calls);
@@ -910,7 +966,7 @@ impl Agent {
                     message: format!("paused: {reason}"),
                     tool_call_id: None,
                 })?;
-                if let Some(stop) = self.pause_run(reason).await {
+                if let Some(stop) = self.pause_run(reason).await? {
                     return Ok(stop);
                 }
                 guards.reset();
@@ -1046,7 +1102,7 @@ impl Agent {
                 return Ok(Stop::Aborted);
             }
             if let Some(reason) = pause {
-                if let Some(stop) = self.pause_run(reason).await {
+                if let Some(stop) = self.pause_run(reason).await? {
                     return Ok(stop);
                 }
                 guards.reset();
@@ -1059,31 +1115,50 @@ impl Agent {
 
     /// A budget ran out: headless runs stop; in the TUI the run pauses and
     /// asks (§5), and going on gives it as much again.
-    async fn budget_reached(&self, reason: String) -> Option<Stop> {
+    async fn budget_reached(&mut self, reason: String) -> Result<Option<Stop>, String> {
         if !self.safety.approver.interactive() {
-            return Some(Stop::Budget(reason));
+            return Ok(Some(Stop::Budget(reason)));
         }
-        match self.pause_run(reason.clone()).await {
+        Ok(match self.pause_run(reason.clone()).await? {
             None => None,
             Some(Stop::Aborted) => Some(Stop::Aborted),
             Some(_) => Some(Stop::Budget(reason)),
-        }
+        })
     }
 
-    /// Asks whether to go on after a guard's pause; the stop when not.
-    async fn pause_run(&self, reason: String) -> Option<Stop> {
-        let go_on = tokio::select! {
-            g = self.safety.approver.pause(reason.clone()) => g,
-            () = self.ctx.cancel.cancelled() => return Some(Stop::Aborted),
+    /// Asks whether to go on after a guard's pause or a budget; the stop
+    /// when not. Each pause is recorded with how long it waited for the
+    /// user, so a review can tell waiting from working (the cog trial's
+    /// worker paused six times, and only gaps in the timestamps showed it).
+    async fn pause_run(&mut self, reason: String) -> Result<Option<Stop>, String> {
+        let started = Instant::now();
+        let stop = tokio::select! {
+            g = self.safety.approver.pause(reason.clone()) => (!g).then(|| Stop::Guard(reason.clone())),
+            () = self.ctx.cancel.cancelled() => Some(Stop::Aborted),
         };
-        (!go_on).then_some(Stop::Guard(reason))
+        let answer = match &stop {
+            None => "go on",
+            Some(Stop::Aborted) => "aborted",
+            Some(_) => "stop",
+        };
+        self.record(EntryBody::Custom {
+            custom_type: "pause".into(),
+            data: json!({"reason": reason, "answer": answer,
+                         "waited_ms": started.elapsed().as_millis() as u64}),
+        })?;
+        Ok(stop)
     }
 
     fn system_prompt(&self) -> String {
+        let [own, ext, mcp] = self.tool_groups();
+        let base = prompt::with_tools_line(
+            &self.cfg.system_prompt,
+            &prompt::tools_line(&own, &ext, &mcp),
+        );
         if self.run_system.is_empty() {
-            self.cfg.system_prompt.clone()
+            base
         } else {
-            format!("{}\n\n{}", self.cfg.system_prompt, self.run_system)
+            format!("{base}\n\n{}", self.run_system)
         }
     }
 
@@ -1346,9 +1421,9 @@ impl Agent {
                 let ev =
                     json!({"id": call.id, "name": c.name(), "args": Value::Object(args.clone())});
                 match self.ext_gate("tool_call", ev).await {
-                    Gate::Block(reason) => {
+                    Gate::Block { by, reason } => {
                         self.policy(&call.id, "blocked_by_extension", &reason)?;
-                        *p = Err(format!("Blocked: {reason}"));
+                        *p = Err(blocked_by_extension(&by, &reason));
                     }
                     Gate::Allow(ev) => {
                         if let Some(Value::Object(new)) = ev.get("args")
@@ -1477,6 +1552,7 @@ impl Agent {
             })?;
         }
         self.post_edit_check(&planned, &mut outputs).await?;
+        reload_notes(&planned, &mut outputs);
 
         for ((call, p), o) in planned.iter().zip(outputs) {
             let name = match p {
@@ -1829,7 +1905,7 @@ impl Agent {
     /// Context overflow (§4.2): drop the oldest turns so the request fits,
     /// and record it.
     async fn drop_old_turns(&mut self, n_prompt: u64, n_ctx: u64) -> Result<(), String> {
-        if let Gate::Block(why) = self
+        if let Gate::Block { reason: why, .. } = self
             .ext
             .gate(
                 "session_before_compact",

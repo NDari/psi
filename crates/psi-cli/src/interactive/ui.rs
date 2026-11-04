@@ -53,6 +53,8 @@ pub enum UiMsg {
     },
     Info(String),
     Error(String),
+    /// The reply to /compact.
+    Compacted(Result<String, String>),
     /// The `input` event's answer: the text to send on, or None when a
     /// handler consumed it.
     Input {
@@ -163,7 +165,36 @@ struct Running {
     tools: Vec<(String, String, Value, Instant)>,
     /// The server reading the prompt: (total, cache, processed) tokens.
     progress: Option<(u64, u64, u64)>,
+    /// A summary being written: when it started and the tokens it covers.
+    compacting: Option<(Instant, u64)>,
+    /// Started by /compact, not a prompt: its reply ends it.
+    compact_only: bool,
 }
+
+impl Running {
+    fn new(compact_only: bool) -> Self {
+        Self {
+            started: Instant::now(),
+            tools: Vec::new(),
+            progress: None,
+            compacting: None,
+            compact_only,
+        }
+    }
+}
+
+/// The selected answer on the card showing. Cards used to take single
+/// letters, and a key typed into the prompt as a card appeared answered it
+/// (a pause was answered "stop" 22 ms after it showed in the cog trial,
+/// 2026-11-04). Now ↑↓ move, Enter confirms, Esc gives the safe answer, and
+/// keys are ignored for a moment after a card appears.
+struct Ask {
+    sel: usize,
+    shown: Instant,
+}
+
+/// How long a new card ignores keys.
+const ASK_SETTLE: Duration = Duration::from_millis(400);
 
 struct Card {
     req: ApprovalRequest,
@@ -250,6 +281,7 @@ pub struct App<W: Write> {
     /// The process group of a `!cmd` still running.
     user_bash: Option<u32>,
     card: Option<Card>,
+    ask: Ask,
     blocked: Option<(BlockedRequest, oneshot::Sender<BlockedChoice>)>,
     pause: Option<(String, oneshot::Sender<bool>)>,
     trust: Option<(String, oneshot::Sender<bool>)>,
@@ -343,6 +375,10 @@ impl<W: Write> App<W> {
             running: None,
             user_bash: None,
             card: None,
+            ask: Ask {
+                sel: 0,
+                shown: Instant::now(),
+            },
             blocked: None,
             pause: None,
             trust: None,
@@ -551,8 +587,51 @@ impl<W: Write> App<W> {
     }
 
     fn on_key(&mut self, k: KeyEvent) {
+        // Cards in the order they are drawn: the one on screen takes the keys.
         if self.card.is_some() {
             return self.card_key(k);
+        }
+        if self.blocked.is_some() {
+            if let Some(i) = self.ask_key(&k)
+                && let Some((req, tx)) = self.blocked.take()
+            {
+                let c = match i {
+                    0 => BlockedChoice::RerunOutside,
+                    1 => BlockedChoice::AddDir,
+                    _ => BlockedChoice::No,
+                };
+                let _ = tx.send(c);
+                let what = match c {
+                    BlockedChoice::RerunOutside => {
+                        "rerunning it once outside the sandbox".to_owned()
+                    }
+                    BlockedChoice::AddDir => {
+                        format!("{} is writable for this session", req.dir.display())
+                    }
+                    BlockedChoice::No => "left blocked".to_owned(),
+                };
+                self.info(&format!("  {what}"));
+                self.reset_ask();
+            }
+            return;
+        }
+        if self.pause.is_some() {
+            if let Some(i) = self.ask_key(&k)
+                && let Some((_, tx)) = self.pause.take()
+            {
+                let _ = tx.send(i == 0);
+                self.reset_ask();
+            }
+            return;
+        }
+        if self.trust.is_some() {
+            if let Some(i) = self.ask_key(&k)
+                && let Some((_, tx)) = self.trust.take()
+            {
+                let _ = tx.send(i == 0);
+                self.reset_ask();
+            }
+            return;
         }
         if self.ext_modal.is_some() {
             return self.modal_key(k);
@@ -566,51 +645,6 @@ impl<W: Write> App<W> {
                     let _ = tx.send(UiMsg::Error(e));
                 }
             });
-            return;
-        }
-        if let Some((req, _)) = &self.blocked {
-            let choice = match k.code {
-                KeyCode::Char('r') => Some(BlockedChoice::RerunOutside),
-                KeyCode::Char('a') => Some(BlockedChoice::AddDir),
-                KeyCode::Char('n') | KeyCode::Esc => Some(BlockedChoice::No),
-                _ => None,
-            };
-            if let Some(c) = choice {
-                let dir = req.dir.display().to_string();
-                if let Some((_, tx)) = self.blocked.take() {
-                    let _ = tx.send(c);
-                }
-                let what = match c {
-                    BlockedChoice::RerunOutside => {
-                        "rerunning it once outside the sandbox".to_owned()
-                    }
-                    BlockedChoice::AddDir => format!("{dir} is writable for this session"),
-                    BlockedChoice::No => "left blocked".to_owned(),
-                };
-                self.info(&format!("  {what}"));
-            }
-            return;
-        }
-        if self.trust.is_some() {
-            let yes = match k.code {
-                KeyCode::Char('y') => Some(true),
-                KeyCode::Char('n') | KeyCode::Esc => Some(false),
-                _ => None,
-            };
-            if let (Some(yes), Some((_, tx))) = (yes, self.trust.take()) {
-                let _ = tx.send(yes);
-            }
-            return;
-        }
-        if self.pause.is_some() {
-            let go = match k.code {
-                KeyCode::Char('c') | KeyCode::Enter => Some(true),
-                KeyCode::Char('s') | KeyCode::Esc => Some(false),
-                _ => None,
-            };
-            if let (Some(go), Some((_, tx))) = (go, self.pause.take()) {
-                let _ = tx.send(go);
-            }
             return;
         }
         if self.picker.is_some() {
@@ -846,15 +880,17 @@ impl<W: Write> App<W> {
             }
             return;
         }
-        let answer = match k.code {
-            KeyCode::Char('y') => Some(Approval::Once),
-            KeyCode::Char('s') => Some(Approval::Session),
-            KeyCode::Char('n') | KeyCode::Esc => Some(Approval::Deny),
-            KeyCode::Char('e') => {
-                card.typing = Some(String::new());
+        let answer = match self.ask_key(&k) {
+            Some(0) => Some(Approval::Once),
+            Some(1) => Some(Approval::Session),
+            Some(3) => {
+                if let Some(card) = &mut self.card {
+                    card.typing = Some(String::new());
+                }
                 None
             }
-            _ => None,
+            Some(_) => Some(Approval::Deny),
+            None => None,
         };
         if let Some(a) = answer
             && let Some(c) = self.card.take()
@@ -866,7 +902,72 @@ impl<W: Write> App<W> {
             };
             let _ = c.tx.send(a);
             self.info(&format!("  {what}"));
+            self.reset_ask();
         }
+    }
+
+    /// The answers of the card on screen and its safe one, in the order
+    /// cards are drawn; None when no card takes a choice.
+    fn card_choices(&self) -> Option<(Vec<String>, usize)> {
+        let own = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        if let Some(c) = &self.card {
+            return c
+                .typing
+                .is_none()
+                .then(|| (own(&view::APPROVAL_CHOICES), view::APPROVAL_SAFE));
+        }
+        if let Some((req, _)) = &self.blocked {
+            let add = format!(
+                "Make {} writable for this session and rerun",
+                req.dir.display()
+            );
+            return Some((
+                vec![
+                    "Rerun it once outside the sandbox".into(),
+                    add,
+                    "No, leave it blocked".into(),
+                ],
+                2,
+            ));
+        }
+        if self.pause.is_some() {
+            return Some((own(&["Continue", "Stop the run"]), 1));
+        }
+        if self.trust.is_some() {
+            return Some((own(&["Load it", "Don't reload"]), 1));
+        }
+        if let Some(ExtModal::Confirm { .. }) = &self.ext_modal {
+            return Some((own(&["Yes", "No"]), 1));
+        }
+        None
+    }
+
+    /// A new card is on screen (or the next one after an answer): start on
+    /// its safe answer, and wait a moment before taking keys.
+    fn reset_ask(&mut self) {
+        if let Some((_, safe)) = self.card_choices() {
+            self.ask = Ask {
+                sel: safe,
+                shown: Instant::now(),
+            };
+        }
+    }
+
+    /// A key on the card on screen: the answer picked, if one was.
+    fn ask_key(&mut self, k: &KeyEvent) -> Option<usize> {
+        let (items, safe) = self.card_choices()?;
+        if self.ask.shown.elapsed() < ASK_SETTLE {
+            return None;
+        }
+        let n = items.len();
+        match k.code {
+            KeyCode::Up => self.ask.sel = self.ask.sel.saturating_sub(1),
+            KeyCode::Down => self.ask.sel = (self.ask.sel + 1).min(n.saturating_sub(1)),
+            KeyCode::Enter => return Some(self.ask.sel.min(n.saturating_sub(1))),
+            KeyCode::Esc => return Some(safe),
+            _ => {}
+        }
+        None
     }
 
     fn picker_key(&mut self, k: KeyEvent) {
@@ -916,11 +1017,7 @@ impl<W: Write> App<W> {
                 Some(Picker::Plan { sel }) => match sel {
                     0 => {
                         self.commit_user("Carry out the plan");
-                        self.running = Some(Running {
-                            started: Instant::now(),
-                            tools: Vec::new(),
-                            progress: None,
-                        });
+                        self.running = Some(Running::new(false));
                         self.send(Cmd::ExecutePlan);
                     }
                     1 => self.info("  still in plan mode"),
@@ -1053,14 +1150,11 @@ impl<W: Write> App<W> {
         let Some(m) = &mut self.ext_modal else { return };
         match m {
             ExtModal::Confirm { .. } => {
-                let yes = match k.code {
-                    KeyCode::Char('y') | KeyCode::Enter => true,
-                    KeyCode::Char('n') | KeyCode::Esc => false,
-                    _ => return,
-                };
+                let Some(i) = self.ask_key(&k) else { return };
                 if let Some(ExtModal::Confirm { reply, .. }) = self.ext_modal.take() {
-                    let _ = reply.send(yes);
+                    let _ = reply.send(i == 0);
                 }
+                self.reset_ask();
             }
             ExtModal::Input { text, .. } => match k.code {
                 KeyCode::Enter | KeyCode::Esc => {
@@ -1198,11 +1292,7 @@ impl<W: Write> App<W> {
             return self.error(&msg);
         }
         self.commit_user(&t);
-        self.running = Some(Running {
-            started: Instant::now(),
-            tools: Vec::new(),
-            progress: None,
-        });
+        self.running = Some(Running::new(false));
         self.send(Cmd::Prompt(t));
     }
 
@@ -1288,7 +1378,7 @@ impl<W: Write> App<W> {
         let busy = self.running.is_some();
         let needs_idle = matches!(
             name,
-            "undo" | "rewind" | "tree" | "new" | "resume" | "mode" | "label" | "plan"
+            "undo" | "rewind" | "tree" | "new" | "resume" | "mode" | "label" | "plan" | "compact"
         );
         if busy && needs_idle {
             return self.error(&format!("/{name} waits until the run ends (Esc aborts it)"));
@@ -1332,7 +1422,11 @@ impl<W: Write> App<W> {
             }
             "quit" | "exit" | "q" => self.quit = true,
             "undo" => self.send(Cmd::Undo),
-            "compact" => self.send(Cmd::Compact(arg.to_owned())),
+            "compact" => {
+                // A run of its own, so the spinner shows and Esc stops it.
+                self.running = Some(Running::new(true));
+                self.send(Cmd::Compact(arg.to_owned()));
+            }
             "diff" => self.send(Cmd::Diff),
             "copy" => self.copy(arg),
             "mcp" => self.send(Cmd::Mcp),
@@ -1476,21 +1570,25 @@ impl<W: Write> App<W> {
                     tx,
                     typing: None,
                 });
+                self.reset_ask();
                 self.bell("an approval is waiting");
             }
             UiMsg::Blocked(req, tx) => {
                 self.flush_text();
                 self.blocked = Some((req, tx));
+                self.reset_ask();
                 self.bell("a blocked command is waiting for your choice");
             }
             UiMsg::Pause(reason, tx) => {
                 self.flush_text();
                 self.pause = Some((reason, tx));
+                self.reset_ask();
                 self.bell("paused: waiting for you");
             }
             UiMsg::Trust(what, tx) => {
                 self.flush_text();
                 self.trust = Some((what, tx));
+                self.reset_ask();
                 self.bell("/reload is waiting for you");
             }
             UiMsg::Connected {
@@ -1537,6 +1635,15 @@ impl<W: Write> App<W> {
                 self.bell(&what);
             }
             UiMsg::Info(s) => self.info(&format!("  {s}")),
+            UiMsg::Compacted(r) => {
+                if self.running.as_ref().is_some_and(|r| r.compact_only) {
+                    self.running = None;
+                }
+                match r {
+                    Ok(s) => self.info(&format!("  {s}")),
+                    Err(e) => self.error(&e),
+                }
+            }
             UiMsg::Error(s) => self.error(&format!("  {s}")),
             UiMsg::Input { text, follow_up } => {
                 if let Some(t) = text {
@@ -1639,6 +1746,7 @@ impl<W: Write> App<W> {
                     message,
                     reply,
                 });
+                self.reset_ask();
                 self.bell(&asking);
             }
             ExtRequest::Input { title, reply, .. } => {
@@ -1949,10 +2057,24 @@ impl<W: Write> App<W> {
             }
             AgentEvent::Compacting { tokens } => {
                 self.flush_text();
-                self.commit(vec![Line::styled(
-                    format!("  summarizing the earlier conversation (about {tokens} tokens)..."),
-                    dim(),
-                )]);
+                if let Some(r) = &mut self.running {
+                    r.compacting = Some((Instant::now(), tokens));
+                }
+            }
+            AgentEvent::Compacted { done } => {
+                let Some(r) = &mut self.running else { return };
+                let Some((started, tokens)) = r.compacting.take() else {
+                    return;
+                };
+                // /compact says how it went in its reply.
+                if done && !r.compact_only {
+                    let line = format!(
+                        "  summarized the earlier conversation (about {} tokens) in {:.0}s",
+                        view::short_tokens(tokens),
+                        started.elapsed().as_secs_f64()
+                    );
+                    self.commit(vec![Line::styled(line, dim())]);
+                }
             }
             AgentEvent::Retrying { reason } => {
                 // Unfinished text of the failed attempt goes; the retry
@@ -2184,13 +2306,16 @@ impl<W: Write> App<W> {
             if r.tools.is_empty() && pending.is_empty() && self.card.is_none() {
                 let spin = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
                 let i = (r.started.elapsed().as_millis() / 80) as usize % spin.len();
-                let secs = r.started.elapsed().as_secs_f64();
-                let what = match r.progress {
-                    Some(p) => view::prompt_progress(p),
-                    None => "waiting for the model…".into(),
-                };
                 live.push(Line::styled(
-                    format!("{} {what} ({secs:.0}s)", spin[i]),
+                    format!(
+                        "{} {}",
+                        spin[i],
+                        view::spinner_text(
+                            r.progress,
+                            r.compacting.map(|(t, n)| (t.elapsed(), n)),
+                            r.started.elapsed()
+                        )
+                    ),
                     dim(),
                 ));
             }
@@ -2218,8 +2343,10 @@ impl<W: Write> App<W> {
         live.extend(rows);
         live.push(border);
         let mut cursor = Some((top + cr, cc));
+        // The answers of whichever card is drawn below (the same order).
+        let (choices, sel) = (self.card_choices(), self.ask.sel);
         if let Some(c) = &self.card {
-            live.extend(approval_card(&c.req, c.typing.as_deref(), w));
+            live.extend(approval_card(&c.req, c.typing.as_deref(), self.ask.sel, w));
             cursor = None;
         } else if let Some((req, _)) = &self.blocked {
             let y = theme::style(Token::Warning);
@@ -2234,12 +2361,16 @@ impl<W: Write> App<W> {
                 format!("│ {}", view::cut(&req.command, w.saturating_sub(4))),
                 Style::default().bold(),
             ));
-            live.push(Line::styled(format!("└ r rerun once outside the sandbox · a make {} writable for the session and rerun · n leave it", req.dir.display()), y));
+            if let Some((items, safe)) = self.card_choices() {
+                live.extend(view::choices(&items, self.ask.sel, safe, y));
+            }
             cursor = None;
         } else if let Some((reason, _)) = &self.pause {
             let y = theme::style(Token::Warning);
             live.push(Line::styled(format!("┌ paused: {reason}"), y));
-            live.push(Line::styled("└ c continue · s stop the run", y));
+            if let Some((items, safe)) = self.card_choices() {
+                live.extend(view::choices(&items, self.ask.sel, safe, y));
+            }
             cursor = None;
         } else if let Some((what, _)) = &self.trust {
             let y = theme::style(Token::Warning);
@@ -2248,7 +2379,9 @@ impl<W: Write> App<W> {
                 "│ new or changed since you last trusted it",
                 Style::default(),
             ));
-            live.push(Line::styled("└ y load it · n don't reload", y));
+            if let Some((items, safe)) = self.card_choices() {
+                live.extend(view::choices(&items, self.ask.sel, safe, y));
+            }
             cursor = None;
         } else if let Some(m) = &mut self.ext_modal {
             let y = theme::style(Token::Warning);
@@ -2263,7 +2396,9 @@ impl<W: Write> App<W> {
                     for l in message.lines().take(6) {
                         live.push(Line::styled(format!("│ {l}"), Style::default()));
                     }
-                    live.push(Line::styled("└ y yes · n no", y));
+                    if let Some((items, safe)) = choices {
+                        live.extend(view::choices(&items, sel, safe, y));
+                    }
                 }
                 ExtModal::Input {
                     ext, title, text, ..

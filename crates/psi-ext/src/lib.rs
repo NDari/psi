@@ -56,7 +56,8 @@ pub enum AgentRequest {
 pub enum Gate {
     /// Go on, with the payload as the handlers left it (rewritten args).
     Allow(Json),
-    Block(String),
+    /// Stopped by the extension `by`, with its reason.
+    Block { by: String, reason: String },
 }
 
 pub struct ExtManager {
@@ -292,6 +293,7 @@ impl ExtManager {
         let mut out = EventOut {
             payload,
             results: Vec::new(),
+            blocked_by: None,
         };
         for a in self.actors() {
             if !a.regs.events.iter().any(|e| e == event) {
@@ -317,6 +319,7 @@ impl ExtManager {
                     let block = o.results.iter().any(|r| r["block"] == Json::Bool(true));
                     out.results.extend(o.results);
                     if kind == Kind::Gate && block {
+                        out.blocked_by = Some(a.name.clone());
                         return Ok(out);
                     }
                 }
@@ -367,17 +370,19 @@ impl ExtManager {
         }
         match self.emit(event, payload).await {
             Ok(o) => match o.results.iter().find(|r| r["block"] == Json::Bool(true)) {
-                Some(r) => Gate::Block(
-                    r["reason"]
+                Some(r) => Gate::Block {
+                    by: o.blocked_by.clone().unwrap_or_default(),
+                    reason: r["reason"]
                         .as_str()
                         .map(str::to_owned)
                         .unwrap_or_else(|| "an extension blocked it".into()),
-                ),
+                },
                 None => Gate::Allow(o.payload),
             },
-            Err((ext, e)) => Gate::Block(format!(
-                "the {ext} extension failed while checking it ({e})"
-            )),
+            Err((ext, e)) => Gate::Block {
+                reason: format!("the {ext} extension failed while checking it ({e})"),
+                by: ext,
+            },
         }
     }
 

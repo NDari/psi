@@ -34,6 +34,8 @@ pub struct EventOut {
     pub payload: Json,
     /// What each handler returned (non-nil only).
     pub results: Vec<Json>,
+    /// The extension whose gate handler blocked, if one did.
+    pub blocked_by: Option<String>,
 }
 
 pub enum Msg {
@@ -364,7 +366,11 @@ pub async fn handle<B: Backend>(s: &State<B>, msg: Msg) {
                     }
                 }
             }
-            let _ = reply.send(Ok(EventOut { payload, results }));
+            let _ = reply.send(Ok(EventOut {
+                payload,
+                results,
+                blocked_by: None,
+            }));
         }
         Msg::Tool { name, args, reply } => {
             let f = s.host.reg.borrow().tools.get(&name).map(|(_, f)| f.clone());

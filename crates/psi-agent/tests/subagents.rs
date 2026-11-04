@@ -79,6 +79,10 @@ impl Fx {
 
     /// An agent with sub-agents on, and checkpoints when `cp`.
     fn agent(&self, cp: bool) -> Agent {
+        self.agent_with(cp, Budgets::default())
+    }
+
+    fn agent_with(&self, cp: bool, budgets: Budgets) -> Agent {
         let session = SessionFile::create(&self.sessions, &self.root).unwrap();
         let tmpdir = self.home.join(".cache/psi/tmp/s");
         let checkpoints = cp.then(|| {
@@ -105,7 +109,7 @@ impl Fx {
             max_output: 512,
             n_ctx: 32_768,
             enable_thinking: None,
-            budgets: Budgets::default(),
+            budgets,
             system_prompt: "sys".into(),
             tools: core_tools(false),
             home: Some(self.home.clone()),
@@ -367,4 +371,32 @@ async fn reads_held_back_for_room_point_to_scout() {
         held.ends_with("give the reading to scout with the agent tool."),
         "{held}"
     );
+}
+
+#[tokio::test]
+async fn in_the_tui_a_sub_agent_has_no_request_limit() {
+    // The TUI has no limit for the main run; a sub-agent used to pause at
+    // 100 requests, and worker paused six times in the cog trial waiting on
+    // the user (2026-11-04). It now has the parent's budgets.
+    let mut replies = vec![call(
+        "agent",
+        json!({"agent": "worker", "task": "Run the steps."}),
+    )];
+    for i in 0..110 {
+        replies.push(call("bash", json!({"command": format!("echo {i}")})));
+    }
+    replies.push(text("Ran 110 steps."));
+    replies.push(text("Done."));
+    let fx = Fx::new(replies);
+    let tui = Budgets {
+        max_turns: u32::MAX,
+        max_tool_calls: u32::MAX,
+        ..Budgets::default()
+    };
+    let mut a = fx.agent_with(false, tui);
+    let out = a.run("go").await;
+    assert_eq!(out.stop, Stop::Done, "{:?}", out.stop);
+    let info = subagent_info(&a);
+    assert_eq!(info[0]["turns"], 111, "{info:?}");
+    assert_eq!(info[0]["stop"], "done", "{info:?}");
 }

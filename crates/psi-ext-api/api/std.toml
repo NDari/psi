@@ -16,6 +16,13 @@ params = [
 ]
 returns = "ExecResult"
 
+[[function]]
+name = "bash.writes"
+doc = "Why a bash command may change something, or nil when it only reads: every program in it (through pipes, `&&`, substitutions and `sh -c`) is a known reader such as `cat`, `grep` or `git diff`, and nothing is redirected into a file. Plan mode uses the same check. A `tool_call` gate can block writes to a file and let reads of it through: `if cmd:find(\"docs/words.md\", 1, true) and psi.bash.writes(cmd) then ... end`."
+builtin = true
+params = [{ name = "command", type = "string" }]
+returns = "string?"
+
 # ---- HTTP -------------------------------------------------------------------
 
 [[function]]

@@ -75,9 +75,16 @@ impl Agent {
             max_output: self.cfg.max_output,
             n_ctx: self.cfg.n_ctx,
             enable_thinking: self.cfg.enable_thinking,
-            budgets: Budgets {
-                max_turns: MAX_TURNS,
-                ..self.cfg.budgets.clone()
+            // In the TUI a sub-agent has the parent's budgets (no limit unless
+            // one is set; Esc and the guards still stop it); print runs and
+            // evals keep MAX_TURNS as a backstop.
+            budgets: if self.safety.approver.interactive() {
+                self.cfg.budgets.clone()
+            } else {
+                Budgets {
+                    max_turns: MAX_TURNS,
+                    ..self.cfg.budgets.clone()
+                }
             },
             system_prompt: format!("{}\n\n{SUB_NOTE}\n\n{}", self.cfg.system_prompt, def.prompt),
             tools: def.core_tools(&self.cfg.tools),

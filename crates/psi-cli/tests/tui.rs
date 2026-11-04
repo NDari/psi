@@ -273,6 +273,25 @@ impl Tui {
         self.send(s.as_bytes());
     }
 
+    /// Picks an answer on a card once it takes keys (it ignores them for
+    /// 400 ms after it appears): `moves` steps down (or up when negative)
+    /// from the safe answer it starts on, then Enter.
+    fn answer(&mut self, moves: i32) {
+        std::thread::sleep(Duration::from_millis(450));
+        let key: &[u8] = if moves < 0 { b"\x1b[A" } else { b"\x1b[B" };
+        for _ in 0..moves.unsigned_abs() {
+            self.send(key);
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        self.typ("\r");
+    }
+
+    /// Esc on a card once it takes keys: the safe answer.
+    fn answer_safe(&mut self) {
+        std::thread::sleep(Duration::from_millis(450));
+        self.esc();
+    }
+
     /// Esc on its own: a byte after it too soon reads as Alt+key.
     fn esc(&mut self) {
         self.send(b"\x1b");
@@ -349,15 +368,20 @@ fn the_approval_card_sits_under_the_input_and_keeps_the_draft() {
     t.wait_for("› ", SLOW);
     t.typ("publish it\r");
     t.wait_for("approve bash", SLOW);
-    // A draft typed while the card is up isn't lost: the card takes y/s/n/e,
-    // and the box keeps its text.
     let screen = t.contents();
     let input = screen.find("› ").unwrap();
     let card = screen.find("approve bash").unwrap();
     assert!(card > input, "the card is under the input box:\n{screen}");
     assert!(screen.contains("intent: check the package"), "{screen}");
     assert!(screen.contains("is on the always-ask list"), "{screen}");
-    t.typ("n");
+    // The answers are a list that starts on No. Typing doesn't answer it
+    // (a keystroke meant for the prompt stopped a sub-agent in the cog
+    // trial), nor does an Enter that comes as it appears.
+    assert!(screen.contains("▸ No"), "{screen}");
+    t.typ("yes\r");
+    std::thread::sleep(Duration::from_millis(600));
+    assert!(t.contents().contains("approve bash"), "{}", t.contents());
+    t.answer_safe();
     t.wait_for("denied", SLOW);
     t.wait_for("done", SLOW);
     t.quit();
@@ -666,7 +690,7 @@ fn extension_dialogs_confirm_select_input_and_custom() {
     t.esc();
     t.typ("loy\r");
     t.wait_for("ask-first: Deploy?", SLOW);
-    t.typ("y");
+    t.answer(-1); // Yes
     t.wait_for("Where to?", SLOW);
     t.typ("\r"); // staging
     t.wait_for("A note for the log", SLOW);
@@ -1186,29 +1210,29 @@ fn the_approval_card_allows_once_for_the_session_or_denies_with_a_reason() {
         |_| {},
     );
     t.wait_for("› ", SLOW);
-    // y: this call only.
+    // Yes, once: this call only.
     t.typ("first\r");
     t.wait_for("approve bash", SLOW);
-    t.typ("y");
+    t.answer(-2); // Yes, once
     t.wait_for("allowed once", SLOW);
     t.wait_for("one", SLOW);
-    // s: the rest of the session; the next push runs without a card.
+    // Yes, for this session; the next push runs without a card.
     // (The card is drawn in place and goes when answered.)
     t.typ("second\r");
     t.wait_screen("approve bash", SLOW);
-    t.typ("s");
+    t.answer(-1); // Yes, for this session
     t.wait_for("allowed for this session", SLOW);
     t.wait_for("two", SLOW);
     let all = t.all();
     assert_eq!(all.matches("● bash  git push").count(), 3, "{all}");
     assert_eq!(all.matches("  allowed ").count(), 2, "{all}");
-    // A new session (grants don't carry), then e: denied with a reason the
+    // A new session (grants don't carry), then denied with a reason the
     // model reads.
     t.typ("/new\r");
     t.wait_for("new session", SLOW);
     t.typ("third\r");
     t.wait_screen("approve bash", SLOW);
-    t.typ("e");
+    t.answer(1); // No, and tell the model why
     t.typ("use the staging remote\r");
     t.wait_for("denied: use the staging remote", SLOW);
     t.wait_for("three", SLOW);
@@ -1550,7 +1574,7 @@ fn reload_asks_before_loading_a_changed_project_psi() {
     .unwrap();
     t.typ("/reload\r");
     t.wait_for("changed since you last trusted it", SLOW);
-    t.typ("n");
+    t.answer_safe();
     t.wait_for("not reloaded: ", SLOW);
     let trust = t.project.parent().unwrap().join("home/.psi/trust.json");
     assert!(!trust.exists());
@@ -1558,7 +1582,7 @@ fn reload_asks_before_loading_a_changed_project_psi() {
     assert!(!t.contents().contains("changed since you last trusted it"));
     t.typ("/reload\r");
     t.wait_screen("changed since you last trusted it", SLOW);
-    t.typ("y");
+    t.answer(-1); // Load it
     t.wait_for("reloaded 1 extension(s)", SLOW);
     assert!(std::fs::read_to_string(&trust).unwrap().contains("project"));
     t.typ("/hi\r");
@@ -1567,5 +1591,40 @@ fn reload_asks_before_loading_a_changed_project_psi() {
     t.typ("/reload\r");
     t.wait_count("reloaded 1 extension(s)", 2, SLOW);
     assert!(!t.contents().contains("changed since you last trusted it"));
+    t.quit();
+}
+
+#[test]
+fn compact_shows_a_spinner_and_esc_stops_it() {
+    // A summary of about 100K tokens took 47 s in the cog trial with nothing
+    // on screen moving, and Esc couldn't stop /compact (2026-11-04).
+    let long = |s: &str| format!("{s} {}", "words to summarize later. ".repeat(20));
+    let (mut t, _s) = Tui::start(
+        vec![
+            text(&long("first answer")),
+            text(&long("second answer")),
+            Reply::Hang {
+                text: String::new(),
+            },
+        ],
+        |p| {
+            // A small tail, so two short exchanges leave something to summarize.
+            let home = p.join("../home/.psi/settings.jsonc");
+            std::fs::write(home, r#"{"compaction": {"tail": 50}}"#).unwrap();
+        },
+    );
+    t.wait_for("› ", SLOW);
+    t.typ("one\r");
+    t.wait_for("first answer", SLOW);
+    t.typ("two\r");
+    t.wait_for("second answer", SLOW);
+    t.typ("/compact\r");
+    t.wait_for("summarizing about", SLOW);
+    t.wait_for("· Esc stops", SLOW);
+    t.esc();
+    t.wait_for("compaction stopped", SLOW);
+    // The run is over: a prompt can be typed again.
+    t.typ("/stats\r");
+    t.wait_for("model requests", SLOW);
     t.quit();
 }

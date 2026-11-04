@@ -26,6 +26,7 @@ fn every_example_passes_its_tests() {
             "fetch-cache",
             "focus",
             "git-guard",
+            "keep-generated",
             "llama-box",
             "tally",
             "tidy-results"
