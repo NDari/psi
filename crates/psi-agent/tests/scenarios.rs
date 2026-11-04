@@ -1033,6 +1033,48 @@ async fn summaries_chain_and_the_oldest_merge() {
     assert_eq!(last.matches("[Summary of earlier work").count(), 1);
 }
 
+#[tokio::test]
+async fn a_later_summary_can_correct_the_earlier_ones() {
+    // H-17: the first summary has nothing to correct; the second is asked
+    // for corrections, and when it falls back to a plain request it gets
+    // the earlier summary to correct.
+    let f = Fixture::new(vec![
+        read_at("f0.txt", 9500),
+        text("S1 the parser works"),
+        read_at("f1.txt", 9500),
+        call("read", json!({"path": "x"})),
+        text("S2"),
+        text("done"),
+    ]);
+    write_files(&f.cwd, 2, 200);
+    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    prefill(&mut a, 30);
+    let out = a.run("go on").await;
+    assert_eq!(out.stop, Stop::Done, "{:?} {:?}", out.stop, kinds(&a));
+    let methods: Vec<Value> = compaction_info(&a)
+        .iter()
+        .map(|i| i["method"].clone())
+        .collect();
+    assert_eq!(methods, ["extend", "plain"]);
+    let reqs = f.server.chat_requests();
+    let ask = |r: &Value| {
+        r["messages"].as_array().unwrap().last().unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let first = ask(&reqs[1]);
+    assert!(first.contains("## Learned about the code") && !first.contains("## Corrections"));
+    let extended = ask(&reqs[3]);
+    assert!(extended.contains("## Corrections"), "{extended}");
+    let plain = ask(&reqs[4]);
+    assert!(
+        plain.contains("</request>\n\n<earlier_summary>\nS1 the parser works\n</earlier_summary>\n\n<conversation>"),
+        "{plain}"
+    );
+    assert!(plain.contains("## Corrections"));
+}
+
 fn psi_agent_note() -> &'static str {
     "(Earlier turns of this conversation were removed to fit the context window.)"
 }

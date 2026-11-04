@@ -286,8 +286,22 @@ impl Agent {
             .filter(|f| !f.trim().is_empty())
             .map(|f| format!("\n\nThe user asks the summary to focus on: {}", f.trim()))
             .unwrap_or_default();
-        let max_chars = n_ctx.saturating_sub(self.cfg.max_output + 1500) * CHARS_PER_TOKEN;
-        let text = flatten(&branch[from..cut], max_chars as usize);
+        let max_chars =
+            (n_ctx.saturating_sub(self.cfg.max_output + 1500) * CHARS_PER_TOKEN) as usize;
+        // The fallback sees the earlier summaries when they take at most
+        // half its room, so it can correct them as the extended request can.
+        let earlier_chars: usize = chain.summaries.iter().map(|(_, s)| s.len()).sum();
+        let earlier: Vec<String> = if earlier_chars <= max_chars / 2 {
+            chain
+                .summaries
+                .iter()
+                .map(|(_, s)| (*s).to_owned())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let room = max_chars - earlier.iter().map(String::len).sum::<usize>();
+        let text = flatten(&branch[from..cut], room);
         let request = request_before(&branch[..cut], from);
         drop(branch);
 
@@ -323,8 +337,10 @@ impl Agent {
             }
         }
         if done.is_none() {
+            let earlier: Vec<&str> = earlier.iter().map(String::as_str).collect();
             let r = self.plain_request(
-                plain_summary_prompt(&text, request.as_deref(), words, set.summary) + &focus_text,
+                plain_summary_prompt(&text, request.as_deref(), &earlier, words, set.summary)
+                    + &focus_text,
             );
             let failed = match self.summary_request(&r).await {
                 Ok(resp) => match check_summary(&resp) {

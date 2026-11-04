@@ -297,6 +297,9 @@ pub(crate) fn harness_state(before: &[&Entry]) -> Option<String> {
             parts.push(format!("Todo list:\n{}", todos.render()));
         }
     }
+    if let Some(c) = last_check(before) {
+        parts.push(c);
+    }
     if let Some(d) = custom("plan") {
         let plan = crate::plan::PlanState::from_json(d);
         if plan.executing && !plan.steps.is_empty() {
@@ -310,6 +313,38 @@ pub(crate) fn harness_state(before: &[&Entry]) -> Option<String> {
         }
     }
     (!parts.is_empty()).then(|| format!("{STATE_HEADER}\n{}", parts.join("\n")))
+}
+
+/// The last post-edit check (D-36) and the edit it followed: the one piece
+/// of "does it work" the harness knows for sure (H-17).
+fn last_check(before: &[&Entry]) -> Option<String> {
+    let (at, data) = before
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(i, e)| match &e.body {
+            EntryBody::Custom { custom_type, data } if custom_type == "post_edit_check" => {
+                Some((i, data))
+            }
+            _ => None,
+        })?;
+    let command = data["command"].as_str()?;
+    let result = if data["passed"].as_bool()? {
+        "passed"
+    } else {
+        "failed"
+    };
+    // The nearest call with that id before the check: some servers reuse ids.
+    let id = data["tool_call_id"].as_str().unwrap_or_default();
+    let path = before[..at].iter().rev().find_map(|e| {
+        e.tool_calls()
+            .find(|(cid, _, _)| *cid == id)
+            .and_then(|(_, _, args)| args["path"].as_str())
+    });
+    let after = path
+        .map(|p| format!(" after the change to {p}"))
+        .unwrap_or_default();
+    Some(format!("Last post-edit check: `{command}` {result}{after}"))
 }
 
 /// Heads the harness's own record in the context after a compaction.
@@ -393,24 +428,48 @@ pub(crate) fn summary_words(n_ctx: u64) -> u64 {
     (n_ctx / 70).clamp(150, 1500)
 }
 
-/// The length and headings every summary is asked for.
-fn summary_spec(words: u64, form: SummaryForm) -> String {
+/// The length and headings every summary is asked for. A summary is the
+/// model's own report, so it keeps what a call showed apart from what it
+/// only believes, keeps what it found out about the code (the headings
+/// otherwise hold only what the user gave), and, after an earlier summary
+/// (`corrections`), names what that one got wrong: earlier blocks never
+/// change (D-40, H-17).
+fn summary_spec(words: u64, form: SummaryForm, corrections: bool) -> String {
     if form == SummaryForm::Free {
+        let corrections = if corrections {
+            "anything an earlier summary says that later work showed is wrong, with what is true; "
+        } else {
+            ""
+        };
         return format!(
             "under {words} words, as plain prose without headings: the goal; \
              every name, number, path and requirement the user gave, exactly as given; \
-             what was decided; what is done, what works and what fails; \
-             open problems; and the next step."
+             what you learned about the code by reading or running it, each with the file or command it came from; \
+             what was decided; what works or fails as a call showed (name the call), \
+             and apart from it what is done or believed but not checked; \
+             {corrections}open problems; and the next step."
         );
     }
+    let corrections = if corrections {
+        "## Corrections\n\
+         (anything an earlier summary says that later work showed is wrong, with what is true; or none)\n"
+    } else {
+        ""
+    };
     format!(
         "under {words} words, with these headings:\n\n\
          ## Goal\n\
          ## Constraints and facts\n\
          (every name, number, path and requirement the user gave, exactly as given)\n\
+         ## Learned about the code\n\
+         (what you found by reading or running it: how to build, run and test, conventions, APIs and their quirks; each with the file or command it came from)\n\
          ## Decisions\n\
          ## Current state\n\
-         (what is done, what works, what fails)\n\
+         ### Checked\n\
+         (what works or fails, each with the call that showed it)\n\
+         ### Not checked\n\
+         (what is done or believed, but no call has shown it)\n\
+         {corrections}\
          ## Open problems\n\
          ## Next step"
     )
@@ -425,7 +484,7 @@ pub(crate) fn summary_instruction(after_summary: bool, words: u64, form: Summary
     };
     format!(
         "Stop the task for a moment: older messages are about to be removed from this conversation, and you will continue from your summary of them. Do not call tools now. Summarize {what} for yourself, {}",
-        summary_spec(words, form)
+        summary_spec(words, form, after_summary)
     )
 }
 
@@ -457,19 +516,25 @@ pub(crate) fn request_before(branch: &[&Entry], from: usize) -> Option<String> {
 }
 
 /// The request text of a summary built from text (the fallback), with the
-/// user's request when the entries don't hold it (`request_before`).
+/// user's request when the entries don't hold it (`request_before`), and
+/// the earlier summaries when they fit, so it can correct them too.
 pub(crate) fn plain_summary_prompt(
     conversation: &str,
     request: Option<&str>,
+    earlier: &[&str],
     words: u64,
     form: SummaryForm,
 ) -> String {
     let request = request
         .map(|r| format!("The user's request this work is for:\n<request>\n{r}\n</request>\n\n"))
         .unwrap_or_default();
+    let earlier_text: String = earlier
+        .iter()
+        .map(|s| format!("<earlier_summary>\n{s}\n</earlier_summary>\n\n"))
+        .collect();
     format!(
-        "{request}<conversation>\n{conversation}\n</conversation>\n\nSummarize this part of the agent's work for the agent, {}",
-        summary_spec(words, form)
+        "{request}{earlier_text}<conversation>\n{conversation}\n</conversation>\n\nSummarize this part of the agent's work for the agent, {}",
+        summary_spec(words, form, !earlier.is_empty())
     )
 }
 
@@ -532,7 +597,7 @@ pub(crate) fn merge_prompt(older: &str, newer: &str, words: u64, form: SummaryFo
         SummaryForm::Free => "as plain prose",
     };
     format!(
-        "Merge these two summaries of consecutive parts of a coding agent's work into one, under {words} words, {layout}. Keep every name, number, path and requirement exactly; where they disagree, the second is newer.\n\n<summary>\n{older}\n</summary>\n\n<summary>\n{newer}\n</summary>"
+        "Merge these two summaries of consecutive parts of a coding agent's work into one, under {words} words, {layout}. Keep every name, number, path and requirement exactly, and what was learned about the code; where they disagree, the second is newer. Apply the second's corrections: fix or drop what they say is wrong, and leave the corrections themselves out.\n\n<summary>\n{older}\n</summary>\n\n<summary>\n{newer}\n</summary>"
     )
 }
 
@@ -823,24 +888,67 @@ mod tests {
         let p = plain_summary_prompt(
             "Assistant: reading",
             Some("Write docs/API.md"),
+            &[],
             200,
             SummaryForm::Structured,
         );
         assert!(p.starts_with("The user's request this work is for:\n<request>\nWrite docs/API.md\n</request>\n\n<conversation>"));
         assert!(
-            plain_summary_prompt("x", None, 200, SummaryForm::Structured)
+            plain_summary_prompt("x", None, &[], 200, SummaryForm::Structured)
                 .starts_with("<conversation>")
         );
     }
 
     #[test]
     fn a_free_form_summary_asks_for_the_same_content_without_headings() {
-        let free = summary_instruction(false, 234, SummaryForm::Free);
-        let structured = summary_instruction(false, 234, SummaryForm::Structured);
+        let free = summary_instruction(true, 234, SummaryForm::Free);
+        let structured = summary_instruction(true, 234, SummaryForm::Structured);
         assert!(structured.contains("## Goal"));
         assert!(!free.contains("##"));
         assert!(free.contains("exactly as given") && free.contains("under 234 words"));
+        for (s, words) in [
+            (&structured, "## Learned about the code"),
+            (&free, "you learned"),
+        ] {
+            assert!(s.contains(words), "{s}");
+            assert!(s.contains("an earlier summary says"), "{s}");
+            assert!(
+                s.contains("not checked") || s.contains("Not checked"),
+                "{s}"
+            );
+        }
         assert!(merge_prompt("a", "b", 100, SummaryForm::Free).contains("as plain prose"));
+    }
+
+    #[test]
+    fn a_summary_keeps_checked_apart_and_corrects_earlier_ones() {
+        // H-17: the first summary has nothing to correct.
+        let first = summary_instruction(false, 936, SummaryForm::Structured);
+        assert!(!first.contains("## Corrections"), "{first}");
+        assert!(
+            first.contains("## Learned about the code\n(what you found by reading or running it")
+        );
+        assert!(first.contains(
+            "## Current state\n### Checked\n(what works or fails, each with the call that showed it)\n### Not checked\n"
+        ));
+        let later = summary_instruction(true, 936, SummaryForm::Structured);
+        assert!(later.contains("but no call has shown it)\n## Corrections\n"));
+        assert!(later.contains("## Corrections\n(anything an earlier summary says"));
+        assert!(later.contains("or none)\n## Open problems\n## Next step"));
+        // The fallback sees the earlier summaries, and corrects them too.
+        let p = plain_summary_prompt("x", None, &["S1", "S2"], 936, SummaryForm::Structured);
+        assert!(p.starts_with(
+            "<earlier_summary>\nS1\n</earlier_summary>\n\n<earlier_summary>\nS2\n</earlier_summary>\n\n<conversation>"
+        ));
+        assert!(p.contains("## Corrections"));
+        assert!(
+            !plain_summary_prompt("x", None, &[], 936, SummaryForm::Structured)
+                .contains("## Corrections")
+        );
+        // A merge applies them and keeps what was learned.
+        let m = merge_prompt("a", "b", 936, SummaryForm::Structured);
+        assert!(m.contains("and what was learned about the code;"));
+        assert!(m.contains("Apply the second's corrections: fix or drop what they say is wrong"));
     }
 
     #[test]
@@ -914,6 +1022,46 @@ mod tests {
              Plan being carried out:\n[x] 1. one\n[ ] 2. two"
         );
         assert_eq!(harness_state(&refs[..1]), None);
+    }
+
+    fn check(id: &str, passed: bool) -> EntryBody {
+        EntryBody::Custom {
+            custom_type: "post_edit_check".into(),
+            data: serde_json::json!({"tool_call_id": id, "command": "cargo test",
+                                     "passed": passed, "ms": 900}),
+        }
+    }
+
+    #[test]
+    fn harness_state_has_the_last_post_edit_check() {
+        // step_with gives every call the id "c", as servers that reuse ids
+        // do: the check names the nearest edit before it.
+        let es = entries(vec![
+            msg(Role::User, "task"),
+            step_with("edit", "a.rs"),
+            check("c", false),
+            step_with("write", "b.rs"),
+            check("c", true),
+            step_with("read", "c.rs"),
+        ]);
+        let refs: Vec<&Entry> = es.iter().collect();
+        let state = harness_state(&refs).unwrap();
+        assert!(
+            state.ends_with("Files changed: a.rs, b.rs\nLast post-edit check: `cargo test` passed after the change to b.rs"),
+            "{state}"
+        );
+        let state = harness_state(&refs[..3]).unwrap();
+        assert!(
+            state.ends_with("Last post-edit check: `cargo test` failed after the change to a.rs"),
+            "{state}"
+        );
+        // A check whose call isn't there still says how it went.
+        let es = entries(vec![msg(Role::User, "task"), check("gone", true)]);
+        let refs: Vec<&Entry> = es.iter().collect();
+        assert_eq!(
+            harness_state(&refs).unwrap(),
+            "[Recorded by the harness for the earlier conversation]\nLast post-edit check: `cargo test` passed"
+        );
     }
 
     #[test]

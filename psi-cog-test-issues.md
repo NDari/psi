@@ -95,7 +95,7 @@ Possible fixes:
 - **`git add -A` committed debris.** Asked to commit, the model staged everything: `cog_debug_test.go` (a debug test it moved in from `/tmp` at step 122) went into `777edcf`, and the 5 MB `cog` binary from `go build -o cog` (step 422) into `ddaef56`. Model mistakes; `git status` before both commits listed them.
 - **Worker changed more than asked** (the task was the test files; it also changed `env.go` and `stdlib.go`), and said so in its report.
 - **Budget pauses left no entry** (fixed 2026-11-04: a `pause` entry with the wait).
-- **Went well:** all four summaries (three in the main session, one in worker) used the cached "extend" path, with no fallback; facts carried across them (after each, the next step continued the work correctly); always-ask and the `.psi` per-file grants worked as designed; the post-edit check ran 41 times (10 s in all) and its 17 failures were all real.
+- **Went well:** all four summaries (three in the main session, one in worker) used the cached "extend" path, with no fallback; the task carried across them (after each, the next step continued the work correctly; but see "Summaries keep wrong claims and drop what the model learned about the language", which found wrong facts carried and language knowledge lost); always-ask and the `.psi` per-file grants worked as designed; the post-edit check ran 41 times (10 s in all) and its 17 failures were all real.
 
 ### The fixes in the second session (added 2026-11-04)
 
@@ -107,6 +107,36 @@ What the 2026-11-03 fixes did in real use (Psi rebuilt at about 09:00; everythin
 - **Summaries:** the `/compact` on the 240K server took 47 s for about 100K tokens (97K from the cache); after the restart at 64K the context was 15.5K. The two automatic summaries took 11 s each and left 11.7K and 14.6K, so with the re-read about 22 s per summary (about 33 s in the first trial). The 10K tail is working. Clearing never ran (it needs about 28K of old results over 800 characters to beat a summary, and this session's context was mostly conversation).
 - **Scout limit and `cd`:** no refusals of `cd` or builds in either scout; pauses at 100 as set.
 - **Trust:** asked again only after `.psi` changed (the entry above).
+
+### Summaries keep wrong claims and drop what the model learned about the language (added 2026-11-04, from a review of the model's work)
+
+The second session had three summaries: at 10:51, at 11:04 (both while the bare-name change was being finished) and at 13:28 (in the middle of the `doc` swap). They carried the task forward well, but they also carried wrong facts and lost the knowledge that kept the model correct. Most of the model's reasoning errors in the session come after a summary.
+
+1. **What the model claimed goes in as if it had been checked.** The 10:51 summary lists "`{ $double } map` passes function as data to combinator" under "What works" with no call behind it; the 11:04 summary keeps it, although at 10:58 the model had run exactly that and seen it fail ("callback must leave exactly one value, got 2"). Both also say `cog_run` was "enhanced with inline source support, version 0.2.0", but worker's `git stash` had already taken that change out of the tree (entry under Fixed), and the tool Psi loaded only ever had `path`. Wrong reasons went in too ("`$fact apply` to avoid infinite auto-execution", "`tail` uses `$without-last apply` to prevent auto-execution inside block bodies") and ended up in the `777edcf` commit message.
+2. **Extending a summary keeps its mistakes.** The 11:04 summary copies "Pattern B: `{ name apply }` → `{ $name }`" (wrong: bare `name` runs inside a block) word for word from the 10:51 one, and lists `{ $double } map` next to the `{ $double apply } map` that the newer turns showed was needed. Nothing asks the extend request to correct the older text.
+3. **Knowledge of the language is lost.** All three summaries describe task state (goal, files, decisions, next step); none records how Cog works: dicts are `#[ name: value ]`, `let` takes the value then the name, `:name` pushes a quote while `$name` and bare `name` give the value. What scout read about the language lived only in the context. Before the 11:04 summary the model wrote dicts correctly (10:54, `#[ op: { dup + } ]`); after it, it used `{ "x": 1 }` (a sequence) at 13:08 and reported a non-existent "inconsistency" from it, and wrote `:n` for `$n` at 13:30 and again at 13:34 after the owner had corrected it.
+
+The 64K context made this matter more: three summaries in about two and a half hours of work.
+
+Session: `~/.psi/sessions/-home-ndari-projects-cog-/2026-11-04-1440_fecf76bd.jsonl` (the three `compaction` entries; the 10:58 run of `{ $double } map`; 10:54, 13:08 and 13:30 for the language).
+
+Possible fixes:
+- Ask the summary to keep "verified (a call in the conversation shows it)" apart from "claimed or planned", or to drop claims no call backs up.
+- Add a short section of lasting facts about the codebase or language (syntax, conventions, how to run things) that the next summary carries over.
+- In the extend request, ask the model to correct or remove entries from the earlier summary that newer turns contradict.
+
+**Built 2026-11-04 (plan §7.4, H-17):** the headings Learned about the code, Current state with Checked and Not checked, and Corrections (after an earlier summary); the merge applies corrections; the fallback gets the earlier summaries; the harness record has the last post-edit check. A replay of 25 recorded summary requests (17 from five 16K eval tasks, 8 from the cog trial) with the old and new instruction: the planted facts survived in all 6 `long_api_docs` summaries; the cog 11:04 replay corrected the `{ $double } map` claim, but kept the wrong "Pattern B" line under facts; most corrections in the eval tasks fixed real earlier mistakes (one was itself wrong and fixed by the next summary). The model split Checked from Not checked in 0 of 25 summaries when they were a note in brackets; as `### Checked` and `### Not checked` subheadings (pi uses `### Done` the same way) it split them in 17 of 20 (a second replay, new instruction only), and the cog 11:04 Checked list was right (`{ $double } map` fails, `$double map` works). The new summaries run 10 to 35% longer; at 16K many pass the 234 words asked, as the old ones already did. Replay files: the session's scratchpad `replay/` (script, outputs).
+
+### Clear old results when the cache is broken anyway (added 2026-11-04, from a discussion, candidate)
+
+Clearing runs only past the trigger (about 70% of the window) and in batches, on purpose: replacing an old result with a note makes llama-server read everything after it again, and the oldest results sit near the start, so clearing every turn would mean re-reading nearly the whole context every turn (plan §7.4: a 64K review that cleared 4 times in 30 requests re-read 24K to 31K tokens each time, 114 s in all).
+
+But some requests re-read everything anyway, and clearing then costs nothing extra:
+- **After a summary:** what follows it is new to the server. Psi already clears in the kept part when it still needs room; it could also clear there ahead of the trigger.
+- **After a sub-agent call** on a server with one slot: the sub-agent's requests push the parent's prompt out of the cache ("The parent re-read its whole context after the scout call", above), so the parent's next request reads it all again.
+- **When the tool list changes** (an MCP server joins at a user prompt, `/reload`): the cache breaks at the system prompt.
+
+Possible fix: at those moments, clear old results (same rules: over 800 characters, not the last step's, not the last 3) even below the trigger, so the next clearing or summary comes later. Psi knows the first and third itself; for the second it can tell from the server's `cache_n` on the next response only after the fact, so it would assume a miss after a sub-agent call on a one-slot server (or skip it once the slot save and restore above is built). Not tied to any project.
 
 ## Fixed
 
@@ -305,6 +335,8 @@ Possible fixes:
 - Add `git stash` (push, not `list`/`show`/`pop`), `git checkout -- <path>` / `git checkout <path>` and `git restore` to always-ask. In this run that is 21 prompts, which is too many on its own; with the prompt line it should be rare.
 
 **Fixed 2026-11-04 (the ask):** `git stash` (not `list`, `show`, `pop`, `apply`, `branch`), `git checkout` and `git restore` are on always-ask; rules can now say a word must not appear (`git stash !list`). A recorded Qwen transcript now has one more destructive retry caught (a plain `git checkout`). Not done (not asked for): the line in worker's prompt, and naming new stashes after a sub-agent call.
+
+**Note 2026-11-04:** the stashes were dropped without restoring `cog_run`; the change is still in cog's unreachable stash commit `b237322` (`git -C ~/projects/cog checkout b237322 -- .psi/extensions/cog_run`). That version marks both `path` and `source` as required, though only one is meant to be.
 
 ### The model's tool list leaves out extension, MCP and agent tools (added 2026-11-04, from the second session)
 
