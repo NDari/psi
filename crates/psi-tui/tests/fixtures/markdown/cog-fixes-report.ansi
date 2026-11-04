@@ -1,0 +1,58 @@
+All 6 medium/high items done. Here's a summary of everything I fixed:
+
+[0;2m────────────────────────────────────────────────────────────────────────────────[0m
+
+[0;1;33mIssues Fixed (HIGH + MEDIUM)[0m
+
+[0;1;33mIssue 1 - HIGH: [0;1;36mbracketsBalanced[0;1;33m REPL bug[0m
+
+[0;1mFiles changed:[0m [0;36mcmd/cog/repl.go[0m, [0;36mcmd/cog/repl_test.go[0m, [0;36mcmd/cog/editor_test.go[0m
+
+[0;35m- [0;1mBug:[0m The [0;36m[[0m case in [0;36mbracketsBalanced[0m returned [0;36mtrue[0m immediately for bare [0;36m[[0m (not [0;36m#[[0m), meaning
+  incomplete input like [0;36m"1 ["[0m was sent to the parser instead of waiting for [0;36m][0m.
+[0;35m- [0;1mFix:[0m Removed the early-return [0;36mif i == 0 || input[i-1] != '#'[0m check. Now [0;36m[[0m increments [0;36mdepth[0m just
+  like [0;36m{[0m and [0;36m([0m. Changed return from [0;36mdepth <= 0[0m to [0;36mdepth == 0[0m so extra closing brackets ([0;36m] ][0m) are
+  also rejected.
+[0;35m- [0;1mTest:[0m Added [0;36mTestBracketsBalanced[0m with 16 cases covering: bare brackets, nested brackets,
+  unbalanced cases, [0;36m#[[0m dictionary syntax, string-escaped brackets, and mixed delimiters.
+[0;35m- [0;1mAlso fixed:[0m [0;36mTestRemovedListDelimiterDoesNotWaitForContinuation[0m in [0;36meditor_test.go[0m was asserting the
+  old buggy behavior ([0;36massert.True[0m for [0;36m"[1"[0m); changed to [0;36massert.False[0m since bare brackets must now be
+  balanced.
+
+[0;1;33mIssue 2 - MEDIUM: Flaky terminal test[0m
+
+[0;1mFile:[0m No change needed - [0;36mTestTerminalEditBeforeSubmissionAndCancel[0m passes consistently now. The
+earlier failure was caused by the cached build running with the old (buggy) code. Verified with
+[0;36m-count=5[0m.
+
+[0;1;33mIssue 3 - MEDIUM: [0;1;36mswap[0;1;33m error wrapping [0;1;36m%v[0;1;33m → [0;1;36m%w[0m
+
+[0;1mFiles changed:[0m [0;36mfn.go[0m, [0;36merror_test.go[0m
+[0;35m- [0;1mBug:[0m [0;36mswap[0m used [0;36mfmt.Errorf("...%v", err)[0m instead of [0;36m%w[0m, breaking the error chain so [0;36merrors.As[0m
+  couldn't unwrap to the inner error.
+[0;35m- [0;1mFix:[0m Changed both error lines to use [0;36m%w[0m.
+[0;35m- [0;1mTest:[0m Added [0;36mTestSwapErrorWrapsInnerError[0m verifying the error chains through to a [0;36m*userError[0m via
+  [0;36merrors.As[0m.
+
+[0;1;33mIssue 4 - MEDIUM: Dead error path in [0;1;36mdup[0m
+
+[0;1mFile changed:[0m [0;36mfn.go[0m
+[0;35m- [0;1mBug:[0m [0;36mstackNotInExpectedShape(e, "dup", 1)[0m guarantees ≥1 stack item, so [0;36mpop()[0m can never fail. The
+  [0;36mif err != nil[0m block after pop was dead code.
+[0;35m- [0;1mFix:[0m Replaced [0;36mtop, err := e.pop(); if err != nil { ... }[0m with [0;36mtop, _ := e.pop()[0m.
+
+[0;1;33mIssue 5 - MEDIUM: Discarded [0;1;36mpop()[0;1;33m errors in [0;1;36mnip[0;1;33m and [0;1;36msay[0m
+
+[0;1mFile changed:[0m [0;36mfn.go[0m
+[0;35m- [0;1mBug:[0m Both [0;36mnip[0m and [0;36msay[0m used [0;36mtop, _ := e.pop()[0m, silently dropping the error. Safe behind guards but
+  misleading to readers.
+[0;35m- [0;1mFix:[0m Changed to [0;36mtop, popErr := e.pop()[0m with explicit [0;36mif popErr != nil[0m return, adding a comment
+  explaining the guard makes this unreachable but handling it defensively to avoid nil dereference
+  downstream.
+
+[0;1;33mIssue 6 - MEDIUM: Duplicate test numbers in [0;1;36mlexer_test.go[0m
+
+[0;1mFile changed:[0m [0;36mlexer_test.go[0m
+[0;35m- [0;1mBug:[0m Two entries labeled test 7 ([0;36m{7, NUM, "3.0023"}[0m and [0;36m{7, NUM, "22.1"}[0m), and test 15 appeared
+  twice ([0;36m{15, NUM, "2"}[0m and [0;36m{15, EOF, ""}[0m). This makes failure output confusing.
+[0;35m- [0;1mFix:[0m Renumbered sequentially: 7→8 for [0;36m"22.1"[0m, 15→18 for [0;36mEOF[0m.

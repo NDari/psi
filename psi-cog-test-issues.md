@@ -10,7 +10,7 @@ Problems the owner notices during the long-session trial in `~/projects/cog` (st
    - `~/.psi/sessions/-home-ndari-projects-cog-/2026-11-03-2312_0665442a.agents/01-scout.*`: the scout call (134 requests).
 
    What to check: time to first token, reading and generation time, and where the cache broke and why; clearings and summaries, and whether facts survived them; tool errors, loops, re-reads, guard events and pauses; edits that failed and how they recovered; whether the post-edit check, gopls (MCP), the todo list and the extensions were used, and how; claims of checking that no call backs up; anything the owner marked with `/label`. Note what went well too.
-2. **Gone through with the owner 2026-11-03.** Fixed now: the entries under Fixed, the scout stop gap, and in `known-issues.md` the `/reload` trust check and the timing-sensitive test. Left open: `/diff` (to discuss), the extension-block workaround (to investigate further), the flat answers (a fuller solution later), the scout limit setting, the parent's cache after scout, scout's re-reads, and the claims of checks.
+2. **Gone through with the owner 2026-11-03.** Fixed now: the entries under Fixed, the scout stop gap, and in `known-issues.md` the `/reload` trust check and the timing-sensitive test. Left open: `/diff` (to discuss), the extension-block workaround (to investigate further), the scout limit setting, the parent's cache after scout, scout's re-reads, and the claims of checks.
 
 ## Open
 
@@ -29,29 +29,6 @@ Possible fixes:
 - In auto mode, go on by itself at the limit while the progress guards are quiet (no streak of failed calls, no re-reading loop, no pile of summaries without a file changed), and pause only when one of them has fired; strict mode always pauses. Record each automatic extension as a guard event, so the review can see it. Who approves stays the same: the model can't extend its own limit (a looping model would), and today only the owner's pause card can (`c` continue, `s` stop); auto and strict mode both pause, and headless runs stop.
 
 **Stop gap 2026-11-03:** the limit is 100 (`MAX_TURNS`, plan §10.1 updated) and the agent tool says scout runs no builds or tests (give those to worker). The setting is still to do.
-
-### Answers look flat: titles run into the next line, headings have no color (added 2026-11-03)
-
-A review answer in the trial (12 findings under `### HIGH`, `### MEDIUM`, `### LOW`) looked like plain text with only the `code` spans colored. The model wrote each finding as a bold title on its own line and the location on the next:
-
-```
-**1. `bracketsBalanced` in REPL sends incomplete `[` input**
-`cmd/cog/repl.go:92-95` - when a bare `[` (not `#[`) is encountered, ...
-```
-
-What the screen does with that, all as CommonMark says:
-- **The two lines become one paragraph.** A single newline is a soft break, which renders as a space, so the title, the path and the explanation run together: "1. bracketsBalanced in REPL sends incomplete [ input cmd/cog/repl.go:92-95 - when a bare [ ...". The model meant two lines. Pi's renderer (marked, `breaks` off) joins them the same way.
-- **Bold is the only mark on the titles,** and in many terminal fonts bold barely shows (in a copy it doesn't show at all).
-- **Headings have no color:** Psi's default `mdHeading` style is plain (`crates/psi-tui/src/theme.rs`), where pi's dark theme uses yellow. Level 3 keeps its `###` (pi parity), so `### HIGH` reads as text.
-- **Paths with line numbers** (`cmd/cog/repl.go:92-95`) are code spans, not links.
-
-Session: `~/.psi/sessions/-home-ndari-projects-cog-/2026-11-03-2312_0665442a.*`.
-
-Possible fixes:
-- Render a single newline inside a paragraph as a line break (as chat apps and GitHub comments do). Models write for chat, so this matches what they mean; tables, lists and code are unaffected.
-- Give headings a default color from the 16 (yellow, as pi's dark theme), and maybe bold text too, so titles stand out without relying on the font.
-- Drop the `#`s for every level and tell levels apart by style (underline for 1, color for all).
-- Make `path:line` code spans clickable (OSC 8 `file://` link to the file; the line can't go in the link, plan §15 item 5).
 
 ### `/diff` is hard to use in a long session (added 2026-11-03, needs the owner's view of what's wrong)
 
@@ -194,3 +171,28 @@ Possible fixes:
 - Maybe a third state, `start` (in progress), since marking work as started is probably what the first six toggles meant.
 
 **Fixed 2026-11-03:** the description names `done` and `undo`; both set the state and say "was already done" when nothing changes, and `toggle` now means done.
+
+### Answers look flat: titles run into the next line, headings have no color (added 2026-11-03)
+
+A review answer in the trial (12 findings under `### HIGH`, `### MEDIUM`, `### LOW`) looked like plain text with only the `code` spans colored. The model wrote each finding as a bold title on its own line and the location on the next:
+
+```
+**1. `bracketsBalanced` in REPL sends incomplete `[` input**
+`cmd/cog/repl.go:92-95` - when a bare `[` (not `#[`) is encountered, ...
+```
+
+What the screen does with that, all as CommonMark says:
+- **The two lines become one paragraph.** A single newline is a soft break, which renders as a space, so the title, the path and the explanation run together: "1. bracketsBalanced in REPL sends incomplete [ input cmd/cog/repl.go:92-95 - when a bare [ ...". The model meant two lines. Pi's renderer (marked, `breaks` off) joins them the same way.
+- **Bold is the only mark on the titles,** and in many terminal fonts bold barely shows (in a copy it doesn't show at all).
+- **Headings have no color:** Psi's default `mdHeading` style is plain (`crates/psi-tui/src/theme.rs`), where pi's dark theme uses yellow. Level 3 keeps its `###` (pi parity), so `### HIGH` reads as text.
+- **Paths with line numbers** (`cmd/cog/repl.go:92-95`) are code spans, not links.
+
+Session: `~/.psi/sessions/-home-ndari-projects-cog-/2026-11-03-2312_0665442a.*`.
+
+Possible fixes:
+- Render a single newline inside a paragraph as a line break (as chat apps and GitHub comments do). Models write for chat, so this matches what they mean; tables, lists and code are unaffected.
+- Give headings a default color from the 16 (yellow, as pi's dark theme), and maybe bold text too, so titles stand out without relying on the font.
+- Drop the `#`s for every level and tell levels apart by style (underline for 1, color for all).
+- Make `path:line` code spans clickable (OSC 8 `file://` link to the file; the line can't go in the link, plan §15 item 5).
+
+**Fixed 2026-11-03 (plan §11.2):** a single newline is a line break; headings drop their `#`s and are bold in the heading color (yellow by default; level 1 also underlined); an all-bold line is a title in the heading color; pi's other markdown tokens are themable, with defaults close to pi's dark theme; quotes have a `│` bar. `just md-preview <file>` shows a file as Psi draws it, and snapshot tests of three answers from this session plus an elements file keep the look (`just md-bless` after a deliberate change). Left for later: clickable `path:line`.

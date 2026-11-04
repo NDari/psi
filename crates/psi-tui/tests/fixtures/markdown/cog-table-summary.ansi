@@ -1,0 +1,9 @@
+All checks pass. Let me summarize what was done for the LOW items:
+
+[0;1;33mSummary of LOW items completed:[0m
+
+| [0;1mIssue[0;2m | [0;1mDescription[0;2m | [0;1mChanges[0m |
+| #7[0;2m | [0mTest naming inconsistency[0;2m | [0mRenamed [0;36merror_test.go[0m → [0;36mprimitive_errors_test.go[0m, [0;36mexamples_test.go[0m → [0;36mintegration_test.go[0m |
+| #8[0;2m | [0mRedundant [0;36mempty()[0m check in [0;36mstackNotInExpectedShape[0;2m | [0mRemoved separate [0;36mempty()[0m check; unified to arity-based path |
+| #9[0;2m | [0mMissing stdlib word signatures ([0;36m?[0m, [0;36mincr[0m, [0;36mdecr[0m, [0;36mwithout-last[0m, [0;36mtail[0m)[0;2m | [0mAdded signatures to [0;36mbuiltinSignatures[0m in [0;36mword_metadata.go[0m, updated [0;36membedding.go[0m to check [0;36mbuiltinSignatures[0m for root bindings, regenerated [0;36mdocs/words.md[0m |
+| #10[0;2m | [0m0% coverage on [0;36matom[0m constructors[0;2m | [0mAdded [0;36matoms_test.go[0m with 21 tests covering all atom types: [0;36mnum[0m, [0;36mstr[0m, [0;36mboolean[0m, [0;36mquote[0m, [0;36mval[0m, [0;36mword[0m, including [0;36mEqual()[0m, [0;36mConcat()[0m, [0;36mString()[0m, [0;36mtypeName()[0m, [0;36mLen()[0m, [0;36mequalAtoms[0m, [0;36mNumber()[0m constructor, and [0;36mtrueVal[0m/[0;36mfalseVal[0m |

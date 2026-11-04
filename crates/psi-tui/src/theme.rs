@@ -27,9 +27,23 @@ pub enum Token {
     BashMode,
     /// The line above the input box.
     BorderMuted,
+    /// Headings, and lines that are all bold (titles).
     MdHeading,
+    /// A link's text; its URL after it is `MdLinkUrl`.
+    MdLink,
+    MdLinkUrl,
+    /// Inline `code`.
     MdCode,
+    /// Fenced code without a known language tag.
+    MdCodeBlock,
     MdCodeBlockBorder,
+    /// A quote's text and the bar before it.
+    MdQuote,
+    MdQuoteBorder,
+    /// A horizontal rule.
+    MdHr,
+    /// List markers (`-`, `1.`).
+    MdListBullet,
     ToolDiffAdded,
     ToolDiffRemoved,
     /// Code in fenced blocks (§11.5): pi's nine syntax colors.
@@ -54,8 +68,15 @@ const TOKENS: &[(Token, &str)] = &[
     (Token::BashMode, "bashMode"),
     (Token::BorderMuted, "borderMuted"),
     (Token::MdHeading, "mdHeading"),
+    (Token::MdLink, "mdLink"),
+    (Token::MdLinkUrl, "mdLinkUrl"),
     (Token::MdCode, "mdCode"),
+    (Token::MdCodeBlock, "mdCodeBlock"),
     (Token::MdCodeBlockBorder, "mdCodeBlockBorder"),
+    (Token::MdQuote, "mdQuote"),
+    (Token::MdQuoteBorder, "mdQuoteBorder"),
+    (Token::MdHr, "mdHr"),
+    (Token::MdListBullet, "mdListBullet"),
     (Token::ToolDiffAdded, "toolDiffAdded"),
     (Token::ToolDiffRemoved, "toolDiffRemoved"),
     (Token::SyntaxComment, "syntaxComment"),
@@ -92,11 +113,21 @@ fn default_style(t: Token) -> Style {
         Token::Success | Token::ToolDiffAdded => Style::fg(Color::Green),
         Token::Error | Token::ToolDiffRemoved => Style::fg(Color::Red),
         Token::Warning => Style::fg(Color::Yellow),
-        Token::Muted | Token::BorderMuted | Token::MdCodeBlockBorder => Style::new().dim(),
+        Token::Muted
+        | Token::BorderMuted
+        | Token::MdCodeBlockBorder
+        | Token::MdLinkUrl
+        | Token::MdQuote
+        | Token::MdQuoteBorder
+        | Token::MdHr => Style::new().dim(),
         Token::UserMessageText => Style::fg(Color::Blue),
         Token::BashMode => Style::fg(Color::Magenta),
-        Token::MdHeading => Style::new(),
+        // Close to pi's dark theme in the 16 colors; inline code stays cyan.
+        Token::MdHeading => Style::fg(Color::Yellow),
+        Token::MdLink => Style::fg(Color::Blue),
         Token::MdCode => Style::fg(Color::Cyan),
+        Token::MdCodeBlock => Style::fg(Color::Green),
+        Token::MdListBullet => Style::fg(Color::Magenta),
         // Code: a few of the 16 colors; operators, punctuation and names
         // stay the terminal's own, so code isn't a wall of color.
         Token::SyntaxComment => Style::new().dim(),

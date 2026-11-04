@@ -194,6 +194,15 @@ impl MdStream {
     }
 }
 
+/// A whole text as the TUI draws a finished answer: split into blocks as
+/// when it streams, then rendered (`just md-preview`, the snapshot tests).
+pub fn render_text(text: &str, width: usize) -> Vec<Line> {
+    let mut md = MdStream::new();
+    let mut blocks = md.push(text);
+    blocks.extend(md.finish());
+    render_blocks(&blocks, width)
+}
+
 /// Lines for blocks of one text, with a blank line before each that has a gap.
 pub fn render_blocks(blocks: &[Block], width: usize) -> Vec<Line> {
     let mut out = Vec::new();
@@ -207,13 +216,15 @@ pub fn render_blocks(blocks: &[Block], width: usize) -> Vec<Line> {
 }
 
 /// Lines for one block. Prose goes through a CommonMark parser (§11.5) and
-/// is word-wrapped to `width`: headings bold (the first underlined, from the
-/// third on with their `#`s, as pi shows them), emphasis, `code`
-/// in cyan, links underlined with the URL after them, list markers as
-/// written with a hanging indent, quotes dim, tables as aligned columns.
-/// Fenced code keeps its fence lines (dim) and its code lines verbatim and
-/// unwrapped, colored when tagged with a known language, so a copy from
-/// the terminal is the code.
+/// is word-wrapped to `width`, drawn for reading (§11.2): a single newline
+/// is a line break; headings without their `#`s, bold in the heading color
+/// (the first level underlined), and so is a line that is all bold (a
+/// title); emphasis, `code` in its color, links with the URL after them,
+/// list markers as written and colored, with a hanging indent; quotes
+/// behind a bar; tables as aligned columns. Fenced code keeps its fence
+/// lines (dim) and its code lines verbatim and unwrapped, colored by
+/// language when tagged with a known one, so a copy from the terminal is
+/// the code.
 pub fn render_block(block: &str, width: usize) -> Vec<Line> {
     let mut out = Vec::new();
     // Prose lines waiting to be rendered together.
@@ -259,7 +270,8 @@ fn code_lines(tag: &str, code: &[&str]) -> Vec<Line> {
     {
         return lines;
     }
-    code.iter().map(|l| Line::raw(*l)).collect()
+    let st = theme::style(Token::MdCodeBlock);
+    code.iter().map(|l| Line::styled(*l, st)).collect()
 }
 
 /// The list marker with its trailing space (`- `, `* `, `+ `, `12. `, `3) `).
@@ -364,7 +376,8 @@ fn prose(src: &str, width: usize) -> Vec<Line> {
                 let st = p.style().patch(code_style());
                 p.cur.push(&*t, st);
             }
-            Event::SoftBreak => p.text(" "),
+            // Models write for chat, where a newline is a line break.
+            Event::SoftBreak => p.hard_break(),
             Event::HardBreak => p.hard_break(),
             Event::InlineHtml(t) => p.text(&t),
             Event::Html(t) => {
@@ -377,7 +390,7 @@ fn prose(src: &str, width: usize) -> Vec<Line> {
                 p.flush();
                 let (mut first, _) = p.prefixes();
                 let n = p.width.saturating_sub(first.width()).clamp(1, 80);
-                first.push("─".repeat(n), muted());
+                first.push("─".repeat(n), theme::style(Token::MdHr));
                 p.out.push(first);
             }
             Event::TaskListMarker(done) => p.text(if done { "[x] " } else { "[ ] " }),
@@ -429,13 +442,14 @@ impl Prose {
         for c in &mut self.containers {
             match c {
                 Container::Quote => {
-                    first.push("> ", muted());
-                    cont.push("> ", muted());
+                    let bar = theme::style(Token::MdQuoteBorder);
+                    first.push("│ ", bar);
+                    cont.push("│ ", bar);
                 }
                 Container::Item { marker, first: f } => {
                     let pad = " ".repeat(str_width(marker));
                     if *f {
-                        first.push(marker.as_str(), Style::new());
+                        first.push(marker.as_str(), theme::style(Token::MdListBullet));
                         *f = false;
                     } else {
                         first.push(&pad, Style::new());
@@ -454,12 +468,12 @@ impl Prose {
         }
         let mut rows = std::mem::take(&mut self.rows);
         rows.push(std::mem::take(&mut self.cur));
-        let (mut first, mut cont) = self.prefixes();
-        if let Some(n) = self.heading.filter(|&n| n >= 3) {
-            let marks = format!("{} ", "#".repeat(n));
-            first.push(&marks, self.style());
-            cont.push(" ".repeat(marks.len()), Style::new());
+        if self.heading.is_none() {
+            for row in &mut rows {
+                title(row);
+            }
         }
+        let (first, cont) = self.prefixes();
         for (i, row) in rows.into_iter().enumerate() {
             let f = if i == 0 { first.clone() } else { cont.clone() };
             wrap_under(f, &cont, row, self.width, &mut self.out);
@@ -482,7 +496,7 @@ impl Prose {
             Tag::BlockQuote(_) => {
                 self.flush();
                 self.containers.push(Container::Quote);
-                self.push_style(muted());
+                self.push_style(theme::style(Token::MdQuote));
             }
             Tag::CodeBlock(_) => {
                 self.flush();
@@ -516,7 +530,7 @@ impl Prose {
             Tag::Link { dest_url, .. } => {
                 self.links
                     .push((dest_url.to_string(), self.cur.plain().len()));
-                self.push_style(Style::new().underline());
+                self.push_style(theme::style(Token::MdLink).underline());
             }
             Tag::Image { dest_url, .. } => {
                 self.links
@@ -554,9 +568,10 @@ impl Prose {
             TagEnd::CodeBlock => {
                 if let Some(code) = self.code.take() {
                     let (first, cont) = self.prefixes();
+                    let st = theme::style(Token::MdCodeBlock);
                     for (i, l) in code.trim_end_matches('\n').split('\n').enumerate() {
                         let mut line = if i == 0 { first.clone() } else { cont.clone() };
-                        line.push(l, Style::new());
+                        line.push(l, st);
                         self.out.push(line);
                     }
                 }
@@ -580,7 +595,8 @@ impl Prose {
                     // the URL stays visible for the rest and for copying.
                     self.cur.link_from(at, &url);
                     if !url.is_empty() && !same {
-                        self.cur.push_link(format!(" ({url})"), muted(), &url);
+                        let st = theme::style(Token::MdLinkUrl);
+                        self.cur.push_link(format!(" ({url})"), st, &url);
                     }
                 }
             }
@@ -666,6 +682,26 @@ impl Prose {
                 rule.push(parts.join("─┼─"), muted());
                 self.out.push(rule);
             }
+        }
+    }
+}
+
+/// A line that is all bold (a model's `**1. Title**`) is a title: bold in
+/// the heading color, since bold alone barely shows in many fonts (§11.2).
+/// Code in it keeps its own color.
+fn title(row: &mut Line) {
+    let text: Vec<&mut crate::style::Span> = row
+        .spans
+        .iter_mut()
+        .filter(|s| !s.text.trim().is_empty())
+        .collect();
+    if text.is_empty() || !text.iter().all(|s| s.style.bold) {
+        return;
+    }
+    let color = theme::style(Token::MdHeading).fg;
+    for s in text {
+        if s.style.fg.is_none() {
+            s.style.fg = color;
         }
     }
 }
@@ -825,9 +861,50 @@ mod tests {
                 .iter()
                 .all(|s| s.style.bold && s.style.underline)
         );
+        // No `#`s at any level; all in the heading color.
         let ls = render_block("### Third", 80);
-        assert_eq!(plain(&ls), ["### Third"]);
-        assert!(ls[0].spans.iter().all(|s| s.style.bold && !s.style.dim));
+        assert_eq!(plain(&ls), ["Third"]);
+        let heading = theme::style(Token::MdHeading).fg;
+        assert!(
+            ls[0]
+                .spans
+                .iter()
+                .all(|s| s.style.bold && s.style.fg == heading && !s.style.dim)
+        );
+    }
+
+    #[test]
+    fn an_all_bold_line_is_a_title() {
+        // The cog trial's review answer: a bold title, its location under it.
+        let ls = render_block(
+            "**1. `bracketsBalanced` sends incomplete input**\n`repl.go:92` - when a bare `[` ...",
+            80,
+        );
+        assert_eq!(
+            plain(&ls),
+            [
+                "1. bracketsBalanced sends incomplete input",
+                "repl.go:92 - when a bare [ ..."
+            ]
+        );
+        let heading = theme::style(Token::MdHeading).fg;
+        let code = theme::style(Token::MdCode).fg;
+        let title = &ls[0].spans;
+        assert!(title.iter().all(|s| s.style.bold));
+        assert_eq!(title[0].style.fg, heading);
+        // Code in the title keeps its color.
+        assert_eq!(
+            title
+                .iter()
+                .find(|s| s.text == "bracketsBalanced")
+                .unwrap()
+                .style
+                .fg,
+            code
+        );
+        // A line with some bold isn't a title.
+        let ls = render_block("**Note:** this is plain", 80);
+        assert!(ls[0].spans.iter().all(|s| s.style.fg.is_none()));
     }
 
     #[test]
@@ -911,16 +988,15 @@ last"]);
         let ls = render_block(&block, 20);
         assert_eq!(plain(&ls), ["```rust", long, "    indented", "```"]);
         assert!(ls[0].spans[0].style.dim && ls[3].spans[0].style.dim);
-        // Tagged code is colored (`let` is a keyword), untagged code isn't.
+        // Tagged code is colored by language (`let` is a keyword), untagged
+        // code in the code block color.
         assert_eq!(ls[1].spans[0].style, theme::style(Token::SyntaxKeyword));
         let untagged = render_block("```\n**not bold**\n```", 80);
         assert_eq!(plain(&untagged)[1], "**not bold**");
-        assert_eq!(untagged[1].spans[0].style, Style::new());
+        let block = theme::style(Token::MdCodeBlock);
+        assert_eq!(untagged[1].spans[0].style, block);
         // An unknown tag shows the code as is; an unclosed fence is still code.
-        assert_eq!(
-            render_block("```nope\nx\n```", 80)[1].spans[0].style,
-            Style::new()
-        );
+        assert_eq!(render_block("```nope\nx\n```", 80)[1].spans[0].style, block);
         assert_eq!(render_block("```py\nx = 1", 80)[1].plain(), "x = 1");
     }
 
@@ -948,7 +1024,7 @@ last"]);
         let ls = render_block("> quoted words here\n---", 10);
         assert_eq!(
             plain(&ls),
-            ["> quoted", "> words", "> here", &"─".repeat(10)]
+            ["│ quoted", "│ words", "│ here", &"─".repeat(10)]
         );
         // A rule stops at 80 columns, as in pi.
         assert_eq!(plain(&render_block("***", 120)), ["─".repeat(80)]);
@@ -1021,15 +1097,16 @@ last"]);
             plain(&render_block("- [x] done\n- [ ] todo", 80)),
             ["- [x] done", "- [ ] todo"]
         );
-        // Lines of one paragraph join and wrap together, as in markdown.
-        assert_eq!(plain(&render_block("one\ntwo", 80)), ["one two"]);
+        // A single newline is a line break (§11.2), in a list item too.
+        assert_eq!(plain(&render_block("one\ntwo", 80)), ["one", "two"]);
+        assert_eq!(plain(&render_block("- one\n  two", 80)), ["- one", "  two"]);
         assert_eq!(plain(&render_block("Title\n=====", 80)), ["Title"]);
     }
 
     #[test]
     fn quotes_hold_lists_and_indented_code_stays() {
         let ls = render_block("> - a\n> - b", 80);
-        assert_eq!(plain(&ls), ["> - a", "> - b"]);
+        assert_eq!(plain(&ls), ["│ - a", "│ - b"]);
         let ls = render_block("text\n\n    code  here", 80);
         assert_eq!(plain(&ls), ["text", "code  here"]);
     }

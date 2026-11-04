@@ -49,6 +49,14 @@ eval-smoke: eval-build
 api-docs:
     env PSI_BLESS=1 cargo test -q -p psi-ext-api --test drift
 
+# Show a markdown file as Psi draws an answer (stdin when no file is given)
+md-preview *args:
+    cargo run -q -p psi-tui --example md_preview -- {{args}}
+
+# Rewrite the markdown snapshots after a deliberate change to the look
+md-bless:
+    env PSI_BLESS=1 cargo test -q -p psi-tui --test markdown_snapshots
+
 # Lint an extension
 ext-check path:
     cargo run -q -- ext check {{path}}

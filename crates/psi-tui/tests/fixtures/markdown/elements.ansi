@@ -1,0 +1,31 @@
+[0;1;4;33mA level one heading[0m
+
+Text with [0;3memphasis[0m, [0;1mbold[0m, [0;36minline code[0m, [0;9mstruck[0m and a ]8;;https://example.com\[0;4;34mlink[0;2m (https://example.com)]8;;\[0m.
+A second line of the same paragraph.
+
+[0;1;33mA level two heading[0m
+
+[0;35m- [0ma bullet
+  with a second line
+[0;35m- [0manother, with [0;36mcode[0m
+  [0;35m1. [0mnested and numbered
+  [0;35m2. [0mand the next
+
+[0;1;33mA level three heading[0m
+
+[0;2m│ A quote that runs on for a while, long enough to wrap at a narrow width.[0m
+
+[0;2m────────────────────────────────────────────────────────────────────────────────[0m
+
+[0;2m```[0m
+[0;32muntagged code: output, logs[0m
+[0;2m```[0m
+
+[0;2m```rust[0m
+[0;35mfn[0m [0;34mtagged[0m() -> [0;35mu32[0m { [0;33m42[0m }
+[0;2m```[0m
+
+[0;1mLeft[0;2m │ [0;1mRight[0m
+[0;2m─────┼──────[0m
+a   [0;2m │ [0m    1
+bb  [0;2m │ [0m   22
