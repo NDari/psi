@@ -4,7 +4,7 @@ Problems we know about and have chosen not to fix yet, with how much they matter
 
 ## Open
 
-### Bash can write what the file tools guard (added 2026-11-03, high priority for the first item)
+### Bash can write what the file tools guard (added 2026-11-03; the first item's high-priority part, `/reload`, fixed 2026-11-04)
 
 The file tools ask before changing Psi's configuration or files checkpoints can't undo, but bash only goes through the sandbox and the always-ask list. A heredoc is the easy way (the cog trial on 2026-11-03 wrote an extension with `cat > .psi/extensions/cog_run/init.lua << 'EOF'` after `write` was refused), but `cp`, `sed` or a script do the same.
 - **The project's `.psi/` through `/reload` (high).** The sandbox lets bash write the whole workspace, `.psi/` included, so a model can change settings and extensions without asking, and an extension's Lua runs inside Psi, outside the sandbox. At startup this is covered: trust is a fingerprint of `.psi/`'s settings, MCP servers, extensions, skills, prompts, themes and agents (`crates/psi-cli/src/trust.rs`), so a change asks again before anything loads. `/reload` doesn't check it (`Worker::reload` in `crates/psi-cli/src/interactive/worker.rs` reloads whatever is there), and a project with no `.psi/` at startup counts as having nothing to trust, so a `.psi/extensions/` created during the session loads on `/reload` without a question. Options:
@@ -21,6 +21,10 @@ The file tools ask before changing Psi's configuration or files checkpoints can'
 ### Tool-call markup inside an argument (added 2026-11-04, low priority)
 
 In an eval trial the 35B wrote a todo call whose `action` held the next parameter too: `"add>\n<parameter=text>\nCreate textkit/ package ..."` (llama-server's parser for Qwen's XML tool calls took a stray `>` as part of the value; `~/.psi/evals/2026-11-04-0236-quick-batteries-agents-qwen3.6-35b/multi_split_package`). The todo tool refused it as an unknown action and the model redid it correctly in the next call, so it cost one request. Fix if it comes back: in `psi-ai`'s shape fixes, split a string argument holding `\n<parameter=NAME>\n` into that parameter, with this call as the fixture.
+
+### `path:line` in answers isn't clickable (added 2026-11-04, low priority)
+
+Left over from the markdown work (plan §11.2, `psi-cog-test-issues.md`, "Answers look flat"): a code span like `cmd/cog/repl.go:92` in an answer could be an OSC 8 `file://` link to the file. The line can't go in the link (plan §15 item 5), so a click opens the file at the top; tmux needs `set -as terminal-features ',*:hyperlinks'`. Links already work for markdown links.
 
 ### The user's words are hard to read on a light terminal (added 2026-11-03, low priority)
 

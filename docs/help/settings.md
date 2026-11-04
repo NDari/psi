@@ -12,7 +12,8 @@ Keys:
 - post_edit_check: a command run after turns that edit files (psi help post-edit-check).
 - todo: true offers the model the todo tool (psi help todo).
 - subagents: true offers the model the agent tool (psi help agents).
-- compaction: {"tail": tokens kept verbatim after a summary (default "auto"), "summary":
+- compaction: {"tail": tokens kept verbatim after a summary (default "auto": 10K, less in
+  small windows), "summary":
   "structured" (default) or "free"}. For experiments (H-07, H-11).
 - theme: a theme name (psi help themes).
 - notify: "auto" (default), "bell" or "off". When a turn ends or something waits for you
