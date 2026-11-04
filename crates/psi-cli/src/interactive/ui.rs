@@ -41,6 +41,9 @@ pub enum UiMsg {
     Approve(ApprovalRequest, oneshot::Sender<Approval>),
     Blocked(BlockedRequest, oneshot::Sender<BlockedChoice>),
     Pause(String, oneshot::Sender<bool>),
+    /// /reload found the project's `.psi` changed since it was trusted:
+    /// what it holds, and whether to load it.
+    Trust(String, oneshot::Sender<bool>),
     RunDone(RunOutcome),
     /// The model server is up (the TUI started without one).
     Connected {
@@ -249,6 +252,7 @@ pub struct App<W: Write> {
     card: Option<Card>,
     blocked: Option<(BlockedRequest, oneshot::Sender<BlockedChoice>)>,
     pause: Option<(String, oneshot::Sender<bool>)>,
+    trust: Option<(String, oneshot::Sender<bool>)>,
     picker: Option<Picker>,
     pending_entries: Option<&'static str>,
     completer: Completer,
@@ -341,6 +345,7 @@ impl<W: Write> App<W> {
             card: None,
             blocked: None,
             pause: None,
+            trust: None,
             picker: None,
             pending_entries: None,
             completer,
@@ -405,6 +410,7 @@ impl<W: Write> App<W> {
         let waiting = self.card.is_some()
             || self.blocked.is_some()
             || self.pause.is_some()
+            || self.trust.is_some()
             || self.ext_modal.is_some()
             || matches!(
                 self.picker,
@@ -582,6 +588,17 @@ impl<W: Write> App<W> {
                     BlockedChoice::No => "left blocked".to_owned(),
                 };
                 self.info(&format!("  {what}"));
+            }
+            return;
+        }
+        if self.trust.is_some() {
+            let yes = match k.code {
+                KeyCode::Char('y') => Some(true),
+                KeyCode::Char('n') | KeyCode::Esc => Some(false),
+                _ => None,
+            };
+            if let (Some(yes), Some((_, tx))) = (yes, self.trust.take()) {
+                let _ = tx.send(yes);
             }
             return;
         }
@@ -1471,6 +1488,11 @@ impl<W: Write> App<W> {
                 self.pause = Some((reason, tx));
                 self.bell("paused: waiting for you");
             }
+            UiMsg::Trust(what, tx) => {
+                self.flush_text();
+                self.trust = Some((what, tx));
+                self.bell("/reload is waiting for you");
+            }
             UiMsg::Connected {
                 n_ctx,
                 server,
@@ -2218,6 +2240,15 @@ impl<W: Write> App<W> {
             let y = theme::style(Token::Warning);
             live.push(Line::styled(format!("┌ paused: {reason}"), y));
             live.push(Line::styled("└ c continue · s stop the run", y));
+            cursor = None;
+        } else if let Some((what, _)) = &self.trust {
+            let y = theme::style(Token::Warning);
+            live.push(Line::styled(format!("┌ /reload: {what}"), y));
+            live.push(Line::styled(
+                "│ new or changed since you last trusted it",
+                Style::default(),
+            ));
+            live.push(Line::styled("└ y load it · n don't reload", y));
             cursor = None;
         } else if let Some(m) = &mut self.ext_modal {
             let y = theme::style(Token::Warning);

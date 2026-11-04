@@ -12,7 +12,11 @@ psi.path, psi.toml, psi.base64, psi.hash and psi.time cover the rest. An extensi
 must run commands outside the sandbox needs "extensions": {"<name>": {"unsandboxed":
 true}} in your settings.
 
-psi ext check <path> lints one; psi ext test <path> runs its *_test.lua files;
+psi ext check <path> lints one; psi ext test <path> runs its *_test.lua files.
+Tests use the global test: test.case, test.emit, test.command, test.tool,
+test.requests, test.ui.answer(kind, value) (kinds confirm, select, input, custom,
+exec, http; answers queue in order) and the assertions test.eq/neq, truthy/falsy,
+contains/not_contains (plain text), matches (a Lua pattern) and errors(fn, text?).
 psi ext example lists tested examples and psi ext example <name> prints one. The
 author guide is docs/extensions.md and the API reference docs/api.md in the psi
 repository.

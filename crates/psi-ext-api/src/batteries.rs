@@ -226,6 +226,10 @@ pub(crate) fn re_split(
     Ok(re.split(&self::text(&text)).map(str::to_owned).collect())
 }
 
+pub(crate) fn re_escape(lua: &Lua, s: mlua::LuaString) -> mlua::Result<mlua::LuaString> {
+    lua.create_string(regex::escape(&self::text(&s)).as_bytes())
+}
+
 // ---- Paths -----------------------------------------------------------------
 
 fn out_path(lua: &Lua, p: &Path) -> mlua::Result<mlua::LuaString> {

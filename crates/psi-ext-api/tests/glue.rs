@@ -455,6 +455,9 @@ fn regexes_find_replace_and_split() {
         assert(re.replace("o", "foo", "0", 1) == "f0o")
         local parts = re.split(",\\s*", "a, b,c")
         assert(#parts == 3 and parts[2] == "b")
+        local dir = "/home/a.b (1)/c+d"
+        assert(re.is_match("^" .. re.escape(dir), dir .. "/x"))
+        assert(not re.is_match("^" .. re.escape(dir), "/home/aXb (1)/c+d/x"))
         "#,
     );
     assert!(

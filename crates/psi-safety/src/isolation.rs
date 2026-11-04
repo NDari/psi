@@ -155,12 +155,6 @@ impl Sandbox {
         self.backend
     }
 
-    /// Whether each call gets its own empty /tmp (bwrap only; the prompt
-    /// tells the model when it does).
-    pub fn private_tmp(&self) -> bool {
-        self.backend == Backend::Bwrap
-    }
-
     /// The path a failed command's output says the boundary blocked, if
     /// any (§8.5). Each backend's denial has its own error text.
     pub fn blocked(&self, output: &str) -> Option<PathBuf> {
@@ -247,8 +241,9 @@ impl Sandbox {
         push("--ro-bind", &[Path::new("/"), Path::new("/")]);
         push("--dev", &[Path::new("/dev")]);
         push("--proc", &[Path::new("/proc")]);
-        // A private /tmp per call.
-        push("--tmpfs", &[Path::new("/tmp")]);
+        // /tmp is the session's TMPDIR, so files there last between calls
+        // (models write /tmp by habit) and the host's /tmp stays out.
+        push("--bind", &[&self.cfg.tmpdir, Path::new("/tmp")]);
         push("--bind", &[&self.cfg.root, &self.cfg.root]);
         for d in &self.cfg.git_dirs {
             push("--bind-try", &[d, d]);
@@ -470,7 +465,6 @@ mod tests {
         }
         assert!(!p.contains("(subpath \"/tmp\")"), "{p}");
         assert!(p.ends_with("(deny network*)\n"), "{p}");
-        assert!(!sb.private_tmp());
         let (program, args) = sb.command(&root);
         assert_eq!(program, "/usr/bin/sandbox-exec");
         assert_eq!(args.len(), 2);
@@ -516,10 +510,13 @@ mod tests {
         );
         assert!(ok, "{out}");
         assert!(root.join("inside").exists());
-        // /tmp is private per call: the next call doesn't see the file.
-        let (ok, out) = sh(&sb, &root, "test -e /tmp/private && echo seen || echo gone");
-        assert!(ok);
-        assert_eq!(out.trim(), "gone");
+        // /tmp is the session's TMPDIR: the next call sees the file, the
+        // host's /tmp doesn't.
+        let (ok, out) = sh(&sb, &root, "cat /tmp/private");
+        assert!(ok, "{out}");
+        assert_eq!(out.trim(), "z");
+        assert_eq!(std::fs::read_to_string(tmp.join("private")).unwrap(), "z\n");
+        assert!(!Path::new("/tmp/private").exists());
         // A directory added for the session becomes writable.
         sb.add_dir(&outside, None).unwrap();
         let (ok, out) = sh(&sb, &root, &format!("echo x > {}/f", outside.display()));

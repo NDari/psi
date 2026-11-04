@@ -73,10 +73,10 @@ impl TodoList {
 pub(crate) fn schema() -> ToolSchema {
     ToolSchema {
         name: "todo",
-        description: "Keep a task list for this session. Actions: list; add (text); toggle (id) marks an item done or not done; clear.".into(),
+        description: "Keep a task list for this session. Actions: list; add (text); done (id) marks an item done; undo (id) marks it not done; clear.".into(),
         params: vec![
-            Param::new("action", ParamKind::String, "list, add, toggle or clear"),
-            Param::new("id", ParamKind::Integer, "The item's number, for toggle").optional(),
+            Param::new("action", ParamKind::String, "list, add, done, undo or clear"),
+            Param::new("id", ParamKind::Integer, "The item's number, for done and undo").optional(),
             Param::new("text", ParamKind::String, "The item, for add").optional(),
         ],
         example: json!({"action": "add", "text": "write the tests"}),
@@ -106,20 +106,26 @@ pub(crate) fn run(args: &Map<String, Value>, ctx: &ToolCtx) -> ToolOutput {
             });
             ToolOutput::ok(format!("Added #{id}: {text}"))
         }
-        // Words models use for marking an item done.
-        "toggle" | "done" | "complete" | "check" => {
+        // Words models use for marking an item done or not done. Both
+        // set the state, so a repeated call changes nothing; `toggle` marks
+        // done, since flipping confused a model that lost track (the cog
+        // trial, 2026-11-03).
+        "done" | "toggle" | "complete" | "check" | "undo" | "undone" | "reopen" | "uncheck" => {
             let Some(id) = int_arg(args, "id") else {
                 return ToolOutput::err(format!(
-                    "{action} needs the item's id. Example: todo {{\"action\": \"toggle\", \"id\": 1}}\n{}",
+                    "{action} needs the item's id. Example: todo {{\"action\": \"done\", \"id\": 1}}\n{}",
                     list.render()
                 ));
             };
-            let set_done = action != "toggle";
+            let done = !matches!(action.as_str(), "undo" | "undone" | "reopen" | "uncheck");
             let Some(t) = list.items.iter_mut().find(|t| t.id as i64 == id) else {
                 return ToolOutput::err(format!("There is no todo #{id}.\n{}", list.render()));
             };
-            t.done = if set_done { true } else { !t.done };
-            let state = if t.done { "done" } else { "not done" };
+            let state = if done { "done" } else { "not done" };
+            if t.done == done {
+                return ToolOutput::ok(format!("#{id} was already {state}: {}", t.text));
+            }
+            t.done = done;
             ToolOutput::ok(format!("#{id} is {state}: {}", t.text))
         }
         "clear" => {
@@ -128,7 +134,7 @@ pub(crate) fn run(args: &Map<String, Value>, ctx: &ToolCtx) -> ToolOutput {
             ToolOutput::ok(format!("Cleared {n} todos."))
         }
         other => ToolOutput::err(format!(
-            "Unknown action '{other}'. Use list, add, toggle or clear."
+            "Unknown action '{other}'. Use list, add, done, undo or clear."
         )),
     }
 }
@@ -143,7 +149,7 @@ mod tests {
     }
 
     #[test]
-    fn add_toggle_list_clear() {
+    fn add_done_undo_list_clear() {
         let d = tempfile::tempdir().unwrap();
         let ctx = ToolCtx::new(d.path(), d.path(), 10_000);
         assert_eq!(call(&ctx, json!({"action": "list"})).text, "No todos.");
@@ -156,11 +162,24 @@ mod tests {
             call(&ctx, json!({"action": "toggle", "id": 1})).text,
             "#1 is done: a"
         );
-        // "done" always marks done.
+        // Marking done again changes nothing, toggle included.
         assert_eq!(
             call(&ctx, json!({"action": "done", "id": 1})).text,
-            "#1 is done: a"
+            "#1 was already done: a"
         );
+        assert_eq!(
+            call(&ctx, json!({"action": "toggle", "id": 1})).text,
+            "#1 was already done: a"
+        );
+        assert_eq!(
+            call(&ctx, json!({"action": "undo", "id": 1})).text,
+            "#1 is not done: a"
+        );
+        assert_eq!(
+            call(&ctx, json!({"action": "undo", "id": 1})).text,
+            "#1 was already not done: a"
+        );
+        call(&ctx, json!({"action": "done", "id": 1}));
         assert_eq!(
             call(&ctx, json!({"action": "list"})).text,
             "[x] #1: a\n[ ] #2: b"

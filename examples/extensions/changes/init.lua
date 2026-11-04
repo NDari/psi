@@ -58,11 +58,25 @@ return {
     psi.register_tool{
       name = "recent_changes",
       description = "List the commits of the last few days with the files each touched",
-      params = { days = { type = "integer", description = "How many days back (default 7)" } },
+      params = {
+        days = { type = "integer", description = "How many days back (default 7)" },
+        under = { type = "string", description = "Only commits touching files under this directory" },
+      },
       required = {},
       annotations = { read_only = true },
       execute = function(args, ctx)
         local list = commits(psi, ctx.cwd, args.days or 7)
+        if args.under then
+          -- escape: the directory is matched as text, so "a.b" doesn't match "aXb".
+          local prefix = "^" .. psi.re.escape(psi.path.normalize(args.under) .. "/")
+          local kept = {}
+          for _, c in ipairs(list) do
+            for _, f in ipairs(c.files) do
+              if psi.re.is_match(prefix, f) then kept[#kept + 1] = c; break end
+            end
+          end
+          list = kept
+        end
         if #list == 0 then return "no commits in that time" end
         return summary(psi, list)
       end,

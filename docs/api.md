@@ -573,6 +573,20 @@ psi.re.split(pattern: string, text: string): string[]
 
 Returns `string[]`.
 
+#### psi.re.escape
+
+```
+psi.re.escape(s: string): string
+```
+
+`s` with every regex special character escaped, so a pattern matches it literally: `"^" .. psi.re.escape(dir)`.
+
+| Param | Type | Optional |
+|---|---|---|
+| `s` | `string` |  |
+
+Returns `string`.
+
 ### psi.path
 
 #### psi.path.join
@@ -624,7 +638,7 @@ Returns `string`.
 psi.path.relative(p: string, base: string?): string
 ```
 
-`p` relative to `base` (default: the working directory), with `..` where needed.
+`p` relative to `base` (default: the working directory), with `..` where needed; a result starting with `..` lies outside `base`.
 
 | Param | Type | Optional |
 |---|---|---|

@@ -241,6 +241,29 @@ impl Tui {
         panic!("psi never wrote {what:?}; it wrote:\n{:?}", self.raw());
     }
 
+    /// How often psi has taken the terminal (bracketed paste goes on each
+    /// time): once at start, and again after each pager or editor.
+    fn takes(&self) -> usize {
+        self.raw().matches("\x1b[?2004h").count()
+    }
+
+    /// Waits until psi has the terminal back from the pager, so keys typed
+    /// next reach psi instead of the released terminal. `before` is
+    /// `takes()` from before the command that paged.
+    fn wait_back(&self, before: usize, max: Duration) {
+        let start = Instant::now();
+        while start.elapsed() < max {
+            if self.takes() > before {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!(
+            "psi never took the terminal back; the screen:\n{}",
+            self.contents()
+        );
+    }
+
     fn send(&mut self, bytes: &[u8]) {
         self.master.write_all(bytes).unwrap();
         self.master.flush().unwrap();
@@ -513,11 +536,17 @@ fn undo_diff_show_stats_and_mode() {
     t.typ("write notes\r");
     t.wait_for("wrote it", SLOW);
     assert!(t.project.join("notes.md").exists());
+    // Each pager run releases the terminal; wait for psi to take it back
+    // before typing, or the keys can be lost (the test failed under load).
+    let n = t.takes();
     t.typ("/diff\r");
     t.wait_paged("▌ by write call 1", SLOW);
     t.wait_paged("+two", SLOW);
+    t.wait_back(n, SLOW);
+    let n = t.takes();
     t.typ("/show 1\r");
     t.wait_paged("\"text\": \"one\\ntwo\\n\"", SLOW);
+    t.wait_back(n, SLOW);
     t.typ("/stats\r");
     t.wait_for("model requests 2, tool calls 1 (0 failed)", SLOW);
     t.typ("/undo\r");
@@ -825,8 +854,10 @@ fn keybindings_file_rebinds_actions() {
     t.wait_for("unknown action 'bogus'", SLOW);
     t.send(b"\x07"); // Ctrl+G
     t.wait_for("plan mode: read-only", SLOW);
+    let n = t.takes();
     t.typ("/help\r");
     t.wait_paged("Ctrl+g", SLOW);
+    t.wait_back(n, SLOW);
     t.quit();
 }
 
@@ -834,8 +865,10 @@ fn keybindings_file_rebinds_actions() {
 fn command_output_goes_to_the_pager() {
     let (mut t, _s) = Tui::start(vec![], |_| {});
     t.wait_for("› ", SLOW);
+    let n = t.takes();
     t.typ("/help\r");
     t.wait_paged("the session as an inspection timeline", SLOW);
+    t.wait_back(n, SLOW);
     // The colors go to the pager too, and nothing reaches the scrollback.
     assert!(t.paged().contains("\x1b["));
     std::thread::sleep(Duration::from_millis(100));
@@ -1281,8 +1314,10 @@ fn starts_without_a_model_server_and_connects_when_it_is_up() {
     t.wait_for("no model server at http://127.0.0.1", SLOW);
     t.wait_screen("no model server", SLOW);
     // Commands work; a prompt stays in the box instead of being sent.
+    let n = t.takes();
     t.typ("/help\r");
     t.wait_paged("/resume", SLOW);
+    t.wait_back(n, SLOW);
     t.typ("hello there\r");
     t.wait_for("send again", SLOW);
     t.wait_screen("› hello there", SLOW);
@@ -1380,8 +1415,10 @@ fn a_resumed_session_shows_its_tool_calls() {
     assert_eq!(mark_color(&t, "● read  notes.txt"), vt100::Color::Idx(2));
     assert_eq!(mark_color(&t, "● read  gone.txt"), vt100::Color::Idx(1));
     // /show finds a call from the earlier run by its number.
+    let n = t.takes();
     t.typ("/show 1\r");
     t.wait_paged("notes.txt", SLOW);
+    t.wait_back(n, SLOW);
     t.quit();
 }
 
@@ -1399,8 +1436,10 @@ fn session_commands_answer() {
     t.wait_for("no MCP servers", SLOW);
     t.typ("/todos\r");
     t.wait_for("todo", SLOW);
+    let n = t.takes();
     t.typ("/inspect\r");
     t.wait_paged("step 1", SLOW);
+    t.wait_back(n, SLOW);
     t.typ("/tree\r");
     t.wait_for("↑↓ choose", SLOW);
     t.esc();
@@ -1489,5 +1528,44 @@ fn extension_shortcuts_renderers_status_widgets_and_reload() {
     t.typ("again\r");
     t.wait_for("ok two", SLOW);
     t.wait_for("CHANGED> echo two", SLOW);
+    t.quit();
+}
+
+/// §9.3: /reload asks before loading a project `.psi` that changed since it
+/// was trusted, here one created mid-session (bash can write it unasked).
+#[test]
+fn reload_asks_before_loading_a_changed_project_psi() {
+    let (mut t, _s) = Tui::start(vec![], |_| {});
+    t.wait_for("› ", SLOW);
+    let ext = t.project.join(".psi/extensions/hi.lua");
+    std::fs::create_dir_all(ext.parent().unwrap()).unwrap();
+    std::fs::write(
+        &ext,
+        r#"return { name = "hi", version = "1", description = "d", setup = function(psi)
+             psi.register_command("hi", { description = "say hi", handler = function()
+               psi.ui.notify("hi from the project")
+             end })
+           end }"#,
+    )
+    .unwrap();
+    t.typ("/reload\r");
+    t.wait_for("changed since you last trusted it", SLOW);
+    t.typ("n");
+    t.wait_for("not reloaded: ", SLOW);
+    let trust = t.project.parent().unwrap().join("home/.psi/trust.json");
+    assert!(!trust.exists());
+    t.wait_screen("› ", SLOW);
+    assert!(!t.contents().contains("changed since you last trusted it"));
+    t.typ("/reload\r");
+    t.wait_screen("changed since you last trusted it", SLOW);
+    t.typ("y");
+    t.wait_for("reloaded 1 extension(s)", SLOW);
+    assert!(std::fs::read_to_string(&trust).unwrap().contains("project"));
+    t.typ("/hi\r");
+    t.wait_for("hi from the project", SLOW);
+    // Trusted now: the next /reload doesn't ask.
+    t.typ("/reload\r");
+    t.wait_count("reloaded 1 extension(s)", 2, SLOW);
+    assert!(!t.contents().contains("changed since you last trusted it"));
     t.quit();
 }

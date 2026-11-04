@@ -505,6 +505,11 @@ function psi.re.replace(pattern, text, replacement, limit) end
 ---@return string[]
 function psi.re.split(pattern, text) end
 
+--- `s` with every regex special character escaped, so a pattern matches it literally: `"^" .. psi.re.escape(dir)`.
+---@param s string
+---@return string
+function psi.re.escape(s) end
+
 --- `part` under `base`; an absolute `part` replaces `base`.
 ---@param base string
 ---@param part string
@@ -521,7 +526,7 @@ function psi.path.normalize(p) end
 ---@return string
 function psi.path.absolute(p) end
 
---- `p` relative to `base` (default: the working directory), with `..` where needed.
+--- `p` relative to `base` (default: the working directory), with `..` where needed; a result starting with `..` lies outside `base`.
 ---@param p string
 ---@param base? string
 ---@return string

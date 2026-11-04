@@ -34,7 +34,7 @@ struct Fake {
     requests: Vec<Json>,
     /// Lines the extension printed, logged or notified.
     output: Vec<String>,
-    /// Scripted answers by kind: confirm, select, input, custom.
+    /// Scripted answers by kind: confirm, select, input, custom, exec, http.
     answers: BTreeMap<String, VecDeque<Json>>,
     /// Mock tools for `psi.execute_tool`: name to result.
     tools: BTreeMap<String, Json>,
@@ -596,7 +596,12 @@ fn install(
     ui.set(
         "answer",
         lua.create_function(move |lua, (kind, v): (String, Value)| {
-            let v: Json = lua.from_value(v)?;
+            let v: Json = lua.from_value(v).map_err(|e| {
+                mlua::Error::runtime(format!(
+                    "test.ui.answer({kind:?}, ...): the answer must be a plain value ({e}); {}",
+                    answer_shape(&kind)
+                ))
+            })?;
             f.0.borrow_mut()
                 .answers
                 .entry(kind)
@@ -610,7 +615,11 @@ fn install(
     t.set(
         "mock_tool",
         lua.create_function(move |lua, (name, result): (String, Value)| {
-            let r: Json = lua.from_value(result)?;
+            let r: Json = lua.from_value(result).map_err(|e| {
+                mlua::Error::runtime(format!(
+                    "test.mock_tool({name:?}, ...): the result must be a string or a plain table ({e})"
+                ))
+            })?;
             f.0.borrow_mut().tools.insert(name, r);
             Ok(())
         })?,
@@ -694,6 +703,17 @@ fn install(
     lua.load(TEST_LUA).set_name("=psi test").exec()
 }
 
+/// What `test.ui.answer` takes for each kind, for its error message.
+fn answer_shape(kind: &str) -> &'static str {
+    match kind {
+        "confirm" => "pass true or false",
+        "select" | "input" => "pass a string",
+        "exec" => "pass a table like { code = 0, stdout = \"...\", stderr = \"\" }",
+        "http" => "pass a table like { status = 200, body = \"...\" }",
+        _ => "pass a string, number, boolean or table of those, not a function",
+    }
+}
+
 const TEST_LUA: &str = r#"
 local function show(v, depth)
   depth = depth or 0
@@ -727,6 +747,34 @@ function test.contains(s, part, what)
   if type(s) ~= "string" or not s:find(part, 1, true) then
     error((what and (what .. ": ") or "") .. "expected " .. show(s) .. " to contain " .. show(part), 2)
   end
+end
+function test.neq(got, other, what)
+  if same(got, other) then
+    error((what and (what .. ": ") or "") .. "expected a value other than " .. show(other), 2)
+  end
+end
+function test.falsy(v, what)
+  if v then error((what or "expected false or nil") .. ", got " .. show(v), 2) end
+end
+function test.not_contains(s, part, what)
+  if type(s) == "string" and s:find(part, 1, true) then
+    error((what and (what .. ": ") or "") .. "expected " .. show(s) .. " not to contain " .. show(part), 2)
+  end
+end
+function test.matches(s, pattern, what)
+  if type(s) ~= "string" or not s:find(pattern) then
+    error((what and (what .. ": ") or "") .. "expected " .. show(s) .. " to match the Lua pattern " .. show(pattern), 2)
+  end
+end
+function test.errors(fn, part, what)
+  local ok, err = pcall(fn)
+  local prefix = what and (what .. ": ") or ""
+  if ok then error(prefix .. "expected an error, but the function returned", 2) end
+  err = tostring(err)
+  if part and not err:find(part, 1, true) then
+    error(prefix .. "expected an error containing " .. show(part) .. ", got " .. show(err), 2)
+  end
+  return err
 end
 -- A virtual clock: os.time and os.clock start at fixed values and move
 -- only with test.clock.advance.
@@ -873,6 +921,59 @@ mod tests {
         assert_eq!(r.cases.len(), 1, "{}", r.render(true));
         let e = r.cases[0].error.as_deref().unwrap();
         assert!(e.ends_with(r#"expected "a\nc", got "a\nb""#), "{e}");
+    }
+
+    #[test]
+    fn the_extra_assertions_pass_and_fail_with_clear_messages() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("init.lua"),
+            r#"return { name = "a", version = "1", description = "d", setup = function() end }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            d.path().join("a_test.lua"),
+            r#"
+            test.case("pass", function()
+              test.neq(1, 2); test.neq({ a = 1 }, { a = 2 })
+              test.falsy(nil); test.falsy(false)
+              test.not_contains("fix-parse ok", "fail")
+              test.matches("go 1.27", "^go %d+%.%d+$")
+              test.contains("fix-parse", "x-p")
+              local e = test.errors(function() error("boom here") end, "boom")
+              test.contains(e, "boom here")
+            end)
+            test.case("neq", function() test.neq({ 1 }, { 1 }) end)
+            test.case("falsy", function() test.falsy(0) end)
+            test.case("not_contains", function() test.not_contains("abc", "b") end)
+            test.case("matches", function() test.matches("abc", "^%d") end)
+            test.case("errors", function() test.errors(function() end) end)
+            test.case("errors text", function() test.errors(function() error("x") end, "y") end)
+            test.case("answer", function() test.ui.answer("exec", function() end) end)
+            "#,
+        )
+        .unwrap();
+        let r = run(d.path());
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        let errors: Vec<&str> = r
+            .cases
+            .iter()
+            .map(|c| c.error.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(errors[0], "", "{}", r.render(true));
+        let want = [
+            "expected a value other than { 1 = 1 }",
+            "expected false or nil, got 0",
+            "expected \"abc\" not to contain \"b\"",
+            "expected \"abc\" to match the Lua pattern \"^%d\"",
+            "expected an error, but the function returned",
+            "expected an error containing \"y\"",
+            "test.ui.answer(\"exec\", ...): the answer must be a plain value",
+        ];
+        for (got, want) in errors[1..].iter().zip(want) {
+            assert!(got.contains(want), "{got:?} lacks {want:?}");
+        }
+        assert!(errors[7].contains("{ code = 0, stdout"), "{}", errors[7]);
     }
 
     #[test]

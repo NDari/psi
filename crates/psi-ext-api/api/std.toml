@@ -118,6 +118,13 @@ params = [
 ]
 returns = "string[]"
 
+[[function]]
+name = "re.escape"
+doc = "`s` with every regex special character escaped, so a pattern matches it literally: `\"^\" .. psi.re.escape(dir)`."
+builtin = true
+params = [{ name = "s", type = "string" }]
+returns = "string"
+
 # ---- Paths and files --------------------------------------------------------
 
 [[function]]
@@ -146,7 +153,7 @@ returns = "string"
 
 [[function]]
 name = "path.relative"
-doc = "`p` relative to `base` (default: the working directory), with `..` where needed."
+doc = "`p` relative to `base` (default: the working directory), with `..` where needed; a result starting with `..` lies outside `base`."
 builtin = true
 params = [
   { name = "p", type = "string" },

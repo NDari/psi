@@ -11,8 +11,10 @@ pub const TOOL: &str = "agent";
 /// Added to every sub-agent's system prompt, before its own.
 pub const SUB_NOTE: &str = "You are a sub-agent: another agent gave you this task and sees only your last answer. End with everything it needs.";
 
-/// The most model requests one sub-agent call makes.
-pub const MAX_TURNS: u32 = 30;
+/// The most model requests one sub-agent call makes before it pauses (TUI)
+/// or stops. 100 since a broad scout review in the cog trial needed 134
+/// (2026-11-03); a setting comes later.
+pub const MAX_TURNS: u32 = 100;
 
 /// One agent: a name, when to use it, its tools and its instructions
 /// (pi's format: markdown with `name`, `description` and `tools`
@@ -59,7 +61,7 @@ pub fn built_in() -> Vec<AgentDef> {
     vec![
         AgentDef {
             name: "scout".into(),
-            description: "Explores the code and reports; changes nothing.".into(),
+            description: "Explores the code and reports; changes nothing and runs no builds or tests (give those to worker).".into(),
             tools: Some(
                 ["read", "bash", "grep", "find", "ls"]
                     .map(str::to_owned)

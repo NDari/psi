@@ -79,7 +79,7 @@ Rust-backed modules for what Lua lacks (D-45; every signature is in
 - `psi.json.encode/decode` (`psi.json.null()`, `psi.json.array(t)` for an
   empty array), `psi.toml.encode/decode`, `psi.base64.encode/decode`,
   `psi.hash.sha256`.
-- `psi.re.is_match/find/find_all/replace/split`, with Rust regex syntax.
+- `psi.re.is_match/find/find_all/replace/split/escape`, with Rust regex syntax; `escape` puts a literal string (a path, user input) into a pattern.
 - `psi.path.join/normalize/absolute/relative/basename/dirname/ext` and
   `psi.fs.read/write/exists/stat/list/glob` (glob skips gitignored files).
 - `psi.time.now/format/parse`.
@@ -162,11 +162,25 @@ end)
 Helpers: `test.case(name, fn)`, `test.emit(event, payload)` (returns
 `{ payload, results, blocked }`), `test.tool(name, args)`,
 `test.command(name, args)`, `test.shortcut(key)`,
-`test.render(tool, call, width)`, `test.ui.answer(kind, value)` for
-confirm, select, input and custom, `test.mock_tool(name, result)` for
+`test.render(tool, call, width)`, `test.mock_tool(name, result)` for
 `execute_tool`, `test.requests(kind)` (everything the extension asked of
 psi), `test.clear()`, `test.set_entries({{type, data}, ...})`,
 `test.set_flag(name, value)` (as `--ext-flag name=value`: a string),
 `test.providers()` (what `psi.register_provider` registered),
-`test.eq`, `test.truthy`, `test.contains`, `test.clock.advance(seconds)`
-and `test.tmp` (the test's working directory). Each case starts clean.
+`test.clock.advance(seconds)` and `test.tmp` (the test's working
+directory). Each case starts clean.
+
+`test.ui.answer(kind, value)` queues an answer; calls of that kind take
+them in order. The kinds: `confirm` (true or false), `select` and `input`
+(a string), `custom` (any plain value), `exec` (`{ code = 0, stdout = "...",
+stderr = "" }`, for `psi.exec`) and `http` (`{ status = 200, body = "..." }`,
+for `psi.http`).
+
+Assertions, each with an optional last argument naming what is checked:
+`test.eq(got, want)` and `test.neq(got, other)` (tables compare deeply),
+`test.truthy(v)`, `test.falsy(v)`, `test.contains(s, part)` and
+`test.not_contains(s, part)` (plain text), `test.matches(s, pattern)` (a
+Lua pattern) and `test.errors(fn, part?)` (expects `fn` to raise an error,
+containing `part` when given; returns the message). Prefer `test.contains`
+to `string.find`: in Lua patterns `- . % ( ) [ ] * + ? ^ $` are special, so
+`("fix-parse"):find("fix-parse")` is nil unless given `1, true`.

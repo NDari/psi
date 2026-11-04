@@ -126,7 +126,7 @@ impl Worker {
                     Err(e) => UiMsg::Error(format!("cannot open {}: {e}", p.display())),
                 },
                 Cmd::Fork(id) => self.fork(&id),
-                Cmd::Reload => self.reload().await,
+                Cmd::Reload => self.reload(&ui).await,
                 Cmd::Plan => {
                     let on = !self.agent.plan().enabled;
                     match self.agent.set_plan_mode(on) {
@@ -159,7 +159,13 @@ impl Worker {
         }
     }
 
-    async fn reload(&mut self) -> UiMsg {
+    async fn reload(&mut self, ui: &UnboundedSender<UiMsg>) -> UiMsg {
+        if !self.project_still_trusted(ui).await {
+            return UiMsg::Info(format!(
+                "not reloaded: {} changed and isn't trusted",
+                self.cwd.join(".psi").display()
+            ));
+        }
         let ext = self.agent.extensions().clone();
         let (found, mut errors) = self.ext_sources.find();
         let ext2 = ext.clone();
@@ -176,6 +182,39 @@ impl Worker {
             UiMsg::Info(format!("reloaded {n} extension(s)"))
         } else {
             UiMsg::Error(format!("reloaded {n} extension(s); {}", errors.join("; ")))
+        }
+    }
+
+    /// Before /reload loads the project's `.psi` again: whether it matches
+    /// what the user trusted, or the user trusts it now (§9.3: again
+    /// whenever it changes on disk). Bash, an approved write or a checkout
+    /// may have changed it mid-session, and an extension runs as the user.
+    /// (`&mut self` keeps the future Send: Worker is Send, not Sync.)
+    async fn project_still_trusted(&mut self, ui: &UnboundedSender<UiMsg>) -> bool {
+        // Not trusted at startup: the project's .psi isn't loaded at all.
+        if self.ext_sources.project.is_none() {
+            return true;
+        }
+        let Some(print) = psi_cli::trust::fingerprint(&self.cwd) else {
+            return true;
+        };
+        let Some(home) = self.ext_sources.home.as_deref() else {
+            return false;
+        };
+        if psi_cli::trust::is_trusted(home, &self.cwd, &print) {
+            return true;
+        }
+        let what = psi_cli::trust::describe(&self.cwd);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if ui.send(UiMsg::Trust(what, tx)).is_err() || !rx.await.unwrap_or(false) {
+            return false;
+        }
+        match psi_cli::trust::trust(home, &self.cwd, &print) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!("could not record trust: {e:#}");
+                true
+            }
         }
     }
 

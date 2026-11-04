@@ -13,7 +13,7 @@ Slash commands and keys in the interactive mode.
 - /<template> args runs a prompt template; /skill:<name> args puts a skill in the conversation.
 
 Keys: Enter sends (while a run is going, it steers it), Alt+Enter queues a follow-up,
-Shift+Enter is a new line, Esc aborts, Ctrl+C clears (twice quits), Ctrl+D quits,
+Shift+Enter (or Ctrl+J, which works in any terminal) is a new line, Esc aborts, Ctrl+C clears (twice quits), Ctrl+D quits,
 Ctrl+Alt+P toggles plan mode, Ctrl+G edits the prompt in $VISUAL or $EDITOR,
 Ctrl+R searches earlier prompts, Ctrl+S puts the draft aside (again brings it back).
 A paste over 10 lines or 1,000 characters shows as [Pasted text #1 +N lines] and is

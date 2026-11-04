@@ -118,6 +118,36 @@ fn missing_search_tools(found: impl Fn(&str) -> bool) -> Option<String> {
     ))
 }
 
+/// A startup line when tmux won't pass Shift+Enter on: with `extended-keys`
+/// off it arrives as a plain Enter and sends the prompt (pi warns too).
+fn tmux_extended_keys(
+    in_tmux: bool,
+    option: impl FnOnce(&str) -> Option<String>,
+) -> Option<String> {
+    if !in_tmux || option("extended-keys")?.trim() != "off" {
+        return None;
+    }
+    Some(
+        "tmux extended-keys is off, so Shift+Enter sends the prompt; Ctrl+J adds a new line. \
+         To fix, in ~/.tmux.conf: set -g extended-keys on; set -g extended-keys-format csi-u; \
+         set -as terminal-features 'xterm*:extkeys'"
+            .into(),
+    )
+}
+
+/// A global tmux option's value (`tmux show -gv`), or None when tmux can't say.
+fn tmux_option(name: &str) -> Option<String> {
+    let out = std::process::Command::new("tmux")
+        .args(["show", "-gv", name])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// Raw mode, bracketed paste, focus events and the kitty keyboard flags.
 fn enter_terminal() -> std::io::Result<()> {
     terminal::enable_raw_mode()?;
@@ -276,6 +306,10 @@ pub fn run(args: RunArgs) -> Result<ExitCode> {
     if let Some(w) = missing_search_tools(on_path) {
         warnings.push(w);
     }
+    let in_tmux = std::env::var_os("TMUX").is_some_and(|t| !t.is_empty());
+    if let Some(w) = tmux_extended_keys(in_tmux, tmux_option) {
+        warnings.push(w);
+    }
     let keymap = load_keymap(home.as_deref(), &mut warnings);
     let wanted = args.settings["theme"].as_str().unwrap_or("default");
     match resources.theme(wanted) {
@@ -357,7 +391,18 @@ pub fn run(args: RunArgs) -> Result<ExitCode> {
 
 #[cfg(test)]
 mod tests {
-    use super::missing_search_tools;
+    use super::{missing_search_tools, tmux_extended_keys};
+
+    #[test]
+    fn tmux_with_extended_keys_off_gives_the_fix() {
+        let off = |_: &str| Some("off\n".to_owned());
+        let w = tmux_extended_keys(true, off).unwrap();
+        assert!(w.contains("Ctrl+J adds a new line"), "{w}");
+        assert!(w.contains("set -g extended-keys on"), "{w}");
+        assert_eq!(tmux_extended_keys(false, off), None);
+        assert_eq!(tmux_extended_keys(true, |_| Some("on\n".into())), None);
+        assert_eq!(tmux_extended_keys(true, |_| None), None);
+    }
 
     #[test]
     fn missing_rg_or_fd_gives_one_line_with_the_fix() {

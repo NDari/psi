@@ -222,9 +222,8 @@ async fn start_extensions(
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let (found, errors) = sources.find();
     warnings.extend(errors.into_iter().map(|e| format!("extension: {e}")));
-    if found.is_empty() {
-        return (ExtManager::empty(), rx);
-    }
+    // Started even with none found, so extensions that /reload loads later
+    // can reach the UI.
     let shared = Arc::new(std::sync::RwLock::new(shared));
     let started = tokio::task::spawn_blocking(move || {
         ExtManager::start(&found, shared, Limits::default(), tx)
@@ -378,7 +377,6 @@ pub async fn prepare(args: &RunArgs, approver: Arc<dyn Approver>) -> Result<Prep
     let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
     let facts = PromptFacts {
         checkpoints: safety.checkpoints.is_some(),
-        sandboxed: sandbox.as_ref().is_some_and(|s| s.private_tmp()),
     };
     let system = system_prompt(
         &names,

@@ -20,6 +20,13 @@ test.case("the tool lists commits with the files they touched", function()
   test.eq(call.argv[2], "log")
 end)
 
+test.case("under keeps the commits touching that directory", function()
+  test.ui.answer("exec", { code = 0, stdout = LOG })
+  local r = test.tool("recent_changes", { under = "docs" })
+  test.contains(r.text, "d4e5f6a")
+  test.not_contains(r.text, "a1b2c3d")
+end)
+
 test.case("a failing git is a failed tool call", function()
   test.ui.answer("exec", { code = 128, stderr = "fatal: not a git repository" })
   local r = test.tool("recent_changes", {})

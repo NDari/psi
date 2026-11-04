@@ -27,6 +27,10 @@ const READ_ONLY: &[&str] = &[
     "ls",
     "tree",
     "pwd",
+    // Change only the shell's own directory; models start many commands with them.
+    "cd",
+    "pushd",
+    "popd",
     "echo",
     "printf",
     "wc",
@@ -543,9 +547,16 @@ mod tests {
             "git config --list",
             "git diff --stat",
             "FOO=1",
+            "cd /home/x/project && ls -la",
+            "cd sub; git status",
+            "pushd a && ls && popd",
         ] {
             assert_eq!(check(c), Ok(()), "{c}");
         }
+        assert_eq!(
+            check("cd /x && go build ./..."),
+            Err("go isn't on the read-only list".into())
+        );
     }
 
     #[test]
