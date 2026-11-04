@@ -18,6 +18,10 @@ The file tools ask before changing Psi's configuration or files checkpoints can'
 - **Gitignored files (medium).** write and edit ask before changing one, since checkpoints skip it; bash doesn't, so a clobbered `.env` can't be undone.
 - **Read before overwrite (low).** The file tools refuse to replace a file the model hasn't read; bash doesn't check. Checkpoints still undo it.
 
+### Tool-call markup inside an argument (added 2026-11-04, low priority)
+
+In an eval trial the 35B wrote a todo call whose `action` held the next parameter too: `"add>\n<parameter=text>\nCreate textkit/ package ..."` (llama-server's parser for Qwen's XML tool calls took a stray `>` as part of the value; `~/.psi/evals/2026-11-04-0236-quick-batteries-agents-qwen3.6-35b/multi_split_package`). The todo tool refused it as an unknown action and the model redid it correctly in the next call, so it cost one request. Fix if it comes back: in `psi-ai`'s shape fixes, split a string argument holding `\n<parameter=NAME>\n` into that parameter, with this call as the fixture.
+
 ### The user's words are hard to read on a light terminal (added 2026-11-03, low priority)
 
 Committed user messages are bright white and bold (`commit_user` in `crates/psi-cli/src/interactive/ui.rs`, plan §11.2), which stands out on a dark background but nearly disappears on a white one. On a light theme they should be dark instead (black, or the terminal's own foreground, bold). Options: a theme token for the text (pi's themes have `userMessageText`, which Psi uses for the `▌` bar), or picking by the terminal's background (OSC 11 query, or `COLORFGBG`). Low priority: the owner uses a dark terminal.

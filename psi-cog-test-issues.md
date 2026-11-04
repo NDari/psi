@@ -88,6 +88,13 @@ These are the model's mistakes; the session has what a reviewer needs to see the
 - **`cog_run` was never called** after it was built, in about 250 later requests.
 - **Went well:** the post-edit check ran 56 times (15 s in all) and its 7 failures were all real (the red tests, the stale `docs/words.md`); failed edits (two "not found", one "matches 3 places", one write refused after a `sed -i`) each recovered in one or two calls; reads came in parallel batches of up to five; always-ask caught `git push` and a `sudo chmod` on `/etc/ssh`; the status-line extension showed in the footer as written; scout found the real high-priority bug.
 
+### The fixes in one eval run (added 2026-11-04)
+
+One quick-set run on the 35B at 64K with the batteries variant plus `"subagents": true` (`~/.psi/evals/2026-11-04-0236-quick-batteries-agents-qwen3.6-35b`): 7 PASS, 3 MODEL-FAIL (logic bugs: a sort order, a foreign key, a missing import), 0 HARNESS-FAIL. One run, so it proves the changes work, not how well. What it shows:
+- **Todo:** used in 5 trials, 37 calls; `done` each time an item was finished, no `toggle`, no item marked twice. One call carried tool-call markup in its action (`"add>\n<parameter=text>\n..."`, multi_split_package), refused as an unknown action and redone correctly at once (`known-issues.md`).
+- **Scout:** called once (feat_logstats_jsonl) with a reading task only, no builds or tests asked; 5 requests, reads and `find`, no refusals.
+- **`/tmp`:** used in 6 trials (up to 14 calls in sh_archive_fix), each call setting up its own test folders there; no "file not found" for a file kept from an earlier call.
+
 ## Fixed
 
 ### `psi.re` has no `escape` (added 2026-11-03)
