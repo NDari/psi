@@ -4,7 +4,7 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 
 # llama-server settings for llm-up; override like `just ctx=65536 llm-up qwen`.
 port := "9931"
-# "auto" is 131072, or 65536 for qwen35b (the context it was first run with).
+# "auto" is 131072, or 65536 for qwen35b and qwen27b (the context each was first run with).
 ctx := "auto"
 # Speculative decoding (llama-server --spec-type): "auto" is draft-mtp for
 # qwen, whose GGUF carries its own draft layers (about 1.8x faster
@@ -21,6 +21,11 @@ gemma := "-hf google/gemma-4-12B-it-qat-q4_0-gguf:Q4_0 --temp 1.0 --top-p 0.95 -
 # Sampling is the server's default. -ub 2048 reads prompts about 8% faster up
 # to 16K of context than the default 512 (1% at 40K; llama-bench, 2026-11-03).
 qwen35b := '-hf unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL -fa on -np 1 --spec-draft-n-max 3 -ub 2048 --chat-template-kwargs {"preserve_thinking":true}'
+# Qwen3.8 27B (dense), tried 2026-11-05 on one extension task: its GGUF carries
+# MTP layers too, which took generation from about 18 to 32 tok/s (38 with
+# thinking off, 83% of drafts accepted). Thinking off as for qwen35b; the task
+# took 113 s, against 229 s with thinking and no MTP. The model card's sampling.
+qwen27b := '-hf unsloth/Qwen3.8-27B-GGUF:Q6_K -fa on -np 1 --spec-draft-n-max 3 -ub 2048 --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0'
 
 # List the recipes
 default:
@@ -118,7 +123,7 @@ eval-ext *args: build eval-build
 inspect path *args: build
     ./target/debug/psi inspect {{path}} {{args}}
 
-# Start llama-server with a model (qwen, gemma or qwen35b) in the background
+# Start llama-server with a model (qwen, gemma, qwen35b or qwen27b) in the background
 llm-up model="qwen":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -126,7 +131,8 @@ llm-up model="qwen":
       qwen) args="{{qwen}}"; auto_spec=draft-mtp; auto_ctx=131072; reasoning=off ;;
       gemma) args="{{gemma}}"; auto_spec=none; auto_ctx=131072; reasoning=off ;;
       qwen35b) args='{{qwen35b}}'; auto_spec=draft-mtp; auto_ctx=65536; reasoning=off ;;
-      *) echo "llm-up: model is qwen, gemma or qwen35b, not {{model}}" >&2; exit 1 ;;
+      qwen27b) args='{{qwen27b}}'; auto_spec=draft-mtp; auto_ctx=65536; reasoning=off ;;
+      *) echo "llm-up: model is qwen, gemma, qwen35b or qwen27b, not {{model}}" >&2; exit 1 ;;
     esac
     spec="{{spec}}"
     [[ "$spec" == auto ]] && spec=$auto_spec
