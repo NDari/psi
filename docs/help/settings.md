@@ -14,7 +14,9 @@ Keys:
 - subagents: true offers the model the agent tool (psi help agents).
 - compaction: {"tail": tokens kept verbatim after a summary (default "auto": 10K, less in
   small windows), "summary":
-  "structured" (default) or "free"}. For experiments (H-07, H-11).
+  "structured" (default) or "free", "clear": true to replace old tool results with a
+  one-line note instead of summarizing, when that frees enough (default false; results
+  are still cleared when a summary can't make room)}. For experiments (H-07, H-11).
 - theme: a theme name (psi help themes).
 - notify: "auto" (default), "bell" or "off". When a turn ends or something waits for you
   while the terminal is unfocused, auto rings the bell and sends a desktop notification.

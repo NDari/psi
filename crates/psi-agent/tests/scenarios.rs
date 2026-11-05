@@ -550,6 +550,15 @@ fn kinds(a: &Agent) -> Vec<String> {
         .collect()
 }
 
+/// Clearing old results is off by default (§7.4, 2026-11-05); these
+/// tests cover it for when it is turned on.
+fn clearing_on(a: Agent) -> Agent {
+    a.with_compaction(psi_agent::CompactionSettings {
+        clear: true,
+        ..Default::default()
+    })
+}
+
 #[tokio::test]
 async fn old_tool_results_are_cleared_past_the_trigger() {
     let mut replies = reads(8);
@@ -558,7 +567,7 @@ async fn old_tool_results_are_cleared_past_the_trigger() {
     // 250 lines: about the size 200 numbered lines were before read
     // dropped its line numbers, so the trigger falls at the same step.
     write_files(&f.cwd, 8, 250);
-    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    let mut a = clearing_on(f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372));
     let out = a.run("read the files").await;
     assert_eq!(out.stop, Stop::Done, "{:?}", out.stop);
     // One batch, once past the trigger, down to 30% of the window (four
@@ -603,7 +612,7 @@ async fn clearing_that_matches_a_summary_is_used_instead_of_one() {
     replies.push(text("done"));
     let f = Fixture::new(replies);
     write_files(&f.cwd, 5, 350);
-    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    let mut a = clearing_on(f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372));
     let out = a.run("read the files").await;
     assert_eq!(out.stop, Stop::Done, "{:?}", out.stop);
     let k = kinds(&a);
@@ -649,7 +658,7 @@ async fn a_step_keeps_only_the_results_the_context_can_hold() {
         text("done"),
     ]);
     write_files(&f.cwd, 6, 430);
-    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    let mut a = clearing_on(f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372));
     let out = a.run("read the files").await;
     assert_eq!(out.stop, Stop::Done, "{:?}", out.stop);
     let r = tool_results(&a);
@@ -803,6 +812,7 @@ async fn the_compaction_setting_sets_the_tail_and_the_summary_form() {
         .with_compaction(psi_agent::CompactionSettings {
             tail: Some(0),
             summary: psi_agent::SummaryForm::Free,
+            ..Default::default()
         });
     prefill(&mut a, 30);
     let out = a.run("go on").await;
@@ -1045,7 +1055,7 @@ async fn old_results_are_cleared_where_the_cache_breaks_anyway() {
     replies.push(text("planned"));
     let f = Fixture::new(replies);
     write_files(&f.cwd, 6, 200);
-    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    let mut a = clearing_on(f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372));
     assert_eq!(a.run("read the files").await.stop, Stop::Done);
     assert_eq!(a.run("go on").await.stop, Stop::Done);
     assert!(
@@ -1091,7 +1101,7 @@ async fn old_results_in_the_tail_are_cleared_after_a_summary() {
     replies.push(text("done"));
     let f = Fixture::new(replies);
     write_files(&f.cwd, 6, 100);
-    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    let mut a = clearing_on(f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372));
     prefill(&mut a, 30);
     let out = a.run("go on").await;
     assert_eq!(out.stop, Stop::Done, "{:?} {:?}", out.stop, kinds(&a));
@@ -1109,6 +1119,75 @@ async fn old_results_in_the_tail_are_cleared_after_a_summary() {
     );
     // The last three results stay whole.
     assert!(after.contains("file 5 line 000") && after.contains("file 3 line 000"));
+}
+
+#[tokio::test]
+async fn by_default_past_the_trigger_it_summarizes_instead_of_clearing() {
+    // The run that clears 4 results when clearing is on (above): by
+    // default the model keeps what it read until a summary takes its
+    // place (2026-11-05: a 27B looped after its reads were cleared).
+    let mut replies = reads(7);
+    replies.push(text(SUMMARY));
+    replies.push(call("read", json!({"path": "f7.txt"})));
+    replies.push(text("done"));
+    let f = Fixture::new(replies);
+    write_files(&f.cwd, 8, 250);
+    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    let out = a.run("read the files").await;
+    assert_eq!(out.stop, Stop::Done, "{:?} {:?}", out.stop, kinds(&a));
+    let k = kinds(&a);
+    assert!(k.contains(&"compaction".to_owned()), "{k:?}");
+    assert!(!k.iter().any(|k| k.starts_with("cleared")), "{k:?}");
+    for r in f.server.chat_requests() {
+        assert!(!r["messages"].to_string().contains("Result cleared"));
+    }
+}
+
+#[tokio::test]
+async fn by_default_a_cache_break_clears_nothing() {
+    let mut replies = reads(6);
+    replies.push(text("read them"));
+    replies.push(text("planned"));
+    let f = Fixture::new(replies);
+    write_files(&f.cwd, 6, 200);
+    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    assert_eq!(a.run("read the files").await.stop, Stop::Done);
+    a.set_plan_mode(true).unwrap();
+    assert_eq!(a.run("plan the next step").await.stop, Stop::Done);
+    assert!(
+        !kinds(&a).iter().any(|k| k.starts_with("cleared")),
+        "{:?}",
+        kinds(&a)
+    );
+    let reqs = f.server.chat_requests();
+    assert!(
+        reqs.last().unwrap()["messages"]
+            .to_string()
+            .contains("file 0 line 000")
+    );
+}
+
+#[tokio::test]
+async fn by_default_results_are_still_cleared_when_a_summary_fails() {
+    // Both ways of asking for a summary fail; clearing is then the only
+    // way to make room, so it runs even though it is off.
+    let mut replies = reads(7);
+    replies.push(call("read", json!({"path": "x"})));
+    replies.push(text(""));
+    replies.push(call("read", json!({"path": "f7.txt"})));
+    replies.push(text("done"));
+    let f = Fixture::new(replies);
+    write_files(&f.cwd, 8, 250);
+    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    let out = a.run("read the files").await;
+    assert_eq!(out.stop, Stop::Done, "{:?} {:?}", out.stop, kinds(&a));
+    let k = kinds(&a);
+    let failed = k.iter().position(|x| x == "guard compaction_failed");
+    let cleared = k.iter().position(|x| x.starts_with("cleared"));
+    assert!(
+        matches!((failed, cleared), (Some(f), Some(c)) if f < c),
+        "{k:?}"
+    );
 }
 
 #[tokio::test]

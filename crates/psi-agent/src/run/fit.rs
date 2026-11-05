@@ -63,16 +63,21 @@ pub(crate) fn clearing_will_do(
 impl Agent {
     /// Past the trigger, clear old tool results if that frees enough;
     /// otherwise summarize, and clear in what is left if still needed.
-    /// Below it, clear only where the cache breaks anyway. Returns whether
-    /// it summarized.
+    /// Below it, clear only where the cache breaks anyway. With clearing
+    /// off (the default), past the trigger it summarizes, and clears only
+    /// when the summary can't make room. Returns whether it summarized.
     pub(super) async fn fit_context(&mut self) -> Result<bool, String> {
+        let clear = self.compaction.clear;
         let (tokens, at) = self.context_size();
         if tokens < at {
-            self.clear_at_cache_break()?;
+            if clear {
+                self.clear_at_cache_break()?;
+            }
             return Ok(false);
         }
         let clearing = self.plan_clearing(tokens, at);
-        if let Some((ids, freed)) = &clearing
+        if clear
+            && let Some((ids, freed)) = &clearing
             && clearing_will_do(
                 tokens,
                 *freed,
@@ -98,7 +103,9 @@ impl Agent {
             }
             // The summary replaced the start of the context: the server
             // reads what follows it again, so clearing there is free.
-            self.clear_at_cache_break()?;
+            if clear {
+                self.clear_at_cache_break()?;
+            }
             return Ok(true);
         }
         match clearing {

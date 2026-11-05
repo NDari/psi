@@ -126,6 +126,24 @@ Flags worth sweeping: `-fa`, `-b`/`-ub`, `-ctk`/`-ctv` (KV cache type), `-t`, `-
 **Open:**
 - Presence penalty may hurt code (repeated identifiers); watch for it in the transcripts.
 
+**Applied 2026-11-05 without the comparison:** `llm-up qwen35b` and `qwen27b` now pass the card's thinking-off settings. Before, the 35B ran on the sampling in its GGUF (`general.sampling.*`: temp 1.0, top-p 0.95, top-k 20, the card's thinking setting) and llama.cpp's defaults for the rest (min-p 0.05, presence penalty 0, which no GGUF key can set). The 27B had the thinking setting by flag.
+
+### Summaries without thinking (added 2026-11-05)
+
+**Question:** with thinking on, can a summary request turn thinking off, so the model doesn't think before it summarizes, and still reuse the server's cache?
+
+**Context:** the cog review with the 27B and thinking on (`qwen27b-t` flags, `~/.psi/sessions/-home-ndari-projects-cog-/2026-11-05-2246_87bc74da.*`): its one summary, at 47.2K tokens, reused the cache for 44.5K and read the rest in 12 s, then wrote 4,834 tokens at 20 tok/s, 236 s. The summary is 8.2K characters, about 2,000 tokens, so most of the output was thinking. With thinking off the same review's summary took 94 s (1,595 tokens).
+
+**The catch, from the 27B's template (Qwen3.8, read from `/props`):** thinking changes two places in the prompt. At the end, the generation prompt is `<think>\n` with thinking on and `<think>\n\n</think>\n\n` with it off; that part alone would keep the cache. But with thinking on (or not set) the template also puts a reasoning-effort line first in the system message, `xhigh` by default ("Reasoning effort is set to xhigh. Please think carefully through the task..."), so turning thinking off for one request changes the start of the prompt and the server reads all of it again: about 47K tokens, minutes at this model's reading speed, which costs more than the thinking saved. `reasoning_effort` low changes the same line, so it breaks the cache too.
+
+**How, if worth it:**
+- Check each model's template first: the 35B's (Qwen3.6) may differ only in the generation prompt. Where it does, send the summary request with `enable_thinking: false` and accept the small re-read at the end. Psi's `extends_request` and `cache_break` treat a different thinking setting as a break at the start (fit.rs), so they would need to know which part changes.
+- Or ask for a short summary think: an instruction in the summary request ("don't think at length") costs nothing in cache, but the model may ignore it.
+- Measure the summary time and its output tokens on a recorded request (`psi replay`), not in a run.
+
+**Open:**
+- Psi sends no `reasoning_effort`, so the 27B with thinking runs at its template's default, xhigh. Whether medium or low does as well on agent work with less thinking is a separate question; it changes the system prompt, so it would be set once per session, never per request.
+
 ## Done
 
 ### Qwen3.8 27B on the Mac (added 2026-11-05)
@@ -165,6 +183,29 @@ Found by the run and fixed: the `ext_todo_scan` grader and reference used `os.ex
 - **Repeating a failed call:** in `feat_lru_cache` (PASS) the model ran `python3 /tmp/check_lru.py` 5 times unchanged after `No module named 'kvcache'` (the script was in `/tmp`, not the project); the warning at 3 failures didn't change the call and the guard stopped it at 5, after the work was done. In `sh_manifest` (2/9) it spent about 20 steps on one-line `bash -c` probes failing with `$3: unbound variable`; the error-streak guard fired only at step 39, since a few calls in between succeeded.
 - **The parse-error denial says "Don't retry it in another form"**, but for a quoting mistake (`sh_precommit` step 18, `sh_manifest` step 18) retrying with the quoting fixed is the right move, and the model did that. Changed the same day, not yet run on a model: without a user, a parse error says "Fix the command, or write it another way, and run it again", and other denials "Do without it, or say in your answer what you needed"; "Don't retry it in another form" stays only after the user's own no. The eval check waits for the guard work in `known-issues.md`.
 - The other failures are wrong logic or a missed detail in the model's code, each after a check it judged enough (`feat_markdown_table` stopped after 5 steps with the padding wrong).
+
+### The cog review in Psi and pi, and clearing off (added 2026-11-05)
+
+**Question:** after two Psi sessions on cog with the 27B ended in loops, does the same review prompt loop in pi too, and what in Psi brings it on?
+
+**Setup:** the Qwen3.8 27B on the Mac, 64K, with the card's thinking-off sampling (temp 0.7, top-p 0.8, top-k 20, min-p 0, presence penalty 1.5; `just llm-up qwen27b` since that day). The same prompt each time ("Take a deep look in this repo. Review what its trying to do, and review the design, architecture, testing setup, etc. report back your suggestions."), on cog with its `.psi` moved out and the leftovers of the earlier sessions removed. Neither harness sends sampling, so the server's applied to both. Pi 1.5 has no project settings; its `pi-llama` extension turns thinking from off to medium when it first reads the model's template (`index.ts:547`), which overrides `--thinking off` and `defaultThinkingLevel`; the thinking-off run set it back with Shift+Tab after a first "hi". The reviews are in `~/projects/pi-cog-review.md`, `pi-cog-review-no-thinking.md` and `psi-cog-review.md` (the owner's copies).
+
+| | Psi, clearing on | Psi, clearing off | Psi, clearing off, thinking on | pi, thinking off | pi, thinking on |
+|---|---|---|---|---|---|
+| Session | `2026-11-05-2125_d1ba1550` | `2026-11-05-2222_997e12eb` | `2026-11-05-2246_87bc74da` | `2026-11-05T21-58-10-472Z_01a1adb8` | `2026-11-05T20-30-35-948Z_01a1ad67` |
+| Time | 21 min, about 10 of it looping | 10.6 min | 32 min | 12.5 min | 49 min |
+| Tool calls | 136, 52 different | 36, all different | 72, 63 different | 44, all different | 66, 58 different |
+| Longest run of repeated calls | about 50 | 0 | 3 | 0 | 3 |
+| Context | 2 clearings at 46K (30K, 27K freed) | 1 summary at 46.7K | 2 summaries at 47.2K and 51.7K (249 s, 167 s) | 1 summary at 57K | 3 summaries at about 50K |
+| Guards | `no_progress` 8 times | none | none | none | none |
+
+**What happened with clearing on:** the model read README, the plan docs and about 15 source files; at 15:30 clearing replaced about 30K of them with notes ("Result cleared to save context: ... Run it again if you need it."), before it had written anything. From 15:33 it ran the same two commands in turn, word for word, 25 times each; `no_progress` nudged 8 times and it ignored every one (the guard never pauses). A nudge from the owner ended it; asked why, the model said its reads had been cleared and it kept re-fetching them. The earlier cog session (`2026-11-05-1636_bc3c47c4`, before the sampling change) cleared at 11:57, and its probe loop began about 10 minutes later. The first loop that day (`2026-11-05-1547_e61d66e2`) had nothing cleared, though, so clearing is one trigger, not the only one.
+
+**Outcome:** clearing is off by default (plan §7.4, `compaction.clear`). The rerun with it off went straight through, faster than pi. The reviews: pi with thinking reproduced each bug it named and ranked its fixes; Psi with clearing off found the same main bug (the bare `$` lexer cluster) and some neither pi run had (panics while loading the standard library, mixed error styles in builtins), with line numbers off and one wrong claim (`bracketsBalanced` "dead code"; `cmd/cog/editor.go` calls it); pi without thinking was decent; Psi with clearing on was the thinnest. One run each, so a direction, not proof.
+
+**Psi with thinking on (added the same day):** the server with the `qwen27b-t` flags (the card's thinking sampling: temp 1.0, top-p 0.95, top-k 20, min-p 0, no presence penalty; reasoning effort the template's default, xhigh), clearing off, run headless (`psi -p --max-turns 200`) with the same prompt. No loop: the repeats are re-reads of `design-review.md` and `semantics.md` after a summary had replaced them. Its review was the deepest of the five: each bug reproduced with its output (the bare `$` and `:` cases), and findings no other run had (plan docs that describe removed features, `design-review.md` item 8 using `defsyntax`, which `TestNoAutomaticSyntaxExpansion` asserts is gone; stdlib words with placeholder signatures in `words.md`), plus a recommended order for the eight pending design items; three claims checked, all right. About 3x the time of thinking off, part of it in the summaries, which spent most of their output thinking ("Summaries without thinking", above).
+
+**Still open:** `no_progress` should pause once a nudge goes unheeded and count exact repeats as no progress (`known-issues.md`); the sampling change alone didn't stop the loop with clearing on.
 
 ### The small reference models without line numbers (added 2026-11-03)
 
@@ -294,6 +335,8 @@ Found by the run and fixed: the `ext_todo_scan` grader and reference used `os.ex
 
 **Open:**
 - Clearing more removes results the model may still need; the placeholders say how to get them back, and re-reading one file is cheaper than re-reading the context.
+
+**Superseded 2026-11-05:** clearing is off by default (plan §7.4; "The cog review in Psi and pi, and clearing off" above).
 
 **Line numbers cost a third more tokens (found 2026-11-03).** The owner noticed the slowness from the start too, before any clearing. Early steps reuse the cache fully, so the reading is the new tool output, and Psi's `read` numbers every line (§5, "line-numbered output"). Qwen's tokenizer splits numbers into single digits, so `1023\t` is 5 tokens before the code. The same seven files read in both runs (fn.go, env.go, parser.go, lexer.go, README.md, semantics.md, known-issues.md) took 31,559 tokens in Psi and 23,229 in pi, 35% more (20% to 49% by file). Pi's read has no line numbers. That slows every step that reads and fills the window sooner, which brings the clearing sooner. Built 2026-11-03: read shows lines without numbers, as pi does (offsets still come from the truncation notice; edit matches text, and still ignores numbers a model copies in). Plan §5 updated.
 

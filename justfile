@@ -4,7 +4,7 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 
 # llama-server settings for llm-up; override like `just ctx=65536 llm-up qwen`.
 port := "9931"
-# "auto" is 131072, or 65536 for qwen35b and qwen27b (the context each was first run with).
+# "auto" is 131072, or 65536 for qwen35b and qwen27b (the context each was first run with), with or without -t.
 ctx := "auto"
 # Speculative decoding (llama-server --spec-type): "auto" is draft-mtp for
 # qwen, whose GGUF carries its own draft layers (about 1.8x faster
@@ -29,6 +29,11 @@ qwen35b := '-hf unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL -fa on -np 1 --spec-
 # for thinking off (since 2026-11-05; it was the thinking-mode one, with no
 # presence penalty, when the cog session looped on near-identical commands).
 qwen27b := '-hf unsloth/Qwen3.8-27B-GGUF:Q6_K -fa on -np 1 --spec-draft-n-max 3 -ub 2048 --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0.0 --presence-penalty 1.5 --repeat-penalty 1.0'
+# The same two with thinking on (llm-up qwen35b-t, qwen27b-t) and each card's
+# thinking sampling: for the 35B the general-task one (its precise-coding one
+# is temp 0.6 with no presence penalty), for the 27B its only one.
+qwen35b_t := '-hf unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL -fa on -np 1 --spec-draft-n-max 3 -ub 2048 --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 1.5 --repeat-penalty 1.0 --chat-template-kwargs {"preserve_thinking":true}'
+qwen27b_t := '-hf unsloth/Qwen3.8-27B-GGUF:Q6_K -fa on -np 1 --spec-draft-n-max 3 -ub 2048 --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0'
 
 # List the recipes
 default:
@@ -126,7 +131,7 @@ eval-ext *args: build eval-build
 inspect path *args: build
     ./target/debug/psi inspect {{path}} {{args}}
 
-# Start llama-server with a model (qwen, gemma, qwen35b or qwen27b) in the background
+# Start llama-server with a model (qwen, gemma, qwen35b, qwen27b, or qwen35b-t and qwen27b-t with thinking) in the background
 llm-up model="qwen":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -135,7 +140,9 @@ llm-up model="qwen":
       gemma) args="{{gemma}}"; auto_spec=none; auto_ctx=131072; reasoning=off ;;
       qwen35b) args='{{qwen35b}}'; auto_spec=draft-mtp; auto_ctx=65536; reasoning=off ;;
       qwen27b) args='{{qwen27b}}'; auto_spec=draft-mtp; auto_ctx=65536; reasoning=off ;;
-      *) echo "llm-up: model is qwen, gemma, qwen35b or qwen27b, not {{model}}" >&2; exit 1 ;;
+      qwen35b-t) args='{{qwen35b_t}}'; auto_spec=draft-mtp; auto_ctx=65536; reasoning=on ;;
+      qwen27b-t) args='{{qwen27b_t}}'; auto_spec=draft-mtp; auto_ctx=65536; reasoning=on ;;
+      *) echo "llm-up: model is qwen, gemma, qwen35b, qwen27b, qwen35b-t or qwen27b-t, not {{model}}" >&2; exit 1 ;;
     esac
     spec="{{spec}}"
     [[ "$spec" == auto ]] && spec=$auto_spec

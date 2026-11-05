@@ -1,7 +1,8 @@
 //! Keeping the context in the window (psi-plan.md §7.4). Past the trigger,
-//! old tool results are first replaced by a one-line note that says what
-//! they were and how to get them back (no model call). When that can't
-//! free enough, the entries before a verbatim tail are summarized, and the
+//! when the `clear` setting is on, old tool results are first replaced by a
+//! one-line note that says what they were and how to get them back (no
+//! model call). Otherwise, or when that can't free enough, the entries
+//! before a verbatim tail are summarized, and the
 //! summary joins a chain of earlier ones (D-40); the two oldest are merged
 //! when the chain grows too long.
 
@@ -12,13 +13,19 @@ use psi_session::{Block, Entry, EntryBody, Role, text_of};
 use serde_json::Value;
 
 /// The `compaction` setting: `{"tail": tokens | "auto", "summary":
-/// "structured" | "free"}`. Both exist to compare variants (H-07, H-11).
+/// "structured" | "free", "clear": bool}`. Tail and summary exist to
+/// compare variants (H-07, H-11).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CompactionSettings {
     /// Tokens kept verbatim after a summary; `None` is the default size
     /// (`tail_tokens`). 0 keeps only the last user message or step.
     pub tail: Option<u64>,
     pub summary: SummaryForm,
+    /// Clear old tool results instead of summarizing when that frees
+    /// enough, and where the cache breaks anyway. Off by default since
+    /// 2026-11-05 (§7.4): a 27B cleared what it had just read and looped.
+    /// When off, results are still cleared if a summary can't make room.
+    pub clear: bool,
 }
 
 /// How a summary is laid out.
@@ -33,8 +40,7 @@ pub enum SummaryForm {
 
 impl CompactionSettings {
     pub fn from_setting(v: &Value) -> Result<Self, String> {
-        const USAGE: &str =
-            "compaction is {\"tail\": tokens or \"auto\", \"summary\": \"structured\" or \"free\"}";
+        const USAGE: &str = "compaction is {\"tail\": tokens or \"auto\", \"summary\": \"structured\" or \"free\", \"clear\": true or false}";
         let o = match v {
             Value::Null => return Ok(Self::default()),
             Value::Object(o) => o,
@@ -50,7 +56,15 @@ impl CompactionSettings {
             Some(Some("free")) => SummaryForm::Free,
             _ => return Err(USAGE.into()),
         };
-        Ok(Self { tail, summary })
+        let clear = match o.get("clear") {
+            None | Some(Value::Null) => false,
+            Some(v) => v.as_bool().ok_or(USAGE)?,
+        };
+        Ok(Self {
+            tail,
+            summary,
+            clear,
+        })
     }
 }
 
@@ -868,6 +882,9 @@ mod tests {
         assert!(read(&json!({"tail": "big"})).is_err());
         assert!(read(&json!({"summary": "bullets"})).is_err());
         assert!(read(&json!(5)).is_err());
+        assert!(!read(&Value::Null).unwrap().clear);
+        assert!(read(&json!({"clear": true})).unwrap().clear);
+        assert!(read(&json!({"clear": "yes"})).is_err());
     }
 
     #[test]
