@@ -1034,6 +1034,84 @@ async fn summaries_chain_and_the_oldest_merge() {
 }
 
 #[tokio::test]
+async fn old_results_are_cleared_where_the_cache_breaks_anyway() {
+    // Below the trigger nothing is cleared while each request extends the
+    // last; when the tool list changes (here plan mode drops write and
+    // edit), the server reads everything again, so old results are cleared
+    // then, for free, down to the clearing target.
+    let mut replies = reads(6);
+    replies.push(text("read them"));
+    replies.push(text("still here"));
+    replies.push(text("planned"));
+    let f = Fixture::new(replies);
+    write_files(&f.cwd, 6, 200);
+    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    assert_eq!(a.run("read the files").await.stop, Stop::Done);
+    assert_eq!(a.run("go on").await.stop, Stop::Done);
+    assert!(
+        !kinds(&a).iter().any(|k| k.starts_with("cleared")),
+        "{:?}",
+        kinds(&a)
+    );
+    a.set_plan_mode(true).unwrap();
+    assert_eq!(a.run("plan the next step").await.stop, Stop::Done);
+    let k = kinds(&a);
+    let cleared: Vec<&String> = k.iter().filter(|k| k.starts_with("cleared")).collect();
+    assert_eq!(cleared.len(), 1, "{k:?}");
+    let note = a
+        .session()
+        .entries()
+        .iter()
+        .find_map(|e| match &e.body {
+            EntryBody::Custom { custom_type, data } if custom_type == "clearing" => {
+                Some(data.clone())
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(note, json!({"reason": "cache_break", "from_message": 0}));
+    // The request after the change has the notes; the one before, the files.
+    let reqs = f.server.chat_requests();
+    let sent = |r: &Value| r["messages"].to_string();
+    assert!(sent(&reqs[reqs.len() - 1]).contains("Result cleared to save context: read f0.txt"));
+    assert!(sent(&reqs[reqs.len() - 2]).contains("file 0 line 000"));
+}
+
+#[tokio::test]
+async fn old_results_in_the_tail_are_cleared_after_a_summary() {
+    // The summary replaces the start of the context, so the server reads
+    // the kept tail again: its older results are cleared then, for free.
+    // A long summary leaves the context well above the clearing target.
+    let summary = format!("{SUMMARY}\n{}", "detail ".repeat(450));
+    let mut replies: Vec<Reply> = (0..5)
+        .map(|i| call("read", json!({"path": format!("f{i}.txt")})))
+        .collect();
+    replies.push(read_at("f5.txt", 9500));
+    replies.push(text(&summary));
+    replies.push(text("done"));
+    let f = Fixture::new(replies);
+    write_files(&f.cwd, 6, 100);
+    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    prefill(&mut a, 30);
+    let out = a.run("go on").await;
+    assert_eq!(out.stop, Stop::Done, "{:?} {:?}", out.stop, kinds(&a));
+    let k = kinds(&a);
+    let at = k.iter().position(|k| k == "compaction").unwrap();
+    assert!(
+        k.get(at + 1).is_some_and(|x| x.starts_with("cleared")),
+        "{k:?}"
+    );
+    let reqs = f.server.chat_requests();
+    let after = reqs.last().unwrap()["messages"].to_string();
+    assert!(
+        after.contains("Result cleared to save context: read f"),
+        "{after}"
+    );
+    // The last three results stay whole.
+    assert!(after.contains("file 5 line 000") && after.contains("file 3 line 000"));
+}
+
+#[tokio::test]
 async fn a_later_summary_can_correct_the_earlier_ones() {
     // H-17: the first summary has nothing to correct; the second is asked
     // for corrections, and when it falls back to a plain request it gets

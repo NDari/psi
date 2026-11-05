@@ -63,10 +63,12 @@ pub(crate) fn clearing_will_do(
 impl Agent {
     /// Past the trigger, clear old tool results if that frees enough;
     /// otherwise summarize, and clear in what is left if still needed.
-    /// Returns whether it summarized.
+    /// Below it, clear only where the cache breaks anyway. Returns whether
+    /// it summarized.
     pub(super) async fn fit_context(&mut self) -> Result<bool, String> {
         let (tokens, at) = self.context_size();
         if tokens < at {
+            self.clear_at_cache_break()?;
             return Ok(false);
         }
         let clearing = self.plan_clearing(tokens, at);
@@ -94,6 +96,9 @@ impl Agent {
             {
                 self.record_clearing(ids, tokens, freed)?;
             }
+            // The summary replaced the start of the context: the server
+            // reads what follows it again, so clearing there is free.
+            self.clear_at_cache_break()?;
             return Ok(true);
         }
         match clearing {
@@ -204,7 +209,42 @@ impl Agent {
             &sources,
             self.room_needed(tokens, at),
             self.cfg.n_ctx / 10,
+            0,
         )
+    }
+
+    /// When the next request breaks the server's prompt cache anyway (after
+    /// a summary; a changed system prompt or tool list: `/reload`, an MCP
+    /// server joining, plan mode), old results after the break are cleared
+    /// down to [`clear_target`] even below the trigger: the server reads
+    /// them again either way, so the clearing costs nothing, and the next
+    /// clearing or summary, which does cost a re-read, comes later.
+    fn clear_at_cache_break(&mut self) -> Result<(), String> {
+        let Some(last) = &self.last_request else {
+            return Ok(());
+        };
+        let next = self.build_request();
+        let Some(from) = cache_break(last, &next) else {
+            return Ok(());
+        };
+        let (tokens, at) = self.context_size();
+        let need = self.room_needed(tokens, at);
+        if need == 0 {
+            return Ok(());
+        }
+        let branch = self.session.branch();
+        let (messages, sources) = build_with_sources(&self.system_prompt(), &branch);
+        let planned = plan_clear(&messages, &sources, need, self.cfg.n_ctx / 20, from);
+        drop(branch);
+        let Some((ids, freed)) = planned else {
+            return Ok(());
+        };
+        self.record_clearing(ids, tokens, freed)?;
+        self.record(EntryBody::Custom {
+            custom_type: "clearing".into(),
+            data: json!({"reason": "cache_break", "from_message": from}),
+        })
+        .map(|_| ())
     }
 
     fn record_clearing(&mut self, ids: Vec<String>, tokens: u64, freed: u64) -> Result<(), String> {
@@ -470,6 +510,27 @@ impl Agent {
     }
 }
 
+/// Where `new` stops matching `last`, so the server reads it again from
+/// there: the first message that differs, or 0 when the tools, model or
+/// thinking setting differ (the template puts tools before the messages).
+/// `None` when `new` sends everything `last` did, as a request in a run
+/// usually does.
+fn cache_break(last: &ChatRequest, new: &ChatRequest) -> Option<usize> {
+    if last.tools != new.tools
+        || last.enable_thinking != new.enable_thinking
+        || last.model != new.model
+    {
+        return Some(0);
+    }
+    let same = last
+        .messages
+        .iter()
+        .zip(&new.messages)
+        .take_while(|(a, b)| a == b)
+        .count();
+    (same < last.messages.len()).then_some(same)
+}
+
 /// Whether `new` sends everything `last` did, in the same order, so the
 /// server's prefix cache holds for all of it (D-38).
 fn extends_request(last: &ChatRequest, new: &ChatRequest) -> bool {
@@ -482,8 +543,37 @@ fn extends_request(last: &ChatRequest, new: &ChatRequest) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{clear_target, clearing_will_do};
+    use super::{cache_break, clear_target, clearing_will_do};
     use crate::compact::trigger;
+    use psi_ai::{ChatMessage, ChatRequest};
+
+    fn req(messages: &[&str], tools: usize) -> ChatRequest {
+        ChatRequest {
+            model: "local".into(),
+            messages: messages
+                .iter()
+                .map(|m| ChatMessage::User((*m).into()))
+                .collect(),
+            tools: (0..tools).map(|i| serde_json::json!({"n": i})).collect(),
+            max_tokens: 512,
+            enable_thinking: None,
+        }
+    }
+
+    #[test]
+    fn a_request_breaks_the_cache_where_it_stops_matching_the_last() {
+        let last = req(&["sys", "a", "b"], 2);
+        // A request in a run sends everything the last one did, and more.
+        assert_eq!(cache_break(&last, &req(&["sys", "a", "b", "c"], 2)), None);
+        // A summary replaced what followed the system prompt.
+        assert_eq!(
+            cache_break(&last, &req(&["sys", "summary", "c"], 2)),
+            Some(1)
+        );
+        // A changed system prompt or tool list: from the start.
+        assert_eq!(cache_break(&last, &req(&["sys2", "a", "b"], 2)), Some(0));
+        assert_eq!(cache_break(&last, &req(&["sys", "a", "b"], 1)), Some(0));
+    }
 
     #[test]
     fn clearing_does_when_it_matches_a_summary() {

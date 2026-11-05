@@ -138,6 +138,8 @@ But some requests re-read everything anyway, and clearing then costs nothing ext
 
 Possible fix: at those moments, clear old results (same rules: over 800 characters, not the last step's, not the last 3) even below the trigger, so the next clearing or summary comes later. Psi knows the first and third itself; for the second it can tell from the server's `cache_n` on the next response only after the fact, so it would assume a miss after a sub-agent call on a one-slot server (or skip it once the slot save and restore above is built). Not tied to any project.
 
+**Built 2026-11-04 (plan §7.4), for the first and third:** before each request Psi compares it with the last one sent; where it stops matching (from the start when the tools, model or thinking setting changed; from the first changed message otherwise), old results after that point are cleared down to the clearing target even below the trigger, at least a twentieth of the window at a time, with a `clearing` custom entry (`reason: cache_break`). Tests: a plan-mode switch clears, the same runs without it don't; a summary clears older results in the kept tail. After a summary it rarely finds anything (the 10K tail leaves the context near the target). Left out, the sub-agent case: the parent's cache isn't reliably gone (the cog trial: after scout 01's 134 requests, 0 of 29.6K tokens cached; after scout 02's 191, 9.5K of 16.6K, restored from llama-server's RAM cache), so the clearing wouldn't be known to be free; the slot save and restore in "The parent re-read its whole context after the scout call" is the fix there.
+
 ## Fixed
 
 ### `psi.re` has no `escape` (added 2026-11-03)

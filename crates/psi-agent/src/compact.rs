@@ -155,19 +155,23 @@ fn message_chars(m: &ChatMessage) -> usize {
 /// first, so that about `need` tokens are freed, and the estimate of what
 /// they free. `None` when they would free less than `min_batch`: each
 /// clearing breaks the prompt cache from the first cleared result on, so it
-/// is done in batches, never one small result at a time.
+/// is done in batches, never one small result at a time. Only results at
+/// message `from` or later are cleared: when the cache breaks there anyway,
+/// clearing after it costs nothing more.
 pub(crate) fn plan_clear(
     messages: &[ChatMessage],
     sources: &[Option<String>],
     need: u64,
     min_batch: u64,
+    from: usize,
 ) -> Option<(Vec<String>, u64)> {
-    // (entry id, tool, arguments, content), in order. Call ids may repeat
-    // across turns, so each result takes the latest call with its id.
+    // (message index, entry id, tool, arguments, content), in order. Call
+    // ids may repeat across turns, so each result takes the latest call
+    // with its id.
     let mut calls: HashMap<&str, (&str, &str)> = HashMap::new();
     let mut results = Vec::new();
     let mut unread_from = 0;
-    for (m, src) in messages.iter().zip(sources) {
+    for (i, (m, src)) in messages.iter().zip(sources).enumerate() {
         match m {
             ChatMessage::Assistant { tool_calls, .. } => {
                 unread_from = results.len();
@@ -181,7 +185,7 @@ pub(crate) fn plan_clear(
                         .get(call_id.as_str())
                         .copied()
                         .unwrap_or(("tool", "{}"));
-                    results.push((id, name, args, content));
+                    results.push((i, id, name, args, content));
                 }
             }
             _ => {}
@@ -190,7 +194,7 @@ pub(crate) fn plan_clear(
     let old = results.len().saturating_sub(KEEP_RECENT).min(unread_from);
     let mut ids = Vec::new();
     let mut freed = 0;
-    for (id, name, args, content) in &results[..old] {
+    for (_, id, name, args, content) in results[..old].iter().filter(|r| r.0 >= from) {
         if freed >= need {
             break;
         }
@@ -719,14 +723,18 @@ mod tests {
             src.extend([None, Some(format!("e{i}"))]);
         }
         // Enough for one: the oldest large one.
-        let (ids, freed) = plan_clear(&m, &src, 500, 100).unwrap();
+        let (ids, freed) = plan_clear(&m, &src, 500, 100, 0).unwrap();
         assert_eq!(ids, ["e0"]);
         assert!(freed > 900, "{freed}");
         // Everything old: the short one and the last three stay.
-        let (ids, _) = plan_clear(&m, &src, 100_000, 100).unwrap();
+        let (ids, _) = plan_clear(&m, &src, 100_000, 100, 0).unwrap();
         assert_eq!(ids, ["e0", "e2", "e3"]);
         // Too little to be worth breaking the cache for.
-        assert_eq!(plan_clear(&m, &src, 100_000, 10_000), None);
+        assert_eq!(plan_clear(&m, &src, 100_000, 10_000, 0), None);
+        // Where the cache breaks at message 5 anyway, only results after
+        // it: e0 (message 2) stays.
+        let (ids, _) = plan_clear(&m, &src, 100_000, 100, 5).unwrap();
+        assert_eq!(ids, ["e2", "e3"]);
     }
 
     #[test]
@@ -755,7 +763,7 @@ mod tests {
             });
             src.push(Some(format!("e{i}")));
         }
-        let (ids, _) = plan_clear(&m, &src, 100_000, 100).unwrap();
+        let (ids, _) = plan_clear(&m, &src, 100_000, 100, 0).unwrap();
         assert_eq!(ids, ["e0"]);
     }
 
