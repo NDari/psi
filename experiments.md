@@ -128,6 +128,38 @@ Flags worth sweeping: `-fa`, `-b`/`-ub`, `-ctk`/`-ctv` (KV cache type), `-t`, `-
 
 ## Done
 
+### Qwen3.8 27B on the Mac (added 2026-11-05)
+
+**Question:** how does the dense Qwen3.8 27B (unsloth `Q6_K`, 22 GB, 64K context) do with Psi on the M4 Max, and how fast is it?
+
+**Run 2026-11-05** (the extension eval, `just eval-ext`, one trial per task, 20-step cap). First `ext_lockfile_guard` alone, one setting changed at a time; all three passed 7/7:
+
+| Server | Steps | Wall | Tokens written | Generating | Reading | Drafts accepted |
+|---|---|---|---|---|---|---|
+| Thinking (`reasoning_effort` medium), no MTP | 8 | 229 s | 2,772 | 17.8 tok/s | 190 tok/s | - |
+| Thinking, MTP (`--spec-type draft-mtp --spec-draft-n-max 3`), `-ub 2048` | 9 | 196 s | 3,943 | 32.0 tok/s | 199 tok/s | 66% |
+| Thinking off, MTP, `-ub 2048` | 8 | 113 s | 1,830 | 37.8 tok/s | 199 tok/s | 83% |
+
+The `Q6_K` GGUF carries its own MTP layers (`blk.64.nextn.*`), so MTP needs no draft file. `-ub 2048` made no difference to reading here. The last setting is now `just llm-up qwen27b`.
+
+Then the whole set, thinking off with MTP (`~/.psi/evals/2026-11-05-0337-h01-ext-qwen3.8-27b-full`), against the 35B's last run of it (`2026-11-01-1329-h01-ext-qwen3.6-35b-cap20`, also thinking off, with the Psi of that day):
+
+| Task | 27B | 35B |
+|---|---|---|
+| ext_lockfile_guard | PASS 7/7, 8 steps | PASS 7/7, 14 steps |
+| ext_trim_output | PASS 7/7, 13 steps | 3/7, 19 steps |
+| ext_bookmarks | 2/7, step cap | 5/7, 10 steps |
+| ext_todo_scan | 0/7, step cap (grader broken, below) | 5/7, step cap |
+| Wall, all four | 538 s | 530 s |
+| Tokens written | 10.7K | 49.4K |
+| Generating | 33 tok/s (320 s) | 101 tok/s (490 s) |
+| Reading | 162 tok/s (214 s) | 847 tok/s (36 s) |
+| Drafts accepted | 82% | 67% |
+
+**Outcome:** on the three tasks with a working grader, 16 of 21 checks for the 27B and 15 for the 35B, in about the same total time: the 27B is about 3x slower per token but wrote less than a quarter as many. Its time goes to reading prompts (a cold 11K-token first request takes 55 s), the 35B's to generating. The 27B was terse and went straight at each task; when stuck it explored instead of fixing (bookmarks: 15 steps reading examples after its own test failed; todo_scan: 7 steps of probe tests whose prints `psi ext test` hid). The 35B wrote more and finished more often, with wrong details. One run each, so no patterns.
+
+Found by the run and fixed: the `ext_todo_scan` grader and reference used `os.execute` and `io.popen`, gone from extensions since `3db400e` (2026-11-02), so the reference scored 0/7 (`just eval-check --tasks all` now passes 45 of 45); `psi ext test` showed passing tests' prints only with `--verbose`, though the docs said it showed them, and now always shows prints. Noted in `known-issues.md`: no guard notices reading without fixing after a failing test.
+
 ### The small reference models without line numbers (added 2026-11-03)
 
 **Question:** do Qwen3.5 4B and Gemma 4 12B cope with read output that has no line numbers (built 2026-11-03)? The eval after the change ran on the 35B only, and small models may lean on the numbers more: picking `offset`, or copying text for an edit.
