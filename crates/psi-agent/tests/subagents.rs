@@ -400,3 +400,70 @@ async fn in_the_tui_a_sub_agent_has_no_request_limit() {
     assert_eq!(info[0]["turns"], 111, "{info:?}");
     assert_eq!(info[0]["stop"], "done", "{info:?}");
 }
+
+/// Scout stopped by a 3-request budget (the pause answers stop), then
+/// `report` as the reply to the request for its last report.
+fn stopped_scout(report: Reply) -> (Fx, Agent) {
+    let mut replies = vec![call(
+        "agent",
+        json!({"agent": "scout", "task": "Find the config."}),
+    )];
+    for _ in 0..3 {
+        replies.push(call("bash", json!({"command": "ls"})));
+    }
+    replies.push(report);
+    replies.push(text("Done."));
+    let fx = Fx::new(replies);
+    let three = Budgets {
+        max_turns: 3,
+        ..Budgets::default()
+    };
+    let a = fx.agent_with(false, three);
+    (fx, a)
+}
+
+#[tokio::test]
+async fn a_stopped_sub_agent_is_asked_for_what_it_found() {
+    // Scout 02 in the cog trial stopped at a guard after 191 requests and
+    // returned "(no answer)"; the parent read everything again itself.
+    let (fx, mut a) = stopped_scout(text("The config is in conf/app.toml:3."));
+    let out = a.run("go").await;
+    assert_eq!(out.stop, Stop::Done, "{:?}", out.stop);
+
+    let reqs = fx.server.chat_requests();
+    assert_eq!(reqs.len(), 6);
+    // The ask comes last, and the tools stay so the cache holds.
+    let ask = reqs[4]["messages"].as_array().unwrap().last().unwrap()["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        ask,
+        "Stopped: reached the limit of 3 model requests in one run. You can't call tools any more. Report what you found so far, with the paths and line numbers, and what is left undone."
+    );
+    assert_eq!(tool_names(&reqs[4]), tool_names(&reqs[3]));
+
+    let (r, is_error) = &results(&a)[0];
+    assert!(!is_error);
+    assert_eq!(
+        r,
+        "The config is in conf/app.toml:3.\n\n[scout: 4 model requests, 3 tool calls; stopped: reached the limit of 3 model requests in one run; it wrote this report when stopped]"
+    );
+    let info = &subagent_info(&a)[0];
+    assert_eq!(info["report"], true, "{info}");
+    assert_eq!(info["stop"], "budget", "{info}");
+}
+
+#[tokio::test]
+async fn a_last_report_that_only_calls_tools_runs_nothing() {
+    let (fx, mut a) = stopped_scout(call("bash", json!({"command": "ls"})));
+    a.run("go").await;
+    // No request after the report's but the parent's.
+    assert_eq!(fx.server.chat_requests().len(), 6);
+    let (r, _) = &results(&a)[0];
+    assert_eq!(
+        r,
+        "(no answer)\n\n[scout: 4 model requests, 3 tool calls; stopped: reached the limit of 3 model requests in one run]"
+    );
+    assert_eq!(subagent_info(&a)[0]["report"], false);
+}

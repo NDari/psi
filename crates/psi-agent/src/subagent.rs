@@ -11,6 +11,9 @@ pub const TOOL: &str = "agent";
 /// Added to every sub-agent's system prompt, before its own.
 pub const SUB_NOTE: &str = "You are a sub-agent: another agent gave you this task and sees only your last answer. End with everything it needs.";
 
+/// Asked of a sub-agent that a budget or a guard stopped, after the reason.
+pub const REPORT: &str = "You can't call tools any more. Report what you found so far, with the paths and line numbers, and what is left undone.";
+
 /// The most model requests one sub-agent call makes in a print run or an
 /// eval before it stops. 100 since a broad scout review in the cog trial
 /// needed 134 (2026-11-03). In the TUI a sub-agent has no limit, like the

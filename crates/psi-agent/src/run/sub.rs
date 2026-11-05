@@ -8,13 +8,13 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use psi_ai::WireLog;
-use psi_session::{EntryBody, SessionFile};
+use psi_session::{Block, EntryBody, SessionFile};
 use psi_tools::{ToolCtx, ToolOutput};
 use serde_json::{Map, Value, json};
 
 use super::{Agent, AgentConfig, Budgets, RunOutcome, Safety, Stop};
 use crate::events::AgentEvent;
-use crate::subagent::{MAX_TURNS, SUB_NOTE};
+use crate::subagent::{MAX_TURNS, REPORT, SUB_NOTE};
 
 impl Agent {
     /// Runs the agent the call names on its task, and returns its last
@@ -138,7 +138,9 @@ impl Agent {
             });
         }
 
-        let out: RunOutcome = child.run(&task).await;
+        let mut out: RunOutcome = child.run(&task).await;
+        let reported = matches!(out.stop, Stop::Budget(_) | Stop::Guard(_))
+            && child.last_report(&mut out).await;
 
         let (mut tokens_in, mut tokens_out) = (0, 0);
         for e in child.session().entries() {
@@ -153,19 +155,22 @@ impl Agent {
                          "session": path.display().to_string(),
                          "stop": out.stop.name(), "reason": out.stop.reason(),
                          "turns": out.turns, "tool_calls": out.tool_calls,
-                         "tokens_in": tokens_in, "tokens_out": tokens_out}),
+                         "report": reported, "tokens_in": tokens_in, "tokens_out": tokens_out}),
         })?;
         if !read_only && self.capture("tool", Some(id)).await? {
             self.turn_changed = true;
         }
 
-        let (state, is_error) = match &out.stop {
+        let (mut state, is_error) = match &out.stop {
             Stop::Done => ("done".to_owned(), false),
             Stop::Budget(r) => (format!("stopped: {r}"), false),
             Stop::Guard(r) => (format!("paused: {r}"), false),
             Stop::Aborted => ("stopped by the user".to_owned(), true),
             Stop::Failed(r) => (format!("failed: {r}"), true),
         };
+        if reported {
+            state.push_str("; it wrote this report when stopped");
+        }
         let answer = match out.text.trim() {
             "" => "(no answer)".to_owned(),
             t => cut(t, self.ctx.max_result_chars),
@@ -177,6 +182,46 @@ impl Agent {
             ),
             is_error,
         })
+    }
+
+    /// After a budget or a guard stopped this sub-agent: one more request
+    /// asking for what it found so far, since the parent sees only its last
+    /// answer, and a looping agent's is empty or mid-work (scout 02 in the
+    /// cog trial returned "(no answer)" after 191 requests). The tools stay
+    /// in the request so the prompt cache holds; calls it makes don't run.
+    /// Whether it answered.
+    async fn last_report(&mut self, out: &mut RunOutcome) -> bool {
+        let reason = out.stop.reason().unwrap_or("").to_owned();
+        let ask = EntryBody::CustomMessage {
+            custom_type: "report".into(),
+            content: vec![Block::Text {
+                text: format!("Stopped: {reason}. {REPORT}"),
+            }],
+        };
+        if let Err(e) = self.record(ask) {
+            tracing::warn!("no last report from the sub-agent: {e}");
+            return false;
+        }
+        if let Err(e) = self.fit_context().await {
+            tracing::warn!("no last report from the sub-agent: {e}");
+            return false;
+        }
+        out.turns += 1;
+        let resp = match self.request(out.turns).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("no last report from the sub-agent: {e}");
+                return false;
+            }
+        };
+        if let Err(e) = self.record_assistant(&resp) {
+            tracing::warn!("the sub-agent's last report isn't recorded: {e}");
+        }
+        if resp.text.trim().is_empty() {
+            return false;
+        }
+        out.text = resp.text;
+        true
     }
 
     /// `<session>.agents/NN-<name>.jsonl`: next to the parent's session,

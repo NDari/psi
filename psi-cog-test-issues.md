@@ -70,22 +70,6 @@ The `cog_run` tool, built for exactly this, was offered in every request and nev
 - **`cog_run` was never called** after it was built, in about 250 later requests.
 - **Went well:** the post-edit check ran 56 times (15 s in all) and its 7 failures were all real (the red tests, the stale `docs/words.md`); failed edits (two "not found", one "matches 3 places", one write refused after a `sed -i`) each recovered in one or two calls; reads came in parallel batches of up to five; always-ask caught `git push` and a `sudo chmod` on `/etc/ssh`; the status-line extension showed in the footer as written; scout found the real high-priority bug.
 
-### A sub-agent stopped at a pause returns nothing (added 2026-11-04, from the second session)
-
-Scout 02 (read the docs and compare them for contradictions) spent about 5 minutes and 191 requests and returned "(no answer)". It went looking for where `?` is defined and ran the same few `grep`s on `env.go` dozens of times (`?` is defined in `stdlib.go`); the no-progress and error-streak guards fired 12 times, then came the pause at 20 failed calls in a row. That pause was answered "stop" 22 ms after it was raised (guard entry at ...145047, scout's result at ...145069), too fast for a person to choose: the owner was probably typing in the prompt, and a keystroke answered the card (see "Cards answer to single keys" under Fixed). Everything scout had read was lost, and the parent read the docs again itself.
-
-Two things made it worse:
-- **A `grep` with no match counts as a failed call.** 98 of scout's 125 errors were "(no output) [exit code 1]", grep's normal answer for "not found". The result doesn't say that, and the error streak counts it, so the streak reached 20 on searches that worked.
-- **The stop throws the run away.** The parent gets the last answer, and a looping scout has none.
-
-Session: `~/.psi/sessions/-home-ndari-projects-cog-/2026-11-04-1440_fecf76bd.agents/02-scout.*`.
-
-Possible fixes:
-- When a sub-agent stops on a guard or a limit, make one last request without tools ("Stop now. Report what you found so far, with paths and line numbers.") and return that, marked as cut short.
-- For `grep`, `rg`, `git grep` (and `diff`, `cmp`), exit code 1 with no stderr means "no match" or "differs": say so ("grep found no matches (exit code 1)") and don't count it toward the error streak.
-
-**Status 2026-11-04:** the pause that answered itself is fixed (cards are lists that ignore keys at first). Also fixed 2026-11-04: when the last command is `grep`, `rg`, `git grep` (or `cmp`) and it exits 1 with no output, the result says "[exit code 1: grep says no line matched]" and isn't an error, so the streak doesn't count it (plan §8.6, with tests). Still open: the last report when a sub-agent stops.
-
 ### Notes from the second session, no action yet (added 2026-11-04)
 
 - **Timing (main session).** 433 requests: first token median 0.4 s, 90th percentile 1.2 s; 285 s reading prompts and 855 s generating. Four requests over 8 s to the first token: the first after the rebuilt Psi's restart (38K tokens, cache 0, 39 s; the tool list changed), the first after the 64K restart (15.5K tokens, 11 s), and the first after each of the two automatic summaries (11.7K and 14.6K tokens, 10 to 12 s, only the 3.6K of system prompt and tools cached, as before).
@@ -406,3 +390,21 @@ Possible fixes:
 - Use a stable hash (SHA-256 via `sha2`, or `blake3`) for `trust.json`.
 
 **Fixed 2026-11-04:** `trust.json` keeps a SHA-256 per file (an entry from an older Psi asks once more, saying so); the startup prompt and the `/reload` card list what is new, changed or removed (up to 8, then "and N more"); `*_test.lua` in extensions don't count; a write or edit to `.psi` that the user approved records that file as trusted (the agent calls a hook the CLI sets for a trusted project; sub-agents too). Plan §9.3, with tests.
+
+### A sub-agent stopped at a pause returns nothing (added 2026-11-04, from the second session)
+
+Scout 02 (read the docs and compare them for contradictions) spent about 5 minutes and 191 requests and returned "(no answer)". It went looking for where `?` is defined and ran the same few `grep`s on `env.go` dozens of times (`?` is defined in `stdlib.go`); the no-progress and error-streak guards fired 12 times, then came the pause at 20 failed calls in a row. That pause was answered "stop" 22 ms after it was raised (guard entry at ...145047, scout's result at ...145069), too fast for a person to choose: the owner was probably typing in the prompt, and a keystroke answered the card (see "Cards answer to single keys" under Fixed). Everything scout had read was lost, and the parent read the docs again itself.
+
+Two things made it worse:
+- **A `grep` with no match counts as a failed call.** 98 of scout's 125 errors were "(no output) [exit code 1]", grep's normal answer for "not found". The result doesn't say that, and the error streak counts it, so the streak reached 20 on searches that worked.
+- **The stop throws the run away.** The parent gets the last answer, and a looping scout has none.
+
+Session: `~/.psi/sessions/-home-ndari-projects-cog-/2026-11-04-1440_fecf76bd.agents/02-scout.*`.
+
+Possible fixes:
+- When a sub-agent stops on a guard or a limit, make one last request without tools ("Stop now. Report what you found so far, with paths and line numbers.") and return that, marked as cut short.
+- For `grep`, `rg`, `git grep` (and `diff`, `cmp`), exit code 1 with no stderr means "no match" or "differs": say so ("grep found no matches (exit code 1)") and don't count it toward the error streak.
+
+**Status 2026-11-04:** the pause that answered itself is fixed (cards are lists that ignore keys at first). Also fixed 2026-11-04: when the last command is `grep`, `rg`, `git grep` (or `cmp`) and it exits 1 with no output, the result says "[exit code 1: grep says no line matched]" and isn't an error, so the streak doesn't count it (plan §8.6, with tests). Still open at that point: the last report when a sub-agent stops.
+
+**Fixed 2026-11-04 (the last report):** a sub-agent stopped by a budget or a guard (not Esc) gets one more request with the stop's reason and "You can't call tools any more. Report what you found so far, with the paths and line numbers, and what is left undone."; its answer goes to the parent, marked "it wrote this report when stopped", and the `subagent` entry has `report: true`. The tools stay in the request so the cache holds; calls it makes anyway don't run, and without text the result is "(no answer)" as before. Plan §10.1, with tests.
