@@ -80,6 +80,9 @@ pub struct AgentConfig {
 pub struct Queues {
     pub steering: Arc<Mutex<VecDeque<String>>>,
     pub follow_up: Arc<Mutex<VecDeque<String>>>,
+    /// `/label` typed during a run: written before the next entry, on the
+    /// entry that was latest when it was typed (see [`Agent::flush_labels`]).
+    pub labels: Arc<Mutex<VecDeque<String>>>,
 }
 
 impl Queues {
@@ -797,6 +800,28 @@ impl Agent {
     }
 
     fn record(&mut self, body: EntryBody) -> Result<Entry, String> {
+        self.flush_labels()?;
+        self.write(body)
+    }
+
+    /// Writes the labels queued during a run, each on the latest entry so
+    /// far. `record` calls it before every entry, so a label lands on the
+    /// entry that was latest when the user typed it; the TUI calls it once
+    /// a run ends for any still queued.
+    pub fn flush_labels(&mut self) -> Result<(), String> {
+        let Some(target) = self.session.leaf().map(str::to_owned) else {
+            return Ok(()); // nothing to mark yet: they wait for the first entry
+        };
+        for label in Queues::take(&self.queues.labels) {
+            self.write(EntryBody::Label {
+                target_id: target.clone(),
+                label: Some(label),
+            })?;
+        }
+        Ok(())
+    }
+
+    fn write(&mut self, body: EntryBody) -> Result<Entry, String> {
         let path = self.session.path().display().to_string();
         let e = self
             .session
@@ -1706,7 +1731,7 @@ impl Agent {
                         }
                         Approval::Deny | Approval::DenyWith(_) => {
                             self.policy(id, "denied", &reason)?;
-                            return Ok(ToolOutput::err(self.denial(&reason, answer)));
+                            return Ok(ToolOutput::err(self.denial(&reason, &keys, answer)));
                         }
                     }
                 }
@@ -1857,8 +1882,12 @@ impl Agent {
         }
     }
 
-    /// The model's message for a denied call.
-    fn denial(&self, reason: &str, answer: Approval) -> String {
+    /// The model's message for a denied call. Without a user, it says what
+    /// to do next: a command bash can't parse can be fixed and run again;
+    /// anything else has to wait for the user. Telling the model not to work
+    /// around a denial is kept for the user's own no; the classifier catches
+    /// rewrites that still contain the command either way.
+    fn denial(&self, reason: &str, keys: &[String], answer: Approval) -> String {
         if let Approval::DenyWith(m) = answer {
             return format!("The user denied this call: {m}");
         }
@@ -1866,9 +1895,13 @@ impl Agent {
             format!(
                 "The user denied this call ({reason}). Don't retry it in another form; ask the user if you need it."
             )
+        } else if keys.iter().all(|k| k.starts_with("unparseable:")) {
+            format!(
+                "Not run: {reason}. Fix the command, or write it another way, and run it again."
+            )
         } else {
             format!(
-                "Not run: {reason}. This run can't ask the user, so it was denied. Don't retry it in another form; say in your answer what you needed."
+                "Not run: {reason}, and this run can't ask the user. Do without it, or say in your answer what you needed."
             )
         }
     }

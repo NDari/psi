@@ -18,6 +18,20 @@ The file tools ask before changing Psi's configuration or files checkpoints can'
 - **Gitignored files (medium).** write and edit ask before changing one, since checkpoints skip it; bash doesn't, so a clobbered `.env` can't be undone.
 - **Read before overwrite (low).** The file tools refuse to replace a file the model hasn't read; bash doesn't check. Checkpoints still undo it.
 
+### Failure guards miss failures that aren't in a row (added 2026-11-05, medium priority, to implement)
+
+From the 27B code eval (`~/.psi/evals/2026-11-05-1321-code-all-qwen3.8-27b`):
+- `sh_manifest` (2/9, step cap): about 20 steps of one-line `bash -c` probes, each slightly different, nearly all failing with `$3: unbound variable`. `error_streak` (10 failed calls in a row) fired only at step 39, since a few calls in between succeeded and reset the count. `repeated_failure` didn't fire, since the calls differed.
+- `feat_lru_cache` (PASS): `python3 /tmp/check_lru.py` run 5 times unchanged after `No module named 'kvcache'`. The warning at 3 ("change the call or try another approach") didn't change the call; the stop at 5 ended it, after the work was done.
+
+- The cog session with the 27B (`~/.psi/sessions/-home-ndari-projects-cog-/2026-11-05-1547_e61d66e2.*`, the first extension prompt): after about 40 steps of exploring, more than 110 steps of read-only commands that all succeed, cycling through a few near-identical ones (`go run ./cmd/cog --docs | grep -E "^\| (swap|dup)"` 23 times, with `(swap|dup) ` and `(swap|dup|drop|over|nip) ` variants; `grep -n "func (e \*Evaluator) Eval(" -A 5`, `-A 6`, `-B 3`...). Every reply was a bare tool call with no text; no file was written. The results were all in context (40K of 64K, nothing cleared). `no_progress` fired only at steps 125 and 138: any call not seen before counts as progress, and a variant came every 2 to 4 steps. It only nudges, and the TUI has no request cap ("the guards still pause it", `run_mode.rs`), so nothing ever paused the run. The failure guards can't help, since nothing failed.
+
+**To build:** count failures in a recent window instead of in a row, e.g. 8 of the last 10 tool calls failed, so a success now and then doesn't reset it. Maybe make the warning name the error it repeats. For `no_progress`: count a turn as progress only if a call returned output not seen before (a variant with the same output is a repeat), or a file changed; and if the turns after a nudge still make no progress, pause and ask, as the failure guards do. Pick the numbers from the transcripts above and the recorded fixtures; one run, so keep them conservative.
+
+**What others do** (source read 2026-11-05: pi `35dfa75`, codex `49f0c60`, opencode `d8cb7c7` and the legacy runtime at `bb15b16`): pi and codex have no loop or failure detection and no step limit. Opencode's legacy runtime had a "doom loop" check: the last 3 tool parts of the assistant message with the same tool and identical input (errors not required) ask the user, and a no ends the turn. It never messages the model, and since each step is a new message it likely caught only repeats inside one response. Its current runtime keeps only the setting. Its optional step limit tells the model tools are off and asks for a text-only answer. So there is nothing to copy; Psi's guards already go further.
+
+**Test together:** one quick-set run once this is built, which also checks the 2026-11-05 denial wording (parse errors say to fix and run again), not yet run on a model.
+
 ### Tool-call markup inside an argument (added 2026-11-04, low priority)
 
 In an eval trial the 35B wrote a todo call whose `action` held the next parameter too: `"add>\n<parameter=text>\nCreate textkit/ package ..."` (llama-server's parser for Qwen's XML tool calls took a stray `>` as part of the value; `~/.psi/evals/2026-11-04-0236-quick-batteries-agents-qwen3.6-35b/multi_split_package`). The todo tool refused it as an unknown action and the model redid it correctly in the next call, so it cost one request. Fix if it comes back: in `psi-ai`'s shape fixes, split a string argument holding `\n<parameter=NAME>\n` into that parameter, with this call as the fixture.

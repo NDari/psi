@@ -359,11 +359,9 @@ fn print_mode_denies_always_ask_unless_allowed() {
         EntryBody::ToolResult { content, .. } => Some(psi_session::text_of(content)),
         _ => None,
     });
-    assert!(
-        result
-            .unwrap()
-            .starts_with("Not run: `cargo publish` is on the always-ask list.")
-    );
+    assert!(result.unwrap().starts_with(
+        "Not run: `cargo publish` is on the always-ask list, and this run can't ask the user."
+    ));
     // The session records how safety was set up, and the submit checkpoint.
     let info = entries.iter().find_map(|en| match &en.body {
         EntryBody::Custom { custom_type, data } if custom_type == "session_info" => {

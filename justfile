@@ -18,14 +18,17 @@ qwen := "-hf bartowski/Qwen_Qwen3.5-4B-GGUF:Q4_K_M --temp 0.7 --top-p 0.8 --top-
 gemma := "-hf google/gemma-4-12B-it-qat-q4_0-gguf:Q4_0 --temp 1.0 --top-p 0.95 --top-k 64 --min-p 0"
 # A larger model, not yet a reference model: the owner's command on the Mac,
 # with thinking off since H-09 (as well on the quick set, a third less output).
-# Sampling is the server's default. -ub 2048 reads prompts about 8% faster up
+# Sampling is the model card's for thinking off (since 2026-11-05; it was the
+# server's default before). -ub 2048 reads prompts about 8% faster up
 # to 16K of context than the default 512 (1% at 40K; llama-bench, 2026-11-03).
-qwen35b := '-hf unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL -fa on -np 1 --spec-draft-n-max 3 -ub 2048 --chat-template-kwargs {"preserve_thinking":true}'
+qwen35b := '-hf unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL -fa on -np 1 --spec-draft-n-max 3 -ub 2048 --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0.0 --presence-penalty 1.5 --repeat-penalty 1.0 --chat-template-kwargs {"preserve_thinking":true}'
 # Qwen3.8 27B (dense), tried 2026-11-05 on one extension task: its GGUF carries
 # MTP layers too, which took generation from about 18 to 32 tok/s (38 with
 # thinking off, 83% of drafts accepted). Thinking off as for qwen35b; the task
-# took 113 s, against 229 s with thinking and no MTP. The model card's sampling.
-qwen27b := '-hf unsloth/Qwen3.8-27B-GGUF:Q6_K -fa on -np 1 --spec-draft-n-max 3 -ub 2048 --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0'
+# took 113 s, against 229 s with thinking and no MTP. The model card's sampling
+# for thinking off (since 2026-11-05; it was the thinking-mode one, with no
+# presence penalty, when the cog session looped on near-identical commands).
+qwen27b := '-hf unsloth/Qwen3.8-27B-GGUF:Q6_K -fa on -np 1 --spec-draft-n-max 3 -ub 2048 --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0.0 --presence-penalty 1.5 --repeat-penalty 1.0'
 
 # List the recipes
 default:
@@ -64,11 +67,11 @@ md-bless:
 
 # Lint an extension
 ext-check path:
-    cargo run -q -- ext check {{path}}
+    cargo run -q -p psi-cli -- ext check {{path}}
 
 # Run an extension's *_test.lua files (default: every example)
 ext-test path="examples/extensions":
-    cargo run -q -- ext test {{path}}
+    cargo run -q -p psi-cli -- ext test {{path}}
 
 # Format the code
 fmt:

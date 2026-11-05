@@ -147,7 +147,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/mode", "auto or strict: /mode strict"),
     ("/plan", "plan mode on or off: read-only, ends with a plan"),
     ("/theme", "list the themes, or switch: /theme <name>"),
-    ("/label", "label the current point: /label <text>"),
+    (
+        "/label",
+        "mark this point for a later review, also while the model works: /label <text>",
+    ),
     ("/new", "start a new session"),
     ("/resume", "continue an earlier session in this directory"),
     (
@@ -1378,7 +1381,7 @@ impl<W: Write> App<W> {
         let busy = self.running.is_some();
         let needs_idle = matches!(
             name,
-            "undo" | "rewind" | "tree" | "new" | "resume" | "mode" | "label" | "plan" | "compact"
+            "undo" | "rewind" | "tree" | "new" | "resume" | "mode" | "plan" | "compact"
         );
         if busy && needs_idle {
             return self.error(&format!("/{name} waits until the run ends (Esc aborts it)"));
@@ -1497,6 +1500,14 @@ impl<W: Write> App<W> {
             "label" => {
                 if arg.is_empty() {
                     return self.error("/label <text>");
+                }
+                if self.running.is_some() {
+                    // The agent writes it before its next entry, on the
+                    // entry that is latest now.
+                    if let Ok(mut q) = self.queues.labels.lock() {
+                        q.push_back(arg.to_owned());
+                    }
+                    return self.info("  labelled");
                 }
                 self.pending_entries = Some("label");
                 self.label_text = Some(arg.to_owned());
@@ -1890,6 +1901,8 @@ impl<W: Write> App<W> {
                 };
                 // /tree lists every prompt; those off the current branch
                 // are marked, so a picked one starts from another branch.
+                // Labels show after the prompt of their turn.
+                let labels = labels_by_prompt(&entries);
                 let items: Vec<(String, String)> = source
                     .iter()
                     .filter_map(|e| match &e.body {
@@ -1901,7 +1914,11 @@ impl<W: Write> App<W> {
                             let on_branch = branch.iter().any(|b| b.id == e.id);
                             let mark = if on_branch { "" } else { "↳ " };
                             let text = view::cut(&text_of(content).replace('\n', " "), 100);
-                            Some((e.id.clone(), format!("{mark}{text}")))
+                            let tags = labels
+                                .get(&e.id)
+                                .map(|l| format!("  [{}]", l.join("; ")))
+                                .unwrap_or_default();
+                            Some((e.id.clone(), format!("{mark}{text}{tags}")))
                         }
                         _ => None,
                     })
@@ -2639,9 +2656,71 @@ fn last_code_block(md: &str) -> Option<String> {
     last
 }
 
+/// Each `/label` under the prompt whose turn it marks: the nearest user
+/// message at or above its target, by prompt id.
+fn labels_by_prompt(entries: &[Entry]) -> BTreeMap<String, Vec<String>> {
+    let by_id: BTreeMap<&str, &Entry> = entries.iter().map(|e| (e.id.as_str(), e)).collect();
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for e in entries {
+        let EntryBody::Label {
+            target_id,
+            label: Some(text),
+        } = &e.body
+        else {
+            continue;
+        };
+        let mut cur = by_id.get(target_id.as_str()).copied();
+        while let Some(c) = cur {
+            if matches!(
+                c.body,
+                EntryBody::Message {
+                    role: Role::User,
+                    ..
+                }
+            ) {
+                out.entry(c.id.clone()).or_default().push(text.clone());
+                break;
+            }
+            cur = c.parent_id.as_deref().and_then(|p| by_id.get(p).copied());
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
+    use super::labels_by_prompt;
     use super::last_code_block;
+    use psi_session::{Block, EntryBody, Role, SessionFile};
+
+    #[test]
+    fn labels_go_under_the_prompt_of_their_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = SessionFile::create(dir.path(), dir.path()).unwrap();
+        let msg = |role: Role, t: &str| EntryBody::Message {
+            role,
+            content: vec![Block::Text { text: t.into() }],
+            usage: None,
+            stop_reason: None,
+            error: None,
+            model: None,
+        };
+        let label = |id: &str, t: &str| EntryBody::Label {
+            target_id: id.into(),
+            label: Some(t.into()),
+        };
+        let first = s.append(msg(Role::User, "one")).unwrap().id.clone();
+        let reply = s.append(msg(Role::Assistant, "ok")).unwrap().id.clone();
+        s.append(label(&reply, "odd reply")).unwrap();
+        let second = s.append(msg(Role::User, "two")).unwrap().id.clone();
+        let mark = s.append(label(&second, "start")).unwrap().id.clone();
+        // A label on a label still finds its prompt.
+        s.append(label(&mark, "again")).unwrap();
+        let got = labels_by_prompt(s.entries());
+        assert_eq!(got[&first], ["odd reply"]);
+        assert_eq!(got[&second], ["start", "again"]);
+        assert_eq!(got.len(), 2);
+    }
 
     #[test]
     fn the_last_fenced_block_is_found_without_its_fences() {

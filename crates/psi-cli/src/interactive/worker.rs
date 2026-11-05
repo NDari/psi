@@ -150,6 +150,10 @@ impl Worker {
                     leaf: self.agent.session().leaf().map(str::to_owned),
                 },
             };
+            // A /label typed near the end of a run, after the last entry.
+            if let Err(e) = self.agent.flush_labels() {
+                let _ = ui.send(UiMsg::Error(e));
+            }
             if ui.send(reply).is_err() {
                 break;
             }

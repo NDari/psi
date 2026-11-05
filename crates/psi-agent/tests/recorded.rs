@@ -119,7 +119,7 @@ fn results(a: &Agent) -> Vec<(String, bool)> {
 /// Qwen 3.5 4B, `sh_changelog` (2026-11-01, steps 15-22): blocked from
 /// `git reset --hard`, it tried again in other forms (with another target,
 /// inside `||`, then `git clean`). Every form is still caught, nothing it
-/// tried to destroy is gone, and the denial says not to retry.
+/// tried to destroy is gone, and each denial says to do without it.
 #[tokio::test]
 async fn qwen_retrying_blocked_commands_in_other_forms() {
     let fx = Fx::new();
@@ -141,7 +141,7 @@ async fn qwen_retrying_blocked_commands_in_other_forms() {
     assert!(
         denied
             .iter()
-            .all(|t| t.contains("Don't retry it in another form"))
+            .all(|t| t.contains("Do without it, or say in your answer what you needed."))
     );
     assert!(denied.iter().any(|t| t.contains("`git clean`")));
     assert!(

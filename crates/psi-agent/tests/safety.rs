@@ -33,10 +33,15 @@ struct Scripted {
     pauses: Mutex<Vec<String>>,
     /// Answers to pauses, in order: true goes on (default: stop).
     go_on: Mutex<VecDeque<bool>>,
+    /// The agent's label queue: a `/label` typed while the card is up.
+    label_queue: Mutex<Option<Arc<Mutex<VecDeque<String>>>>>,
 }
 
 impl Approver for Scripted {
     fn approve(&self, req: ApprovalRequest) -> BoxFuture<'static, Approval> {
+        if let Some(q) = self.label_queue.lock().unwrap().as_ref() {
+            q.lock().unwrap().push_back("typed while asked".into());
+        }
         self.asked.lock().unwrap().push(req);
         let a = self
             .approvals
@@ -214,7 +219,7 @@ async fn headless_denies_always_ask_and_allow_grants() {
     assert_eq!(
         r[0],
         (
-            "Not run: `git push` is on the always-ask list. This run can't ask the user, so it was denied. Don't retry it in another form; say in your answer what you needed.".into(),
+            "Not run: `git push` is on the always-ask list, and this run can't ask the user. Do without it, or say in your answer what you needed.".into(),
             true
         )
     );
@@ -232,6 +237,81 @@ async fn headless_denies_always_ask_and_allow_grants() {
         results(&a)
     );
     assert_eq!(decisions(&a), ["granted"]);
+}
+
+/// A `/label` typed while the run waits (here on an approval card) marks
+/// the entry that was latest then and is written before the next entry;
+/// the model never sees it. In the cog trial
+/// (2026-11-05) the owner's label had to wait for the end of the turn.
+#[tokio::test]
+async fn a_label_typed_during_a_run_marks_the_latest_entry() {
+    let fx = Fx::new();
+    let server = ReplayServer::start(vec![
+        call("bash", json!({"command": "git push"})),
+        text("ok"),
+    ])
+    .unwrap();
+    let ap = Arc::new(Scripted::default());
+    let mut a = fx.agent(&server, fx.session(), fx.safety(ap.clone(), None), false);
+    *ap.label_queue.lock().unwrap() = Some(a.queues().labels.clone());
+    a.run("ship it").await;
+    let entries = a.session().entries();
+    let at = entries
+        .iter()
+        .position(|e| matches!(e.body, EntryBody::Label { .. }))
+        .expect("a label entry");
+    let EntryBody::Label { target_id, label } = &entries[at].body else {
+        unreachable!()
+    };
+    assert_eq!(label.as_deref(), Some("typed while asked"));
+    // The latest entry when it was typed: after the call, before its result.
+    assert_eq!(target_id, &entries[at - 1].id);
+    let before = &entries[..at];
+    assert!(before.iter().any(|e| matches!(
+        e.body,
+        EntryBody::Message {
+            role: psi_session::Role::Assistant,
+            ..
+        }
+    )));
+    assert!(
+        !before
+            .iter()
+            .any(|e| matches!(e.body, EntryBody::ToolResult { .. }))
+    );
+    assert!(matches!(
+        entries[at + 1].body,
+        EntryBody::PolicyDecision { .. }
+    ));
+    // Not part of what the model is sent.
+    let last = server.chat_requests().last().cloned().unwrap();
+    assert!(!last.to_string().contains("typed while asked"));
+}
+
+/// Qwen3.8 27B, `sh_precommit` (code eval 2026-11-05, step 18): a quoting
+/// slip. Headless, the denial says to fix it and run it again, which the
+/// model did; it used to say not to retry.
+#[tokio::test]
+async fn headless_unparseable_says_fix_and_run_again() {
+    let fx = Fx::new();
+    let cmd = json!({"command": "cd /tmp/hooktest\nt=$(printf '\\t')\necho '--- content of staged b.py:'\ngit cat-file -p :'we'\"$t\"dir/b.py'; echo \"<<<end\"\necho '--- diff output via git diff --cached for b.py:'\ngit diff --cached -- 'we'\"$t\"dir/b.py' | cat -A\necho '--- diff with -U0:'\ngit diff --cached -U0 -- 'we'\"$t\"dir/b.py' | cat -A"});
+    let server = ReplayServer::start(vec![call("bash", cmd), text("ok")]).unwrap();
+    let mut a = fx.agent(
+        &server,
+        fx.session(),
+        fx.safety(Arc::new(Headless), None),
+        false,
+    );
+    a.run("test the hook").await;
+    let r = results(&a);
+    assert_eq!(
+        r[0],
+        (
+            "Not run: bash could not parse it near line 8, and bash would run the lines before the error. Fix the command, or write it another way, and run it again.".into(),
+            true
+        )
+    );
+    assert_eq!(decisions(&a), ["denied"]);
 }
 
 #[tokio::test]

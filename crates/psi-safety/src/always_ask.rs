@@ -20,6 +20,8 @@ pub enum RuleError {
 }
 
 /// One always-ask entry, e.g. "git push": a program and words that must all appear after it, in any order.
+/// For git, a first word that isn't an option must be the subcommand, so `git commit -m clean`
+/// isn't `git clean`.
 /// A word written `!list` must not appear: "git stash !list" asks for `git stash` but not `git stash list`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rule {
@@ -40,8 +42,30 @@ impl Rule {
                 .any(|got| word_matches(want, got))
         };
         prog.lit.as_deref().map(basename) == Some(self.program.as_str())
+            && self.subcommand_matches(args)
             && self.words.iter().all(|w| has(w))
             && !self.not.iter().any(|w| has(w))
+    }
+
+    /// A git entry's first word, unless it is an option, is git's subcommand: the
+    /// first word after git's own options (`git -C DIR -c k=v push`). Other programs'
+    /// global options vary too much to find theirs, and their words match anywhere.
+    fn subcommand_matches(&self, args: &[Word]) -> bool {
+        match self.words.first() {
+            Some(sub) if self.program == "git" && !sub.starts_with('-') => {
+                let long = [
+                    "--git-dir",
+                    "--work-tree",
+                    "--namespace",
+                    "--super-prefix",
+                    "--config-env",
+                    "--attr-source",
+                ];
+                let i = options(args, "Cc", &long).0;
+                args.get(i).and_then(|w| w.lit.as_deref()) == Some(sub.as_str())
+            }
+            _ => true,
+        }
     }
 }
 
@@ -651,7 +675,7 @@ mod tests {
         let rules = Rules::shipped();
         for (cmd, want) in [
             ("git stash", ask(&["git stash"])),
-            ("git stash push -m wip", ask(&["git push", "git stash"])),
+            ("git stash push -m wip", ask(&["git stash"])),
             ("git stash -u && go test ./...", ask(&["git stash"])),
             ("git -C repo stash save", ask(&["git stash"])),
             ("git checkout env.go", ask(&["git checkout"])),
@@ -824,14 +848,47 @@ mod tests {
 
     #[test]
     fn known_false_positives_ask() {
-        // Any-order matching sees "push" as the subcommand. Acceptable: it only asks.
         let cases = [
-            ("git log --grep push", ask(&["git push"])),
-            ("git checkout push", ask(&["git push", "git checkout"])),
             // A short-flag cluster with an attached value can contain the letter.
             ("psi -mllama-pro", ask(&["psi -p"])),
         ];
         check(&cases, &Rules::shipped());
+    }
+
+    #[test]
+    fn git_entries_match_the_subcommand() {
+        // The 27B's hook test committed a file named `clean` and was denied
+        // five times as `git clean` (code eval, 2026-11-05).
+        let cases = [
+            ("git commit -m clean", Verdict::Clear),
+            ("git add push.py && git commit -m push", Verdict::Clear),
+            ("git log --grep push", Verdict::Clear),
+            ("git checkout push", ask(&["git checkout"])),
+            ("git branch -D push", ask(&["git branch -D"])),
+            ("git -C /p push", ask(&["git push"])),
+            (
+                "git -c core.pager=cat -C repo --no-pager push",
+                ask(&["git push"]),
+            ),
+            (
+                "git --git-dir .git --work-tree=. clean -fd",
+                ask(&["git clean"]),
+            ),
+            (
+                "/usr/bin/git reset HEAD~1 --hard",
+                ask(&["git reset --hard"]),
+            ),
+            ("git -- push", ask(&["git push"])),
+            // Other programs still match anywhere.
+            ("npm --registry r publish", ask(&["npm publish"])),
+        ];
+        check(&cases, &Rules::shipped());
+        // A user entry whose first word is an option matches anywhere.
+        let rules = Rules::layered(&["git --force".into()], &[]).unwrap();
+        assert_eq!(
+            classify("git push --force", &rules),
+            ask(&["git push", "git --force"])
+        );
     }
 
     #[test]

@@ -94,6 +94,10 @@ pub enum Event {
         decision: String,
         reason: String,
     },
+    /// The user's `/label`, where it was written: after the entry it marks.
+    Label {
+        text: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -256,6 +260,9 @@ pub fn timeline(rec: &Record) -> Timeline {
                 decision: decision.clone(),
                 reason: reason.clone(),
             }),
+            EntryBody::Label {
+                label: Some(text), ..
+            } => events.push(Event::Label { text: text.clone() }),
             _ => {}
         }
     }
@@ -453,7 +460,8 @@ impl Filter {
         if let Some(n) = self.step {
             return matches!(ev, Event::Step(s) if s.n == n);
         }
-        if !(self.failures || self.guards || self.blocked) {
+        // The user's marks show in every filtered view.
+        if !(self.failures || self.guards || self.blocked) || matches!(ev, Event::Label { .. }) {
             return true;
         }
         (self.failures
@@ -548,6 +556,9 @@ pub fn render_text(t: &Timeline, full: bool) -> String {
                     "\npolicy {decision} ({tool_call_id}): {}",
                     cut(reason, width)
                 );
+            }
+            Event::Label { text } => {
+                let _ = writeln!(s, "\nlabel: {}", cut(text, width));
             }
         }
     }
@@ -699,6 +710,48 @@ mod tests {
         .apply(&t);
         assert_eq!(one.events.len(), 1);
         assert!(matches!(&one.events[0], Event::Step(s) if s.n == 2));
+    }
+
+    #[test]
+    fn labels_show_where_written_and_in_filtered_views() {
+        let mut entries = convert(FIXTURE.as_bytes()).unwrap().entries;
+        // After the first step's result, as a /label during the run writes it.
+        let at = entries
+            .iter()
+            .position(|e| matches!(e.body, EntryBody::ToolResult { .. }))
+            .unwrap();
+        let target = entries[at].id.clone();
+        entries.insert(
+            at + 1,
+            Entry {
+                id: "label1".into(),
+                parent_id: Some(target.clone()),
+                ts: 0,
+                body: EntryBody::Label {
+                    target_id: target,
+                    label: Some("why read it twice?".into()),
+                },
+            },
+        );
+        let t = timeline(&Record {
+            entries,
+            result: None,
+        });
+        let text = render_text(&t, false);
+        let label = text.find("\nlabel: why read it twice?").unwrap();
+        assert!(text[..label].contains("\nstep 1"), "{text}");
+        assert!(!text[..label].contains("\nstep 2"), "{text}");
+        let guards = Filter {
+            guards: true,
+            ..Filter::default()
+        }
+        .apply(&t);
+        assert!(
+            guards
+                .events
+                .iter()
+                .any(|e| matches!(e, Event::Label { .. }))
+        );
     }
 
     #[test]

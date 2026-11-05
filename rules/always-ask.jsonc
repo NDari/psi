@@ -1,7 +1,8 @@
 // Always-ask entries (psi-plan.md §8.3): a bash command containing one of these
 // asks the user first, in every mode. Each entry is a program, then words that
 // must all appear after it in any order ("git reset --hard" matches
-// "git reset HEAD~1 --hard"); a word written "!list" must not appear.
+// "git reset HEAD~1 --hard"); a word written "!list" must not appear. For git,
+// the first word must be the subcommand ("git commit -m clean" isn't "git clean").
 // User and project files can append entries; dropping a shipped one takes
 // an explicit "remove".
 {

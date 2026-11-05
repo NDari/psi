@@ -273,6 +273,7 @@ In `strict` mode, every write, edit and bash call asks (§8.1).
   - Maintenance: `compaction`, `cleared_results`, `label`.
   - Psi-specific: `checkpoint`, `policy_decision`, `guard_event`.
 - Commands: `/new`, `/resume`, `/tree`, `/fork`, `/label`, `/export` (HTML later).
+- `/label <text>` marks the latest entry for a later review, also while a run is going (the agent writes it before its next entry). The model never sees it; `/tree` shows labels after the prompt of their turn, and `psi inspect` where they were written.
 - **The session file plus its wire log (§4.6) is the full record** of a session. Evals keep both, inspection reads them, and adapters for other agents (pi) convert into session entries. There is no separate dump format (D-31).
 
 ### 7.2 Checkpoints (D-05, D-06)
@@ -387,7 +388,7 @@ The classifier has one job: find always-ask commands wherever they hide in a bas
 1. **Parse** with tree-sitter-bash. A tree with ERROR or MISSING nodes asks, since bash runs the lines before a syntax error. tree-sitter-bash misparses some valid bash; if that asks too often in practice, relax it with fixtures.
 2. **Collect every simple command,** recursing into pipelines, `;`/`&&`/`||` lists, subshells, `{ }` groups, `$(…)` and backtick substitutions, `<(…)`, and function bodies. Match programs by basename (`/usr/bin/git` is `git`).
 3. **Look inside common wrappers and runners:** `timeout`, `nice`, `nohup`, `time`, `command`, `env`, `sudo`, `xargs`, `sh -c`/`bash -c` with a literal script (parsed recursively, depth limit 3), `eval` with literal arguments, and `find -exec`. Dynamic forms (`$CMD push`, `eval "$x"`) aren't resolved; they run, and the boundary contains them.
-4. **Match entry words in any order** after the program, so `git push` matches `git -C /p push`, and `git reset --hard` matches `git reset HEAD~1 --hard`. A word written `!list` must not appear (`git stash !list` asks for `git stash`, not `git stash list`).
+4. **Match entry words in any order** after the program, so `git push` matches `git -C /p push`, and `git reset --hard` matches `git reset HEAD~1 --hard`. A word written `!list` must not appear (`git stash !list` asks for `git stash`, not `git stash list`). For git, an entry's first word (unless it is an option) must be the subcommand, the first word after git's own options (`-C DIR`, `-c k=v`, `--git-dir DIR`), so `git commit -m clean` isn't `git clean` (changed 2026-11-05: in a run that can't ask, that match denied a model's hook test five times). Other programs' words still match anywhere, since their global options vary too much to find the subcommand.
 
 **The list** (`rules/always-ask.jsonc`, embedded): `git push`, `git reset --hard`, `git clean`, `git branch -D`, `git branch --delete --force`, `git stash drop`, `git stash clear`, `git stash` (but not `list`, `show`, `pop`, `apply`, `branch`), `git checkout`, `git restore` (added 2026-11-04: a sub-agent set aside and discarded its parent's uncommitted changes with them), `npm publish`, `cargo publish`, `docker push`, `podman push`, `terraform apply`, `kubectl`, `sudo`, `doas`, and **Psi itself** (`psi -p`, `psi --json`), to prevent nested sessions.
 
