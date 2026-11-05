@@ -161,7 +161,9 @@ failed. It runs inside the same sandbox as bash.
   argument counts and types, unknown events), accidental globals, a dry
   load, and lua-language-server when it is installed.
 - `psi ext test <path>`: runs `*_test.lua` beside the extension against a
-  fake host, and shows everything the extension printed, logged or threw.
+  fake host. It shows what the tests and the extension printed, and for a
+  failing test also what the extension logged and the error (`--verbose`
+  shows the logs of passing tests too).
   Test files use the global `test`; there is nothing to `require`.
 
 ```lua

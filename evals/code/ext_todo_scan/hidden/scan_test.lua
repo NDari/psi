@@ -1,12 +1,9 @@
 -- Held-out tests for todo_scan (the model never sees them). The tool's
 -- working directory is test.tmp.
 
+-- psi.fs.write makes the directories (os.execute is gone since 3db400e).
 local function put(rel, body)
-  local dir = rel:match("^(.*)/[^/]*$")
-  if dir then os.execute("mkdir -p '" .. test.tmp .. "/" .. dir .. "'") end
-  local f = assert(io.open(test.tmp .. "/" .. rel, "wb"))
-  f:write(body)
-  f:close()
+  psi.fs.write(test.tmp .. "/" .. rel, body)
 end
 
 local function project()

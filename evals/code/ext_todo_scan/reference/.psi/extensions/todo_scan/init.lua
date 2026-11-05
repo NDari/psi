@@ -22,16 +22,11 @@ local function match(globs, gi, parts, pi)
   return parts[pi]:match(segment_pattern(globs[gi])) ~= nil and match(globs, gi + 1, parts, pi + 1)
 end
 
+local fs -- psi.fs, set in setup
+
+-- Every file under dir, relative to it, sorted (io.popen is gone since 3db400e).
 local function files_under(dir)
-  local out = {}
-  local p = io.popen("find " .. string.format("%q", dir) .. " -type f 2>/dev/null")
-  if not p then return out end
-  for line in p:lines() do
-    out[#out + 1] = line:sub(#dir + 2)
-  end
-  p:close()
-  table.sort(out)
-  return out
+  return fs.glob("**", { cwd = dir, gitignore = false })
 end
 
 local function scan(args, ctx)
@@ -66,6 +61,7 @@ return {
   version = "0.1.0",
   description = "A tool that lists TODO comments",
   setup = function(psi)
+    fs = psi.fs
     psi.register_tool({
       name = "todo_scan",
       description = "List lines containing TODO in the files matching a glob",

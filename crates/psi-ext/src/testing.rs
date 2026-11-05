@@ -249,10 +249,12 @@ impl TestReport {
                 None => s.push_str(&format!("ok    {file}: {}\n", c.name)),
                 Some(e) => s.push_str(&format!("FAIL  {file}: {}\n      {e}\n", c.name)),
             }
-            if c.error.is_some() || verbose {
-                for o in &c.output {
-                    s.push_str(&format!("      | {o}\n"));
-                }
+            // A print is asked for, so it shows for a passing case too (in
+            // the Qwen3.8 27B eval run, 7 steps of probe tests that printed
+            // showed nothing); what the extension logged shows on a failure.
+            let all = c.error.is_some() || verbose;
+            for o in c.output.iter().filter(|o| all || o.starts_with("print: ")) {
+                s.push_str(&format!("      | {o}\n"));
             }
         }
         let failed = self.cases.iter().filter(|c| c.error.is_some()).count();
@@ -818,6 +820,7 @@ mod tests {
             r#"return { name = "t", version = "1", description = "d", setup = function(psi)
                  psi.register_command("hello", { description = "greet", handler = function(args, ctx)
                    print("greeting " .. args)
+                   psi.log("greeted " .. args)
                    if ctx.ui.confirm("Greet?", args) then psi.ui.notify("hello " .. args) end
                  end })
                  psi.on("tool_call", function(ev) if ev.args.command == "x" then return { block = true, reason = "no x" } end end)
@@ -854,13 +857,19 @@ mod tests {
         let e = fail.error.as_deref().unwrap();
         assert!(e.contains("expected { kind = \"notify\" }, got nil"), "{e}");
         assert!(e.contains("hello_test.lua:13"), "{e}");
-        assert_eq!(fail.output, ["print: greeting ann"]);
+        assert_eq!(fail.output, ["print: greeting ann", "log: greeted ann"]);
         let text = r.render(false);
         assert!(
             text.contains("FAIL  hello_test.lua: fails with a clear message"),
             "{text}"
         );
         assert!(text.contains("| print: greeting ann"), "{text}");
+        assert!(text.contains("| log: greeted ann"), "{text}");
+        // A passing case shows what it printed, and what it logged only
+        // with --verbose.
+        assert!(text.contains("| print: greeting bob"), "{text}");
+        assert!(!text.contains("| log: greeted bob"), "{text}");
+        assert!(r.render(true).contains("| log: greeted bob"));
         assert!(text.ends_with("3 passed, 1 failed\n"), "{text}");
     }
 

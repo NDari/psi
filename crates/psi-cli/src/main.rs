@@ -165,7 +165,7 @@ enum ExtCommand {
     /// Run an extension's *_test.lua files (a directory of extensions runs them all).
     Test {
         path: PathBuf,
-        /// Show what passing tests printed too.
+        /// Show what passing tests logged too (what they print always shows).
         #[arg(long)]
         verbose: bool,
     },

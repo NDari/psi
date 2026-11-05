@@ -22,6 +22,10 @@ The file tools ask before changing Psi's configuration or files checkpoints can'
 
 In an eval trial the 35B wrote a todo call whose `action` held the next parameter too: `"add>\n<parameter=text>\nCreate textkit/ package ..."` (llama-server's parser for Qwen's XML tool calls took a stray `>` as part of the value; `~/.psi/evals/2026-11-04-0236-quick-batteries-agents-qwen3.6-35b/multi_split_package`). The todo tool refused it as an unknown action and the model redid it correctly in the next call, so it cost one request. Fix if it comes back: in `psi-ai`'s shape fixes, split a string argument holding `\n<parameter=NAME>\n` into that parameter, with this call as the fixture.
 
+### No guard notices reading without fixing after a failing test (added 2026-11-05, low priority, to discuss)
+
+In the Qwen3.8 27B extension run (`~/.psi/evals/2026-11-05-0337-h01-ext-qwen3.8-27b-full/ext_bookmarks`) one of the model's own tests failed at step 5; it then spent the 15 steps left reading example extensions (`psi ext example ...`, one command three times) and never edited again, so the run ended at the step cap. No guard fired, as designed: the repeat guard counts only failed calls, and the no-progress guard (G-12) needs 6 turns that only repeat earlier calls, while most of these reads were new. The 35B wrote 33K tokens on `ext_todo_scan` in a 2026-11-01 run without a guard either. A possible guard: after a failing check, N turns that only read and change no file get a nudge naming the failure ("The last check failed: <first line>. Fix it, or say why you can't."). Headless only, like the answer guard, since a person can step in. One run, one model; worth it only if it shows up again.
+
 ### `path:line` in answers isn't clickable (added 2026-11-04, low priority)
 
 Left over from the markdown work (plan §11.2, `psi-cog-test-issues.md`, "Answers look flat"): a code span like `cmd/cog/repl.go:92` in an answer could be an OSC 8 `file://` link to the file. The line can't go in the link (plan §15 item 5), so a click opens the file at the top; tmux needs `set -as terminal-features ',*:hyperlinks'`. Links already work for markdown links.
