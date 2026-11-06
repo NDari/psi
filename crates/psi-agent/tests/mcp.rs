@@ -218,6 +218,31 @@ async fn approval_settings_and_plan_mode() {
     );
 }
 
+/// `approval: "ask"` asks for a tool the server marks read-only too, even
+/// though read-only calls otherwise run side by side without the policy.
+#[tokio::test]
+async fn ask_approval_asks_for_read_only_tools() {
+    let fx = Fx::new(vec![
+        call("mcp__gh__search", json!({"q": "crash"})),
+        text("Denied."),
+    ]);
+    fx.approver
+        .approvals
+        .lock()
+        .unwrap()
+        .push_back(Approval::Deny);
+    let mut c = config("gh");
+    c.approval = McpApproval::Ask;
+    let mcp = fake_manager(c, tools(), Arc::new(answer)).await;
+    let mut a = fx.agent(mcp);
+    a.run("search").await;
+    let asked = fx.approver.asked.lock().unwrap();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].tool, "mcp__gh__search");
+    let r = &results(&a)[0];
+    assert!(r.1 && r.0.contains("denied"), "{r:?}");
+}
+
 #[tokio::test]
 async fn a_server_that_is_gone_says_so() {
     let fx = Fx::new(vec![call("mcp__gh__search", json!({"q": "x"})), text("ok")]);

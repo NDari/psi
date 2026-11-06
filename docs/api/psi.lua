@@ -330,7 +330,7 @@ function psi.get_flag(name) end
 ---@param render fun(call: ToolRenderCall, width: integer): string[]
 function psi.register_tool_renderer(tool, render) end
 
---- Send a message as the user. While the agent runs it steers the run, or waits for the run to end with `deliver = "follow_up"`; otherwise it starts a run.
+--- Send a message as the user. While the agent runs it steers the run, or waits for the run to end with `deliver = "follow_up"`; otherwise it starts a run. The text is always a prompt: a leading `/` or `!` runs no command or shell.
 ---@param text string
 ---@param opts? SendOptions
 function psi.send_user_message(text, opts) end

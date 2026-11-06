@@ -435,6 +435,43 @@ fn unescape(s: &str, quoted: bool) -> String {
     out
 }
 
+/// The script a word gives `sh -c` or `eval`: its value, or for one that
+/// expands something (`"cd $d && git push"`) its text with the quotes
+/// removed and the expansions left as written, so the literal commands in
+/// it are still checked; the expansions stay expansions.
+pub(crate) fn script_text(w: &Word) -> String {
+    if let Some(lit) = &w.lit {
+        return lit.clone();
+    }
+    let mut out = String::with_capacity(w.raw.len());
+    let mut chars = w.raw.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => out.extend(chars.by_ref().take_while(|&c| c != '\'')),
+            '"' => {
+                let mut inner = String::new();
+                while let Some(c) = chars.next() {
+                    match c {
+                        '"' => break,
+                        '\\' => {
+                            inner.push('\\');
+                            inner.extend(chars.next());
+                        }
+                        c => inner.push(c),
+                    }
+                }
+                out.push_str(&unescape(&inner, true));
+            }
+            '\\' => match chars.next() {
+                Some('\n') | None => {}
+                Some(n) => out.push(n),
+            },
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 pub(crate) fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
@@ -457,7 +494,9 @@ pub(crate) fn runs(prog: &str, args: &[Word]) -> Vec<Inner> {
             options(args, "ks", &["--kill-after", "--signal"]).0 + 1,
         )),
         "nice" => cmd(rest(options(args, "n", &["--adjustment"]).0)),
-        "nohup" | "time" => cmd(rest(options(args, "", &[]).0)),
+        "nohup" | "builtin" => cmd(rest(options(args, "", &[]).0)),
+        // bash's `time -p`, and /usr/bin/time's -f and -o.
+        "time" => cmd(rest(options(args, "fo", &["--format", "--output"]).0)),
         "exec" => cmd(rest(options(args, "a", &[]).0)),
         "command" => {
             let (i, opts) = options(args, "", &[]);
@@ -509,18 +548,19 @@ pub(crate) fn runs(prog: &str, args: &[Word]) -> Vec<Inner> {
         }
         "sh" | "bash" | "zsh" | "dash" => {
             let (i, opts) = options(args, "oO", &["--rcfile", "--init-file"]);
-            match args.get(i).and_then(|w| w.lit.clone()) {
+            match args.get(i).map(script_text) {
                 Some(script) if opts.iter().any(|(o, _)| o == "c") => vec![Inner::Script(script)],
                 _ => vec![],
             }
         }
-        "eval" => args
-            .iter()
-            .map(|w| w.lit.clone())
-            .collect::<Option<Vec<_>>>()
-            .map(|words| Inner::Script(words.join(" ")))
-            .into_iter()
-            .collect(),
+        "eval" => {
+            let args = match args.first().and_then(|w| w.lit.as_deref()) {
+                Some("--") => &args[1..],
+                _ => args,
+            };
+            let words: Vec<String> = args.iter().map(script_text).collect();
+            vec![Inner::Script(words.join(" "))]
+        }
         "find" => find_exec(args),
         _ => vec![],
     }
@@ -528,7 +568,8 @@ pub(crate) fn runs(prog: &str, args: &[Word]) -> Vec<Inner> {
 
 /// Skip leading options (`-x`, clusters like `-lc`, `+o`, `--long`, `--long=v`, up to `--`).
 /// `short` and `long` list the options that take a value. Returns the index of the
-/// first operand and each option seen with its value.
+/// first operand and each option seen with its value. A word that expands but starts
+/// with `-` (`--work-tree=$PWD`, `-C"$d"`) is still an option; its value is `None`.
 pub(crate) fn options(
     args: &[Word],
     short: &str,
@@ -536,14 +577,21 @@ pub(crate) fn options(
 ) -> (usize, Vec<(String, Option<String>)>) {
     let mut seen = Vec::new();
     let mut i = 0;
-    while let Some(arg) = args.get(i).and_then(|w| w.lit.as_deref()) {
+    while let Some(w) = args.get(i) {
+        let (arg, literal) = match &w.lit {
+            Some(l) => (l.as_str(), true),
+            None if w.raw.starts_with('-') => (w.raw.as_str(), false),
+            None => break,
+        };
         let next = |i: usize| args.get(i + 1).and_then(|w| w.lit.clone());
-        if arg == "--" {
+        if literal && arg == "--" {
             i += 1;
             break;
         } else if let Some(name) = arg.strip_prefix("--") {
             match name.split_once('=') {
-                Some((name, value)) => seen.push((format!("--{name}"), Some(value.to_string()))),
+                Some((name, value)) => {
+                    seen.push((format!("--{name}"), literal.then(|| value.to_string())));
+                }
                 None if long.contains(&arg) => {
                     seen.push((arg.to_string(), next(i)));
                     i += 1;
@@ -553,13 +601,17 @@ pub(crate) fn options(
         } else if arg.len() > 1 && (arg.starts_with('-') || arg.starts_with('+')) {
             let cluster = &arg[1..];
             for (k, c) in cluster.char_indices() {
+                // Where a quote or an expansion starts, the letters end.
+                if !literal && !c.is_ascii_alphanumeric() {
+                    break;
+                }
                 if short.contains(c) {
                     let attached = &cluster[k + c.len_utf8()..];
                     let value = if attached.is_empty() {
                         i += 1;
                         args.get(i).and_then(|w| w.lit.clone())
                     } else {
-                        Some(attached.to_string())
+                        literal.then(|| attached.to_string())
                     };
                     seen.push((c.to_string(), value));
                     break;
@@ -767,6 +819,16 @@ mod tests {
             ("eval git push", push()),
             ("eval 'git push'", push()),
             ("eval \"git\" push", push()),
+            // A script that expands something still has literal commands.
+            ("sh -c \"cd $dir && git push\"", push()),
+            ("bash -c \"git push origin $branch\"", push()),
+            (
+                "sh -c \"git push origin HEAD:$(git branch --show-current)\"",
+                push(),
+            ),
+            ("bash -c \"echo \\\"$x\\\" && git push\"", push()),
+            ("eval \"git push $remote\"", push()),
+            ("eval git push \"$remote\"", push()),
             ("find . -name x -exec git push \\;", push()),
             ("find . -execdir git push {} +", push()),
             ("find . -ok git push ';' -print", push()),
@@ -781,6 +843,15 @@ mod tests {
             ("git -C repo push", push()),
             ("git -c user.name=x push", push()),
             ("git --git-dir=x push", push()),
+            // Options whose value expands (2026-11-05 review).
+            ("git --work-tree=$PWD push", push()),
+            ("git --git-dir=\"$g\" push", push()),
+            ("git -C\"$d\" push", push()),
+            ("git -c\"$k\"=v push", push()),
+            ("/usr/bin/time -f %e git push", push()),
+            ("/usr/bin/time -o t.txt git push", push()),
+            ("eval -- git push", push()),
+            ("builtin command git push", push()),
             ("git stash drop stash@{1}", ask(&["git stash drop"])),
             ("git clean -fdx", ask(&["git clean"])),
             ("psi -p hi", ask(&["psi -p"])),
@@ -841,6 +912,8 @@ mod tests {
             "git $sub",
             "eval \"$x\"",
             "sh -c \"$script\"",
+            "bash -c \"echo $x git push\"",
+            "eval \"echo $x\"",
         ];
         let cases: Vec<_> = cases.iter().map(|c| (*c, Verdict::Clear)).collect();
         check(&cases, &Rules::shipped());

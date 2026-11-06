@@ -6,7 +6,7 @@
 
 use tree_sitter::{Node, Parser};
 
-use crate::always_ask::{Inner, Word, basename, collect, error_line, options, runs};
+use crate::always_ask::{Inner, Word, basename, collect, error_line, options, runs, script_text};
 
 /// How many `sh -c` scripts deep the check looks.
 const MAX_DEPTH: usize = 3;
@@ -206,13 +206,62 @@ fn assignments(node: Node, src: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Operands after the options (words not starting with `-`).
-fn operands(args: &[Word], from: usize) -> Vec<&str> {
-    args[from..]
+/// Every option, wherever it is, and the operands: GNU tools take options
+/// after operands too (`sed 's/a/b/' -i f`, `sort in -o out`), up to `--`.
+/// A word that expands counts as an operand.
+#[allow(clippy::type_complexity)]
+fn permuted<'a>(
+    args: &'a [Word],
+    short: &str,
+    long: &[&str],
+) -> (Vec<(String, Option<String>)>, Vec<&'a Word>) {
+    let mut opts = Vec::new();
+    let mut operands = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let (n, seen) = options(&args[i..], short, long);
+        opts.extend(seen);
+        let ended = n > 0 && args[i + n - 1].lit.as_deref() == Some("--");
+        i += n;
+        if ended {
+            operands.extend(&args[i..]);
+            break;
+        }
+        if let Some(w) = args.get(i) {
+            operands.push(w);
+            i += 1;
+        }
+    }
+    (opts, operands)
+}
+
+/// The scripts given with `-e` (or `--expression`/`--source`), or else the
+/// first operand. A script that expands is read as written (`"s/$a/b/w f"`
+/// still shows its `w`); an `-e` whose value expands can't be read at all.
+fn given_scripts(
+    opts: &[(String, Option<String>)],
+    operands: &[&Word],
+    flags: &[&str],
+    what: &str,
+) -> Result<Vec<String>, String> {
+    let given: Vec<&Option<String>> = opts
         .iter()
-        .filter_map(|w| w.lit.as_deref())
-        .filter(|a| !a.starts_with('-'))
-        .collect()
+        .filter(|(o, _)| flags.contains(&o.as_str()))
+        .map(|(_, v)| v)
+        .collect();
+    if given.iter().any(|v| v.is_none()) {
+        return Err(format!(
+            "a {what} that expands can't be checked; write it out"
+        ));
+    }
+    if given.is_empty() {
+        return Ok(operands
+            .first()
+            .map(|w| script_text(w))
+            .into_iter()
+            .collect());
+    }
+    Ok(given.into_iter().flatten().cloned().collect())
 }
 
 /// Whether a sed script writes files or runs commands: the `w`, `W` and
@@ -329,7 +378,7 @@ fn simple(parser: &mut Parser, argv: &[Word], depth: usize) -> Result<(), String
             }
         }
         "sed" => {
-            let (i, opts) = options(args, "efl", &["--expression", "--file"]);
+            let (opts, operands) = permuted(args, "efl", &["--expression", "--file"]);
             if opts
                 .iter()
                 .any(|(o, _)| o == "i" || o.starts_with("--in-place"))
@@ -339,22 +388,16 @@ fn simple(parser: &mut Parser, argv: &[Word], depth: usize) -> Result<(), String
             if opts.iter().any(|(o, _)| o == "f" || o == "--file") {
                 return Err("sed -f runs a script file".into());
             }
-            let mut scripts: Vec<&str> = opts
-                .iter()
-                .filter(|(o, _)| o == "e" || o == "--expression")
-                .filter_map(|(_, v)| v.as_deref())
-                .collect();
-            if scripts.is_empty() {
-                scripts.extend(args.get(i).and_then(|w| w.lit.as_deref()));
-            }
+            let scripts = given_scripts(&opts, &operands, &["e", "--expression"], "sed script")?;
             if scripts.iter().any(|s| sed_writes(s)) {
                 return Err("this sed script writes files or runs commands (w, W, e)".into());
             }
         }
         "awk" => {
-            let (i, opts) = options(
+            // gawk's -i and -l are --include and --load.
+            let (opts, operands) = permuted(
                 args,
-                "fvFe",
+                "fvFeil",
                 &[
                     "--file",
                     "--assign",
@@ -364,20 +407,15 @@ fn simple(parser: &mut Parser, argv: &[Word], depth: usize) -> Result<(), String
                     "--load",
                 ],
             );
-            if opts
-                .iter()
-                .any(|(o, _)| matches!(o.as_str(), "f" | "--file" | "--include" | "--load"))
-            {
-                return Err("awk -f runs a program file".into());
+            if opts.iter().any(|(o, _)| {
+                matches!(
+                    o.as_str(),
+                    "f" | "--file" | "i" | "--include" | "l" | "--load"
+                )
+            }) {
+                return Err("awk -f, -i and -l run program files".into());
             }
-            let mut programs: Vec<&str> = opts
-                .iter()
-                .filter(|(o, _)| o == "e" || o == "--source")
-                .filter_map(|(_, v)| v.as_deref())
-                .collect();
-            if programs.is_empty() {
-                programs.extend(args.get(i).and_then(|w| w.lit.as_deref()));
-            }
+            let programs = given_scripts(&opts, &operands, &["e", "--source"], "awk program")?;
             if programs.iter().any(|p| {
                 p.contains("system") || p.contains('>') || p.contains('|') || p.contains("@load")
             }) {
@@ -387,7 +425,7 @@ fn simple(parser: &mut Parser, argv: &[Word], depth: usize) -> Result<(), String
             }
         }
         "sort" => {
-            let (_, opts) = options(
+            let (opts, _) = permuted(
                 args,
                 "oktST",
                 &[
@@ -409,12 +447,12 @@ fn simple(parser: &mut Parser, argv: &[Word], depth: usize) -> Result<(), String
             }
         }
         "uniq" => {
-            let (i, _) = options(
+            let (_, operands) = permuted(
                 args,
                 "fsw",
                 &["--skip-fields", "--skip-chars", "--check-chars"],
             );
-            if operands(args, i).len() > 1 {
+            if operands.len() > 1 {
                 return Err("uniq writes its second file".into());
             }
         }
@@ -425,13 +463,59 @@ fn simple(parser: &mut Parser, argv: &[Word], depth: usize) -> Result<(), String
             return Err("file -C writes a file".into());
         }
         "xxd" => {
-            let (i, opts) = options(args, "cglosn", &[]);
+            let (opts, operands) = permuted(args, "cglosn", &[]);
             if opts.iter().any(|(o, _)| o == "r") || lits.contains(&"-revert") {
                 return Err("xxd -r writes binary".into());
             }
-            if operands(args, i).len() > 1 {
+            if operands.len() > 1 {
                 return Err("xxd writes its second file".into());
             }
+        }
+        "rg" if lits
+            .iter()
+            .any(|a| *a == "--pre" || a.starts_with("--pre=")) =>
+        {
+            return Err("rg --pre runs a command on each file".into());
+        }
+        "fd" => {
+            let long = [
+                "--max-depth",
+                "--min-depth",
+                "--exact-depth",
+                "--exclude",
+                "--type",
+                "--extension",
+                "--size",
+                "--changed-within",
+                "--changed-before",
+                "--owner",
+                "--format",
+                "--exec",
+                "--exec-batch",
+                "--batch-size",
+                "--ignore-file",
+                "--color",
+                "--threads",
+                "--max-buffer-time",
+                "--max-results",
+                "--base-directory",
+                "--path-separator",
+                "--search-path",
+            ];
+            let (opts, _) = permuted(args, "dEteSoxXcj", &long);
+            if opts
+                .iter()
+                .any(|(o, _)| matches!(o.as_str(), "x" | "X" | "--exec" | "--exec-batch"))
+            {
+                return Err("fd -x and -X run commands".into());
+            }
+        }
+        "bat"
+            if lits
+                .iter()
+                .any(|a| *a == "--pager" || a.starts_with("--pager=")) =>
+        {
+            return Err("bat --pager runs a command".into());
         }
         "git" => git(args)?,
         _ => {}
@@ -440,6 +524,13 @@ fn simple(parser: &mut Parser, argv: &[Word], depth: usize) -> Result<(), String
 }
 
 fn git(args: &[Word]) -> Result<(), String> {
+    // A word that expands could be any subcommand or option (`git $x`).
+    if let Some(w) = args.iter().find(|w| w.lit.is_none()) {
+        return Err(format!(
+            "git with {}, which expands, can't be checked; write it out",
+            w.raw
+        ));
+    }
     let (i, opts) = options(
         args,
         "Cc",
@@ -581,6 +672,15 @@ mod tests {
             "cd /home/x/project && ls -la",
             "cd sub; git status",
             "pushd a && ls && popd",
+            // Words that expand where they can't change what runs.
+            "sed -n \"${a},${b}p\" f",
+            "cat \"$f\" | sort -r",
+            "fd -e rs . src",
+            "fd -exml",
+            "rg --pretty x",
+            "bat -n f",
+            "awk -v x=1 '{print x}' f",
+            "bash -c \"ls $d | head\"",
         ] {
             assert_eq!(check(c), Ok(()), "{c}");
         }
@@ -625,7 +725,7 @@ mod tests {
             ("xxd in out", "xxd writes its second file"),
             ("awk '{print > \"f\"}' in", "this awk program"),
             ("awk 'BEGIN{system(\"id\")}'", "this awk program"),
-            ("awk -f prog.awk in", "awk -f runs a program file"),
+            ("awk -f prog.awk in", "awk -f, -i and -l"),
             ("sed -n 'w out' in", "this sed script"),
             ("sed '1e id' in", "this sed script"),
             ("sed 's/a/b/w out' in", "this sed script"),
@@ -649,6 +749,33 @@ mod tests {
             ),
             ("LD_PRELOAD=x.so cat f", "LD_PRELOAD=... before a command"),
             ("env LD_PRELOAD=x.so cat f", "env NAME=value"),
+            // Options after operands, programs that run commands, and words
+            // that expand (2026-11-05 review).
+            ("sed 's/a/b/' -i f", "sed -i edits files"),
+            ("sed -n 1p f --in-place", "sed -i edits files"),
+            ("sort in -o out", "sort -o writes a file"),
+            ("sort -m a b --output=o", "sort -o writes a file"),
+            ("awk '{print}' f -i inplace", "awk -f, -i and -l"),
+            ("awk -i inplace '{print \"x\"}' f", "awk -f, -i and -l"),
+            ("awk -lfoo '{print}' f", "awk -f, -i and -l"),
+            ("rg --pre rm x .", "rg --pre runs a command"),
+            ("rg x . --pre=rm", "rg --pre runs a command"),
+            ("fd -e rs -x rm", "fd -x and -X run commands"),
+            ("fd . -X rm", "fd -x and -X run commands"),
+            ("fd -Hx rm", "fd -x and -X run commands"),
+            ("fd x --exec rm", "fd -x and -X run commands"),
+            ("bat --paging=always --pager 'touch p' f", "bat --pager"),
+            ("x='commit -qm wip'; git $x", "git with $x, which expands"),
+            ("git branch \"$name\"", "git with \"$name\", which expands"),
+            ("git tag \"$v\"", "git with \"$v\", which expands"),
+            ("uniq in \"$out\"", "uniq writes its second file"),
+            ("sed \"s/a/b/w $out\" f", "this sed script"),
+            ("sed -e \"$s\" f", "a sed script that expands"),
+            ("awk \"BEGIN{system(\\\"$c\\\")}\"", "this awk program"),
+            (
+                "bash -c \"cd $d && rm x\"",
+                "rm isn't on the read-only list",
+            ),
         ] {
             let got = check(c).unwrap_err();
             assert!(got.starts_with(why), "{c}: {got}");

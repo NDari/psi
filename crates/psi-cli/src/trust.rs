@@ -29,9 +29,13 @@ const TRUSTED_FILES: &[&str] = &["settings.jsonc", "mcp.json"];
 /// Most changes a prompt lists before "and N more".
 const SHOWN_CHANGES: usize = 8;
 
+/// Every file the loaders could reach: they read directories as they are,
+/// so no ignore file hides one here, and links are followed as they follow
+/// them (an ignored or linked extension still loads).
 fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
     for e in ignore::WalkBuilder::new(dir)
-        .hidden(false)
+        .standard_filters(false)
+        .follow_links(true)
         .build()
         .flatten()
     {
@@ -233,6 +237,32 @@ mod tests {
             ]
         );
         assert!(describe(&p).contains("extension(s)"));
+    }
+
+    /// The loaders don't read ignore files or skip links, so neither can
+    /// hide a file from the fingerprint.
+    #[test]
+    fn ignore_files_and_links_dont_hide_what_loads() {
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path().join("home");
+        let p = d.path().join("proj");
+        std::fs::create_dir_all(p.join(".git")).unwrap();
+        std::fs::create_dir_all(p.join(".psi/extensions")).unwrap();
+        std::fs::write(p.join(".psi/.ignore"), "*\n").unwrap();
+        std::fs::write(p.join(".gitignore"), "*.lua\n").unwrap();
+        std::fs::write(p.join(".psi/extensions/evil.lua"), "return {}").unwrap();
+        let f = snapshot(&p).expect("an ignored extension still needs trust");
+        assert!(f.contains_key(".psi/extensions/evil.lua"), "{f:?}");
+        // A linked extension: a change behind the link asks again.
+        let elsewhere = d.path().join("tools/x");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("init.lua"), "return {}").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, p.join(".psi/extensions/x")).unwrap();
+        let f = snapshot(&p).unwrap();
+        assert!(f.contains_key(".psi/extensions/x/init.lua"), "{f:?}");
+        trust(&home, &p, &f).unwrap();
+        std::fs::write(elsewhere.join("init.lua"), "return { v = 2 }").unwrap();
+        assert!(!is_trusted(&home, &p, &snapshot(&p).unwrap()));
     }
 
     #[test]

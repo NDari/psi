@@ -80,6 +80,13 @@ pub struct ExtManager {
     setup_asks: Mutex<Vec<String>>,
 }
 
+/// Whether a gate handler's result stops the action: `{ block = true }`
+/// for `tool_call`, `{ cancel = true }` for `session_before_compact` (the
+/// API's `GateResult`).
+pub(crate) fn blocks(r: &Json) -> bool {
+    r["block"] == Json::Bool(true) || r["cancel"] == Json::Bool(true)
+}
+
 /// Which kind an event is (from the API definition).
 pub fn kind_of(event: &str) -> Kind {
     match psi_ext_api::EVENTS
@@ -316,7 +323,7 @@ impl ExtManager {
             match tokio::time::timeout(EVENT_TIMEOUT, rx).await {
                 Ok(Ok(Ok(o))) => {
                     out.payload = o.payload;
-                    let block = o.results.iter().any(|r| r["block"] == Json::Bool(true));
+                    let block = o.results.iter().any(blocks);
                     out.results.extend(o.results);
                     if kind == Kind::Gate && block {
                         out.blocked_by = Some(a.name.clone());
@@ -369,7 +376,7 @@ impl ExtManager {
             return Gate::Allow(payload);
         }
         match self.emit(event, payload).await {
-            Ok(o) => match o.results.iter().find(|r| r["block"] == Json::Bool(true)) {
+            Ok(o) => match o.results.iter().find(|r| blocks(r)) {
                 Some(r) => Gate::Block {
                     by: o.blocked_by.clone().unwrap_or_default(),
                     reason: r["reason"]

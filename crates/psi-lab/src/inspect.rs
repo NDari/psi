@@ -569,7 +569,25 @@ pub fn render_text(t: &Timeline, full: bool) -> String {
             let _ = writeln!(s, "  - {}{at}: {}", p.kind, cut(&p.detail, width));
         }
     }
-    s
+    escape_controls(&s)
+}
+
+/// Control characters other than newline and tab, shown as `\x1b` and
+/// the like: session text is the model's and the tools', and this goes
+/// straight to the terminal, where an escape could set the title, write
+/// the clipboard (OSC 52) or redraw the screen.
+fn escape_controls(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\n' | '\t' => out.push(c),
+            c if c.is_control() => {
+                let _ = write!(out, "\\x{:02x}", u32::from(c));
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// One line: newlines shown as `\n`, cut at `width` characters.
@@ -842,6 +860,15 @@ mod tests {
         ));
         assert!(!is_nested_session("grep -p pi file"));
         assert!(!is_nested_session("python3 pi.py -p"));
+    }
+
+    #[test]
+    fn control_characters_are_shown_not_sent() {
+        let raw = "a\x1b]52;c;eA==\x07b\r\u{9b}2Jc\td\ne";
+        assert_eq!(
+            escape_controls(raw),
+            "a\\x1b]52;c;eA==\\x07b\\x0d\\x9b2Jc\td\ne"
+        );
     }
 
     #[test]

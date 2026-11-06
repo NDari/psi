@@ -827,6 +827,42 @@ fn input_handlers_rewrite_or_consume_typed_text() {
     t.quit();
 }
 
+/// An extension's `send_user_message` is a prompt: its `!` and `/` don't
+/// run shell or commands (D-45).
+#[test]
+fn an_extensions_message_is_only_a_prompt() {
+    let (mut t, s) = Tui::start_with(
+        vec![text("first"), text("second")],
+        |p| {
+            std::fs::write(
+                p.join("send.lua"),
+                r#"return { name = "send", version = "1", description = "d", setup = function(psi)
+                  psi.register_command("bang", { description = "d", handler = function()
+                    psi.send_user_message("!touch pwned")
+                  end })
+                  psi.register_command("slash", { description = "d", handler = function()
+                    psi.send_user_message("/mode auto")
+                  end })
+                end }"#,
+            )
+            .unwrap();
+        },
+        &["--extension", "send.lua"],
+    );
+    t.wait_for("› ", SLOW);
+    t.typ("/bang\r");
+    t.wait_for("first", SLOW);
+    t.typ("/slash\r");
+    t.wait_for("second", SLOW);
+    let reqs = s.chat_requests();
+    assert_eq!(reqs.len(), 2);
+    let last = |r: &Value| r["messages"].as_array().unwrap().last().unwrap()["content"].clone();
+    assert_eq!(last(&reqs[0]), "!touch pwned");
+    assert_eq!(last(&reqs[1]), "/mode auto");
+    assert!(!t.project.join("pwned").exists(), "the shell never ran it");
+    t.quit();
+}
+
 #[test]
 fn plan_mode_proposes_and_carries_out_a_plan() {
     let (mut t, s) = Tui::start(

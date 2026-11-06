@@ -74,7 +74,7 @@ params = [
 
 [[function]]
 name = "send_user_message"
-doc = "Send a message as the user. While the agent runs it steers the run, or waits for the run to end with `deliver = \"follow_up\"`; otherwise it starts a run."
+doc = "Send a message as the user. While the agent runs it steers the run, or waits for the run to end with `deliver = \"follow_up\"`; otherwise it starts a run. The text is always a prompt: a leading `/` or `!` runs no command or shell."
 params = [
   { name = "text", type = "string" },
   { name = "opts", type = "SendOptions?" },

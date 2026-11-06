@@ -489,7 +489,10 @@ fn package_command(cmd: Command) -> Result<ExitCode> {
             println!("{}", packages::remove(&paths, scope(local), &source)?)
         }
         Command::Update { source } => {
-            let done = packages::update(&paths, source.as_deref())?;
+            // No question here: trusting is for a session's start (§9.3).
+            let trusted = psi_cli::trust::snapshot(&paths.cwd)
+                .is_none_or(|print| psi_cli::trust::is_trusted(&paths.home, &paths.cwd, &print));
+            let done = packages::update(&paths, source.as_deref(), trusted)?;
             if done.is_empty() {
                 println!("no git packages to update");
             }

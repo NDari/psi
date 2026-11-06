@@ -346,23 +346,32 @@ pub async fn handle<B: Backend>(s: &State<B>, msg: Msg) {
                     (Ok(ev), Ok(ctx)) => s.call::<Value>(h, (ev, ctx)).await,
                     (Err(e), _) | (_, Err(e)) => Err(e),
                 };
+                // A result that can't become JSON (a function in it) is the
+                // handler's error, so a gate fails closed.
+                let r = r.and_then(|v| match v {
+                    Value::Nil => Ok(None),
+                    v => s.lua.from_value::<Json>(v).map(Some),
+                });
                 match r {
-                    Ok(Value::Nil) => {}
-                    Ok(v) => {
-                        let j: Json = s.lua.from_value(v).unwrap_or(Json::Null);
+                    Ok(None) => {}
+                    Ok(Some(j)) => {
                         if kind != Kind::Notify {
                             merge(&mut payload, &j);
                         }
-                        let block = kind == Kind::Gate && j["block"] == Json::Bool(true);
+                        let block = kind == Kind::Gate && crate::blocks(&j);
                         results.push(j);
                         if block {
                             break;
                         }
                     }
-                    Err(e) if kind == Kind::Notify => s.report(&format!("the {name} handler"), &e),
                     Err(e) => {
-                        let _ = reply.send(Err(first_line(&e)));
-                        return;
+                        // Every kind is reported; a chain or gate also stops
+                        // here, so this extension's changes are left out.
+                        s.report(&format!("the {name} handler"), &e);
+                        if kind != Kind::Notify {
+                            let _ = reply.send(Err(first_line(&e)));
+                            return;
+                        }
                     }
                 }
             }

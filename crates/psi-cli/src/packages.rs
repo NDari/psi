@@ -116,8 +116,19 @@ fn git(s: &str) -> Result<GitSource> {
     };
     let path = path.trim_matches('/').trim_end_matches(".git").to_owned();
     let segments: Vec<&str> = path.split('/').collect();
-    if segments.len() < 2 || segments.iter().any(|p| p.is_empty() || *p == "..") || host.is_empty()
+    if segments.len() < 2
+        || segments
+            .iter()
+            .any(|p| p.is_empty() || *p == "." || *p == ".." || p.starts_with('-'))
+        || host.is_empty()
+        || host == "."
+        || host == ".."
+        || host.contains('/')
     {
+        return Err(bad());
+    }
+    // Git would take a leading `-` for an option (`-u<cmd>` is --upload-pack).
+    if repo_prefix.starts_with('-') || git_ref.as_deref().is_some_and(|r| r.starts_with('-')) {
         return Err(bad());
     }
     Ok(GitSource {
@@ -219,15 +230,22 @@ fn fetch(g: &GitSource, dir: &Path) -> Result<()> {
         if let Some(p) = dir.parent() {
             std::fs::create_dir_all(p).with_context(|| format!("creating {}", p.display()))?;
         }
+        // Clean up after a failure only what this clone created.
+        let existed = dir.exists();
+        let undo = || {
+            if !existed {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        };
         let shown = dir.display().to_string();
-        if let Err(e) = git_cmd(&["clone", "--quiet", &g.repo, &shown], None) {
-            let _ = std::fs::remove_dir_all(dir);
+        if let Err(e) = git_cmd(&["clone", "--quiet", "--", &g.repo, &shown], None) {
+            undo();
             return Err(e);
         }
         if let Some(r) = &g.git_ref
             && let Err(e) = git_cmd(&["checkout", "--quiet", "--detach", r], Some(dir))
         {
-            let _ = std::fs::remove_dir_all(dir);
+            undo();
             return Err(e);
         }
         Ok(())
@@ -340,12 +358,23 @@ pub fn remove(paths: &Paths, scope: Scope, spec: &str) -> Result<String> {
 }
 
 /// `psi update`: fetch every git package (or one), pinned ones to their ref.
-pub fn update(paths: &Paths, only: Option<&str>) -> Result<Vec<String>> {
+/// The project's packages only when the project is trusted (§9.3): its
+/// settings are anyone's who can commit to the repository.
+pub fn update(paths: &Paths, only: Option<&str>, project_trusted: bool) -> Result<Vec<String>> {
     let want = only
         .map(|s| Source::parse(s, &paths.cwd, Some(&paths.home)).map(|s| s.identity()))
         .transpose()?;
     let mut done = Vec::new();
     for scope in [Scope::User, Scope::Project] {
+        if scope == Scope::Project && !project_trusted {
+            if !listed(paths, scope).unwrap_or_default().is_empty() {
+                done.push(
+                    "skipped the project's packages: the project isn't trusted; start psi here to trust it"
+                        .to_owned(),
+                );
+            }
+            continue;
+        }
         for e in listed(paths, scope)? {
             let src = Source::parse(&e, &paths.base(scope), Some(&paths.home))?;
             if want.as_ref().is_some_and(|w| *w != src.identity()) {
@@ -528,6 +557,13 @@ mod tests {
             "git:user/repo",
             "git:github.com/only",
             "https://h.com/a/../b",
+            // Git options in disguise, and paths out of the clone root.
+            "git:-utouch /tmp/x; git-upload-pack #@x.y:a/b",
+            "git:github.com/user/repo@--upload-pack=x",
+            "git:github.com/-x/repo",
+            "git:../skills/foo",
+            "https://../a/b",
+            "git:github.com/./repo",
         ] {
             assert!(Source::parse(bad, Path::new("/"), None).is_err(), "{bad}");
         }
@@ -651,6 +687,47 @@ mod tests {
         let gone = d.path().join("gone");
         assert!(fetch(&bad, &gone).is_err());
         assert!(!gone.exists());
+    }
+
+    /// An untrusted project's packages aren't fetched: its settings come
+    /// with the repository.
+    #[test]
+    fn update_skips_an_untrusted_projects_packages() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            home: d.path().join("home"),
+            cwd: d.path().join("project"),
+        };
+        std::fs::create_dir_all(paths.cwd.join(".psi")).unwrap();
+        std::fs::write(
+            paths.settings(Scope::Project),
+            r#"{"packages": ["git:example.invalid/u/r"]}"#,
+        )
+        .unwrap();
+        let done = update(&paths, None, false).unwrap();
+        assert_eq!(done.len(), 1, "{done:?}");
+        assert!(
+            done[0].starts_with("skipped the project's packages"),
+            "{done:?}"
+        );
+        assert!(!paths.git_root(Scope::Project).exists());
+    }
+
+    /// A clone that fails into a directory that was already there leaves it.
+    #[test]
+    fn a_failed_clone_keeps_a_directory_it_did_not_make() {
+        let d = tempfile::tempdir().unwrap();
+        let mine = d.path().join("mine");
+        std::fs::create_dir_all(&mine).unwrap();
+        std::fs::write(mine.join("keep.txt"), "x").unwrap();
+        let bad = GitSource {
+            repo: d.path().join("missing").display().to_string(),
+            host: "example.com".into(),
+            path: "u/r".into(),
+            git_ref: None,
+        };
+        assert!(fetch(&bad, &mine).is_err());
+        assert!(mine.join("keep.txt").exists());
     }
 
     #[test]

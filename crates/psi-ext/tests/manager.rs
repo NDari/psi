@@ -229,7 +229,7 @@ async fn one_extensions_error_keeps_anothers_change() {
             psi.on("input", function(ev) error("boom") end)
           end }"#,
     );
-    let (m, errors, _ui) = start(vec![Source::Lua(a), Source::Lua(b)], Limits::default()).await;
+    let (m, errors, mut ui) = start(vec![Source::Lua(a), Source::Lua(b)], Limits::default()).await;
     assert!(errors.is_empty(), "{errors:?}");
     let out = m
         .chain(
@@ -242,6 +242,54 @@ async fn one_extensions_error_keeps_anothers_change() {
         .chain("input", json!({"text": "hi", "source": "interactive"}))
         .await;
     assert_eq!(out["handled"], true);
+    // Each failure is shown to the user, not dropped.
+    for event in ["tool_result", "input"] {
+        let (ext, req) = ui.recv().await.unwrap();
+        let Request::Notify { message, level } = req else {
+            panic!("{req:?}")
+        };
+        assert_eq!((ext.as_str(), level.as_str()), ("b", "error"));
+        assert!(
+            message.starts_with(&format!("the {event} handler failed")) && message.contains("boom"),
+            "{message}"
+        );
+    }
+}
+
+/// A gate whose result can't become JSON blocks, and says why; `cancel`
+/// stops compaction as the API documents.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_gate_result_that_isnt_json_blocks_and_cancel_stops_compaction() {
+    let d = tempfile::tempdir().unwrap();
+    let p = write(
+        d.path(),
+        "gate.lua",
+        r#"return { name = "gate", version = "1", description = "odd",
+          setup = function(psi)
+            psi.on("tool_call", function(ev)
+              return { block = true, reason = "no", why = function() end }
+            end)
+            psi.on("session_before_compact", function(ev) return { cancel = true } end)
+          end }"#,
+    );
+    let (m, errors, mut ui) = start(vec![Source::Lua(p)], Limits::default()).await;
+    assert!(errors.is_empty(), "{errors:?}");
+    let call = json!({"id": "c", "name": "bash", "args": {"command": "ls"}});
+    let Gate::Block { by, reason } = m.gate("tool_call", call).await else {
+        panic!("a result with a function in it let the call through");
+    };
+    assert_eq!(by, "gate");
+    assert!(reason.contains("the gate extension failed"), "{reason}");
+    let (_, req) = ui.recv().await.unwrap();
+    assert!(
+        matches!(&req, Request::Notify { level, .. } if level == "error"),
+        "{req:?}"
+    );
+    let compact = json!({"tokens": 1, "reason": "threshold"});
+    assert!(matches!(
+        m.gate("session_before_compact", compact).await,
+        Gate::Block { .. }
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread")]

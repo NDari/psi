@@ -18,6 +18,14 @@ The file tools ask before changing Psi's configuration or files checkpoints can'
 - **Gitignored files (medium).** write and edit ask before changing one, since checkpoints skip it; bash doesn't, so a clobbered `.env` can't be undone.
 - **Read before overwrite (low).** The file tools refuse to replace a file the model hasn't read; bash doesn't check. Checkpoints still undo it.
 
+### Plan mode's read-only check is a parser, not a boundary (added 2026-11-05, low priority)
+
+In plan mode (and for read-only sub-agents) bash runs in the normal sandbox, which can write the workspace; only `read_only::check` keeps it from writing. The 2026-11-05 review's bypasses are fixed (options after operands, `rg --pre`, `fd -x/-X`, `awk -i/-l`, `bat --pager`, git words that expand, sed and awk scripts that expand). Still open, by choice:
+- **An option inside a variable for a tool other than git:** `x=-i; sed 's/a/b/' $x f` passes, since a word that expands is taken for an operand. Refusing every such word would also refuse `sed -n 1p "$f"` in a loop, which models write.
+- **Holes nobody has found yet.** Checkpoints undo a write to a tracked file.
+
+**The fuller fix:** run plan-mode bash in a read-only sandbox (a read-only bind of the workspace in bubblewrap, a `file-write*` deny in Seatbelt). It needs a plan edit (§8 and the plan-mode section) and does nothing when isolation is off. Worth it if a model is seen getting past the check.
+
 ### Failure guards miss failures that aren't in a row (added 2026-11-05, medium priority, to implement)
 
 From the 27B code eval (`~/.psi/evals/2026-11-05-1321-code-all-qwen3.8-27b`):

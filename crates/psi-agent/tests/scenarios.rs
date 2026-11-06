@@ -964,7 +964,7 @@ async fn an_extension_can_stop_compaction() {
         r#"return { name = "keep", version = "1", description = "keeps the history",
           setup = function(psi)
             psi.on("session_before_compact", function(ev)
-              return { block = true, reason = "keep it all" }
+              return { cancel = true }
             end)
           end }"#,
     )

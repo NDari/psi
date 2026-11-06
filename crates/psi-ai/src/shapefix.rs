@@ -559,7 +559,11 @@ fn doubled_cwd(path: &str, cwd: &Path) -> Option<PathBuf> {
             continue;
         };
         let fixed = cwd.join(rest);
-        if fixed.exists() || fixed.parent().is_some_and(Path::exists) {
+        // A file right under the working directory is a doubling only if it
+        // exists: from `/x/textkit`, a new `textkit/__init__.py` is a package
+        // named like the project, and its parent is always there.
+        let parent_counts = rest.contains('/');
+        if fixed.exists() || (parent_counts && fixed.parent().is_some_and(Path::exists)) {
             return Some(fixed);
         }
     }
@@ -839,5 +843,25 @@ mod tests {
         std::fs::write(cwd.join("project/src/a.py"), "").unwrap();
         assert!(fix_call(&call("project/src/a.py"), false, &tools(), &cwd, None).is_ok());
         assert!(fix_call(&call("src/a.py"), false, &tools(), &cwd, None).is_ok());
+    }
+
+    /// From `/x/textkit`, `textkit/__init__.py` is a new package named like
+    /// the project, not the project doubled (multi_split_package).
+    #[test]
+    fn a_new_package_named_like_the_project_is_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("textkit");
+        std::fs::create_dir_all(&cwd).unwrap();
+        // The test tools have no write; read checks paths the same way.
+        let call = |p: &str| RawToolCall {
+            id: "c".into(),
+            name: "read".into(),
+            arguments: json!({"path": p}).to_string(),
+        };
+        let ok = fix_call(&call("textkit/__init__.py"), false, &tools(), &cwd, None).unwrap();
+        assert_eq!(ok.args["path"], "textkit/__init__.py");
+        // The same name for a file that is there is still a doubling.
+        std::fs::write(cwd.join("setup.py"), "").unwrap();
+        assert!(fix_call(&call("textkit/setup.py"), false, &tools(), &cwd, None).is_err());
     }
 }

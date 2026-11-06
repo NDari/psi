@@ -60,6 +60,8 @@ pub enum UiMsg {
     Input {
         text: Option<String>,
         follow_up: bool,
+        /// From an extension: a prompt only (see `submit_from`).
+        plain: bool,
     },
     Restored {
         what: String,
@@ -1209,12 +1211,17 @@ impl<W: Write> App<W> {
     /// Commands and `!bash` first; then the `input` event (pi parity),
     /// whose handlers may change or consume the text; then skills,
     /// prompt templates and the agent (`after_input`).
+    /// Text from the user, or from an extension's `psi.send_user_message`.
+    /// An extension's is only ever a prompt: its `/` and `!` don't run
+    /// commands or shell, which would bypass the policy (D-45).
     fn submit_from(&mut self, text: String, follow_up: bool, source: &'static str) {
         let t = text.trim().to_owned();
         if t.is_empty() {
             return;
         }
-        if let Some(cmd) = t.strip_prefix('/')
+        let plain = source == "extension";
+        if !plain
+            && let Some(cmd) = t.strip_prefix('/')
             && !cmd.split_whitespace().next().unwrap_or("").contains('/')
         {
             let name = cmd.split_whitespace().next().unwrap_or("");
@@ -1225,7 +1232,7 @@ impl<W: Write> App<W> {
                 return self.slash(cmd);
             }
         }
-        if let Some(c) = t.strip_prefix('!') {
+        if !plain && let Some(c) = t.strip_prefix('!') {
             let (command, to_context) = match c.strip_prefix('!') {
                 Some(rest) => (rest.trim().to_owned(), false),
                 None => (c.trim().to_owned(), true),
@@ -1243,15 +1250,20 @@ impl<W: Write> App<W> {
                 } else {
                     Some(out["text"].as_str().unwrap_or(&t).to_owned())
                 };
-                let _ = tx.send(UiMsg::Input { text, follow_up });
+                let _ = tx.send(UiMsg::Input {
+                    text,
+                    follow_up,
+                    plain,
+                });
             });
             return;
         }
-        self.after_input(t, follow_up);
+        self.after_input(t, follow_up, plain);
     }
 
-    fn after_input(&mut self, t: String, follow_up: bool) {
-        if let Some(cmd) = t.strip_prefix('/')
+    fn after_input(&mut self, t: String, follow_up: bool, plain: bool) {
+        if !plain
+            && let Some(cmd) = t.strip_prefix('/')
             && !cmd.split_whitespace().next().unwrap_or("").contains('/')
         {
             // Skills and prompt templates (D-35); built-ins won above.
@@ -1656,9 +1668,13 @@ impl<W: Write> App<W> {
                 }
             }
             UiMsg::Error(s) => self.error(&format!("  {s}")),
-            UiMsg::Input { text, follow_up } => {
+            UiMsg::Input {
+                text,
+                follow_up,
+                plain,
+            } => {
                 if let Some(t) = text {
-                    self.after_input(t, follow_up);
+                    self.after_input(t, follow_up, plain);
                 }
             }
             UiMsg::Restored {

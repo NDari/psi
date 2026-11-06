@@ -1483,13 +1483,35 @@ impl Agent {
         }
 
         self.turn_changed = false;
+        // Read-only calls the policy lets through run side by side; one it
+        // asks about (an MCP server's `approval: "ask"`, an extension tool
+        // that always asks) goes through `run_one` like any other (§8.1).
+        let mut side_by_side = Vec::with_capacity(planned.len());
+        for (_, p) in &planned {
+            side_by_side.push(match p {
+                Ok((c, args)) if c.read_only() => {
+                    decide(
+                        &self.safety.policy,
+                        c,
+                        args,
+                        &self.ctx,
+                        None,
+                        self.capture_failing,
+                        &self.ext,
+                    )
+                    .await
+                        == Decision::Allow
+                }
+                _ => false,
+            });
+        }
         let mut outputs: Vec<Option<ToolOutput>> = vec![None; planned.len()];
         let mut i = 0;
         while i < planned.len() {
             // A batch of read-only calls, or one other call.
             let mut j = i + 1;
-            if matches!(&planned[i].1, Ok((c, _)) if c.read_only()) {
-                while j < planned.len() && matches!(&planned[j].1, Ok((c, _)) if c.read_only()) {
+            if side_by_side[i] {
+                while j < planned.len() && side_by_side[j] {
                     j += 1;
                 }
             }
@@ -1505,7 +1527,7 @@ impl Agent {
                 }
             }
             if let (call, Ok((c, args))) = &planned[i]
-                && !c.read_only()
+                && !side_by_side[i]
             {
                 outputs[i] = Some(self.run_one(&call.id, c, args, &resp.text).await?);
                 i = j;
@@ -1660,9 +1682,10 @@ impl Agent {
         Ok(())
     }
 
-    /// One call that may change something: the policy decides whether it
-    /// runs, asks or is refused; a blocked bash write offers the user a
-    /// rerun (D-23); a checkpoint follows.
+    /// One call that may change something, or a read-only one the policy
+    /// asks about: the policy decides whether it runs, asks or is refused;
+    /// a blocked bash write offers the user a rerun (D-23); a checkpoint
+    /// follows.
     async fn run_one(
         &mut self,
         id: &str,
