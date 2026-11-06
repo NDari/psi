@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use psi_agent::recovery;
-use psi_agent::{Agent, AgentEvent, RunOutcome};
+use psi_agent::{Agent, AgentEvent, RunOutcome, Stop};
 use psi_safety::checkpoint::Checkpoints;
 use psi_safety::policy::Mode;
 use psi_session::{Entry, EntryBody, Role, SessionFile, text_of};
@@ -137,9 +137,15 @@ impl Worker {
                         Err(e) => UiMsg::Error(e),
                     }
                 }
+                // The UI shows a run as started, so a failure ends it.
                 Cmd::ExecutePlan => match self.agent.start_plan() {
                     Ok(p) => UiMsg::RunDone(self.agent.run(&p).await),
-                    Err(e) => UiMsg::Error(e),
+                    Err(e) => UiMsg::RunDone(RunOutcome {
+                        stop: Stop::Failed(e),
+                        text: String::new(),
+                        turns: 0,
+                        tool_calls: 0,
+                    }),
                 },
                 Cmd::Compact(focus) => {
                     let focus = (!focus.is_empty()).then_some(focus.as_str());

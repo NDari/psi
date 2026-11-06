@@ -211,41 +211,50 @@ fn close_calls(out: &mut Vec<ChatMessage>, pending: &mut Vec<String>, answered: 
 }
 
 /// Picks the first turn to keep so the request fits: drops the oldest turns
-/// (each starts at an assistant message) after the task. `None` when even
-/// the last turn alone is too large.
+/// (each starts at an assistant message) of the part sent as is, after the
+/// task when nothing was cut yet (after a cut, the opening repeats the last
+/// user message). `None` when even the last turn alone is too large.
 pub(crate) fn plan_drop(
     branch: &[&Entry],
     n_prompt: u64,
     n_ctx: u64,
     max_output: u64,
 ) -> Option<String> {
+    let chain = summary_chain(branch);
+    let sent = &branch[chain.keep_from..];
     let target = n_ctx.saturating_sub(max_output).max(n_ctx / 2);
-    let total_chars: usize = branch.iter().map(|e| size(e)).sum::<usize>().max(1);
+    let summary_chars: usize = chain.summaries.iter().map(|(_, s)| s.len()).sum();
+    let total_chars = (sent.iter().map(|e| size(e)).sum::<usize>() + summary_chars).max(1);
     let chars_per_token = total_chars as f64 / n_prompt.max(1) as f64;
     let cut_tokens = n_prompt.saturating_sub(target) as f64;
     let need = (cut_tokens * chars_per_token * 1.1) as usize;
-    let first_user = branch.iter().position(|e| {
-        matches!(
-            e.body,
-            EntryBody::Message {
-                role: Role::User,
-                ..
-            }
-        )
-    })?;
-    let starts: Vec<usize> = branch
+    let skip = if chain.keep_from == 0 {
+        let first_user = sent.iter().position(|e| {
+            matches!(
+                e.body,
+                EntryBody::Message {
+                    role: Role::User,
+                    ..
+                }
+            )
+        })?;
+        first_user + 1
+    } else {
+        0
+    };
+    let starts: Vec<usize> = sent
         .iter()
         .enumerate()
-        .skip(first_user + 1)
+        .skip(skip)
         .filter(|(_, e)| e.is_model_step())
         .map(|(i, _)| i)
         .collect();
     let mut cut = 0;
     // Keep at least the last turn.
     for w in starts.windows(2) {
-        cut += branch[w[0]..w[1]].iter().map(|e| size(e)).sum::<usize>();
+        cut += sent[w[0]..w[1]].iter().map(|e| size(e)).sum::<usize>();
         if cut >= need {
-            return Some(branch[w[1]].id.clone());
+            return Some(sent[w[1]].id.clone());
         }
     }
     None
@@ -432,5 +441,53 @@ mod tests {
         // Too large even with one turn left.
         let refs: Vec<&Entry> = es[..3].iter().collect();
         assert_eq!(plan_drop(&refs, 2000, 1500, 500), None);
+    }
+
+    #[test]
+    fn dropping_after_a_summary_drops_only_what_is_sent() {
+        let big = "x".repeat(1000);
+        let mut bodies = vec![user("task")];
+        for i in 0..8 {
+            let id = format!("c{i}");
+            bodies.push(asst("", Some(&id)));
+            bodies.push(result(&id, &big));
+        }
+        let mut es = entries(bodies);
+        // A summary stands in for the first four turns.
+        let summary_keep = es[9].id.clone();
+        let mut ids = IdGen::resume(&es);
+        es.push(ids.push(
+            0,
+            EntryBody::Compaction {
+                summary: "did four reads".into(),
+                first_kept_id: summary_keep.clone(),
+                tokens_before: None,
+                replaces: vec![],
+            },
+        ));
+        let refs: Vec<&Entry> = es.iter().collect();
+        let keep = plan_drop(&refs, 2000, 1500, 500).unwrap();
+        let at = |id: &str| es.iter().position(|e| e.id == id).unwrap();
+        assert!(at(&keep) > at(&summary_keep), "the cut moved back");
+        es.push(ids.push(
+            0,
+            EntryBody::Compaction {
+                summary: String::new(),
+                first_kept_id: keep,
+                tokens_before: Some(2000),
+                replaces: vec![],
+            },
+        ));
+        let refs: Vec<&Entry> = es.iter().collect();
+        let m = build_messages("s", &refs);
+        let ChatMessage::User(opening) = &m[1] else {
+            panic!("{m:?}")
+        };
+        assert!(opening.contains("did four reads") && opening.contains(DROPPED_NOTE));
+        let kept_turns = m
+            .iter()
+            .filter(|x| matches!(x, ChatMessage::Assistant { .. }))
+            .count();
+        assert!((1..4).contains(&kept_turns), "{kept_turns}");
     }
 }

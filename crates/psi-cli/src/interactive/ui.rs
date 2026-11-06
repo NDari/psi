@@ -1280,6 +1280,28 @@ impl<W: Write> App<W> {
         self.send_prompt(t, follow_up);
     }
 
+    /// Messages typed for a run that ended before taking them (an abort, a
+    /// stop, a /compact) go back in the input box, so none is sent later
+    /// with the next prompt, unseen.
+    fn restore_queued(&mut self) {
+        self.queued.clear();
+        let mut left = Vec::new();
+        for q in [&self.queues.steering, &self.queues.follow_up] {
+            if let Ok(mut q) = q.lock() {
+                left.extend(q.drain(..));
+            }
+        }
+        if left.is_empty() {
+            return;
+        }
+        let draft = self.editor.text();
+        if !draft.is_empty() {
+            left.push(draft);
+        }
+        self.editor.set_text(&left.join("\n"));
+        self.info("  not sent before the run ended: back in the input box");
+    }
+
     /// Sends text to the agent: a new run, or while one runs, a steering
     /// or follow-up message.
     fn send_prompt(&mut self, t: String, follow_up: bool) {
@@ -1637,7 +1659,7 @@ impl<W: Write> App<W> {
                 self.flush_text();
                 self.running = None;
                 self.status.busy = None;
-                self.queued.clear();
+                self.restore_queued();
                 match &out.stop {
                     Stop::Done => {}
                     Stop::Aborted => self.info("  aborted"),
@@ -1661,6 +1683,7 @@ impl<W: Write> App<W> {
             UiMsg::Compacted(r) => {
                 if self.running.as_ref().is_some_and(|r| r.compact_only) {
                     self.running = None;
+                    self.restore_queued();
                 }
                 match r {
                     Ok(s) => self.info(&format!("  {s}")),

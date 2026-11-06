@@ -545,6 +545,14 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn one_long_line_still_shows() {
+        let out = bash("head -c 40000 /dev/zero | tr '\\0' a", None).await;
+        assert!(!out.is_error, "{}", out.text);
+        assert!(out.text.starts_with("aaaa"), "{}", out.text);
+        assert!(out.text.ends_with("[line cut at 2000 characters]"));
+    }
+
+    #[tokio::test]
     async fn a_search_that_finds_nothing_is_not_a_failure() {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("a.txt"), "hello\n").unwrap();

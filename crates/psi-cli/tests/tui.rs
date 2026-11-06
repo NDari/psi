@@ -547,6 +547,31 @@ fn steering_esc_and_user_bash() {
     t.quit();
 }
 
+/// Steering typed during a run that is then stopped goes back in the input
+/// box instead of riding along, unseen, with the next prompt.
+#[test]
+fn steering_left_after_esc_goes_back_in_the_box() {
+    let (mut t, server) = Tui::start(
+        vec![call("bash", json!({"command": "sleep 30"})), text("after")],
+        |_| {},
+    );
+    t.wait_for("› ", SLOW);
+    t.typ("go\r");
+    t.wait_for("◌ bash  sleep 30", SLOW);
+    t.typ("left behind\r");
+    t.wait_for("(steering) left behind", SLOW);
+    t.esc();
+    t.wait_for("back in the input box", SLOW);
+    // Sent only when the user sends it, once.
+    t.typ("\r");
+    t.wait_for("after", SLOW);
+    let reqs = server.chat_requests();
+    assert_eq!(reqs.len(), 2);
+    let m = reqs[1]["messages"].to_string();
+    assert_eq!(m.matches("left behind").count(), 1, "{m}");
+    t.quit();
+}
+
 #[test]
 fn undo_diff_show_stats_and_mode() {
     let (mut t, _s) = Tui::start(

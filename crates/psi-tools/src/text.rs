@@ -38,20 +38,31 @@ pub(crate) fn lines(n: usize) -> String {
 }
 
 pub(crate) fn cut_line(line: &str) -> String {
-    if line.chars().count() <= MAX_LINE_CHARS {
+    cut_at(line, MAX_LINE_CHARS)
+}
+
+fn cut_at(line: &str, limit: usize) -> String {
+    if line.chars().count() <= limit {
         return line.to_owned();
     }
-    let kept: String = line.chars().take(MAX_LINE_CHARS).collect();
-    format!("{kept} [line cut at {MAX_LINE_CHARS} characters]")
+    let kept: String = line.chars().take(limit).collect();
+    format!("{kept} [line cut at {limit} characters]")
 }
 
 /// Keeps the first quarter and the last three quarters of `max` characters,
 /// on line boundaries, with a notice in between: errors tend to be at the end.
+/// Long lines are cut first, so one long line (minified JSON) still shows.
 pub(crate) fn head_tail(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_owned();
     }
-    let lines: Vec<&str> = s.lines().collect();
+    let limit = MAX_LINE_CHARS.min(max / 2);
+    let cut: Vec<String> = s.lines().map(|l| cut_at(l, limit)).collect();
+    let joined = cut.join("\n");
+    if joined.chars().count() <= max {
+        return joined;
+    }
+    let lines: Vec<&str> = cut.iter().map(String::as_str).collect();
     let (head_budget, tail_budget) = (max / 4, max - max / 4);
     let mut head = Vec::new();
     let mut used = 0;
@@ -99,6 +110,17 @@ mod tests {
         assert!(out.ends_with("line 100"));
         assert!(out.contains("lines omitted"));
         assert!(out.chars().count() < 260);
+    }
+
+    #[test]
+    fn head_tail_keeps_one_long_line() {
+        let out = head_tail(&"a".repeat(40_000), 30_000);
+        assert!(out.starts_with("aaaa"));
+        assert!(out.ends_with("[line cut at 2000 characters]"));
+        // A budget smaller than a cut line: the end still shows.
+        let s = format!("first {}\nlast {}", "b".repeat(500), "c".repeat(500));
+        let out = head_tail(&s, 200);
+        assert!(out.contains("last ccc"), "{out}");
     }
 
     #[test]

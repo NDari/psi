@@ -133,7 +133,7 @@ Known issues already in `known-issues.md` are left out.
 
 ## Correctness
 
-**C1. High, checked. Dropping turns on a context overflow ignores the summary chain.**
+**C1. High, checked. Fixed 2026-11-06. Dropping turns on a context overflow ignores the summary chain.**
 - **Where:** `psi-agent/src/messages.rs:216` (`plan_drop`), called at `run.rs:1980`. It walks the whole branch and sizes it including entries already summarized.
 - **Effect:**
   - its `first_kept_id` can land before the chain's `keep_from`;
@@ -160,13 +160,13 @@ Known issues already in `known-issues.md` are left out.
 - **Where:** `psi-agent/src/run/fit.rs:332-391`. The focus is added only to the plain fallback, not to the request that extends the last one.
 - **Tests:** the only test has no prior request, so it takes the fallback.
 
-**C6. Medium, read. Steering typed during a run that is then stopped is sent later, unseen.**
+**C6. Medium, read. Fixed 2026-11-06 (the left text goes back in the input box, also after /compact). Steering typed during a run that is then stopped is sent later, unseen.**
 - **Where:** `ui.rs:1628` clears the UI's `queued` on RunDone. The agent's queues are drained only inside `run_inner` (`run.rs:1083,1090,1150`), after the cancel check.
 - **Trigger:** type during `sleep 30`, then press Esc. The next prompt's run sends the old text with nothing on screen.
 - **Same with /compact:** a prompt typed while a summary runs is never sent.
 - **Fix:** drain both queues when a run ends, and put the text back in the editor.
 
-**C7. Medium, read. A failed ExecutePlan leaves the UI "running" forever.**
+**C7. Medium, read. Fixed 2026-11-06 (no test: the TUI can't make start_plan fail). A failed ExecutePlan leaves the UI "running" forever.**
 - **Where:** `ui.rs:1020-1025` sets `running`, and `worker.rs:140-143` answers `UiMsg::Error`, which doesn't clear it.
 - **Effect:** the spinner never stops, and /undo, /new and /plan refuse.
 - **Fix:** reply `RunDone` with `Stop::Failed`.
@@ -200,7 +200,7 @@ Known issues already in `known-issues.md` are left out.
 - **Session** (`psi-session/src/store.rs:149-198`): a partial `append` (ENOSPC) leaves bytes the next entry is glued onto, and `branch()` stops quietly at the missing parent, so the context starts mid-conversation.
 - **Fix:** truncate back on a failed write, and report a gap in `branch()`.
 
-**C13. Medium, reproduced. Bash output that is one long line comes back empty.**
+**C13. Medium, reproduced. Fixed 2026-11-06. Bash output that is one long line comes back empty.**
 - **Where:** `psi-tools/src/bash.rs:198`, `text.rs:52-81`: `head_tail` keeps whole lines only.
 - **Trigger:** `head -c 40000 /dev/zero | tr '\0' a` returns `[... 1 lines omitted ...]`. Minified JSON and `curl` output come back the same.
 - **Fix:** cut long lines first.
@@ -291,13 +291,13 @@ Known issues already in `known-issues.md` are left out.
 ## Test gaps
 
 No test covers:
-- **Policy and context:** a read-only MCP tool with `approval: "ask"`; `plan_drop` after a summary; going past the call limit; `/compact <focus>` with a prior request.
-- **TUI:** steering left after Esc; an ExecutePlan error.
+- **Policy and context:** a read-only MCP tool with `approval: "ask"`; going past the call limit; `/compact <focus>` with a prior request.
+- **TUI:** an ExecutePlan error.
 - **Trust:** a trust snapshot with `.ignore` or a symlink; `psi update` on an untrusted project; git argument injection.
 - **Shell checks:** options after operands in `read_only`; a double-quoted `sh -c` in always-ask.
 - **Schemas and paths:** an MCP `$ref` schema; the same-named-package path in shapefix.
 - **Files and logs:** a cut line in the wire log or mid-session.
-- **Output:** a single long bash line; control characters in `psi inspect`.
+- **Output:** control characters in `psi inspect`.
 
 ## What held up
 
