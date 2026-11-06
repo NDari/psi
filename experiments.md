@@ -128,6 +128,19 @@ Flags worth sweeping: `-fa`, `-b`/`-ub`, `-ctk`/`-ctv` (KV cache type), `-t`, `-
 
 **Applied 2026-11-05 without the comparison:** `llm-up qwen35b` and `qwen27b` now pass the card's thinking-off settings. Before, the 35B ran on the sampling in its GGUF (`general.sampling.*`: temp 1.0, top-p 0.95, top-k 20, the card's thinking setting) and llama.cpp's defaults for the rest (min-p 0.05, presence penalty 0, which no GGUF key can set). The 27B had the thinking setting by flag.
 
+### An outline in place of a cleared read (added 2026-11-05)
+
+**Question:** when clearing is on, would replacing a cleared `read` with an outline of the file, made by a parser and not the model, keep what the model needs, so it doesn't read the file again blindly?
+
+**Context:** the cog review with clearing on looped after its reads were cleared, and the note said "Run it again if you need it" (the cog review entry, below). The Complexity Trap (Lindenbauer et al., [arXiv 2508.21433](https://arxiv.org/abs/2508.21433), NeurIPS 2025 DL4C) found the opposite on SWE-bench Verified: masking old observations matched LLM summaries at about half the cost, with large models on bug-fix tasks, in SWE-agent only. So the note may matter more than the clearing. Aider's repo map (tree-sitter, ranked by references) is the known example of a parser outline in a coding agent.
+
+**How:** for a cleared `read` of a source file, the note lists the file's top-level items with their line ranges (functions, types, sections of a Markdown file), from tree-sitter, and says to read a range when the body is needed; other results keep today's note. Model-facing text, so an eval run (D-32) on the owner's go, with clearing on: the cog review again and the 16K tasks where clearing mattered. Look for re-reads of whole files after a clearing, against the clearing-on cog run.
+
+**Open:**
+- Which languages: tree-sitter grammars cost build size; psi already has tree-sitter-bash for always-ask.
+- An outline of a long file can itself be large; cap it.
+- Whether to clear only results the model has used since (it answered or acted after them), as masking older turns does, whatever the note says.
+
 ### Summaries without thinking (added 2026-11-05)
 
 **Question:** with thinking on, can a summary request turn thinking off, so the model doesn't think before it summarizes, and still reuse the server's cache?
