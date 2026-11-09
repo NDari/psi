@@ -224,6 +224,49 @@ Found by the run and fixed: the `ext_todo_scan` grader and reference used `os.ex
 
 **Still open:** `no_progress` should pause once a nudge goes unheeded and count exact repeats as no progress (`known-issues.md`); the sampling change alone didn't stop the loop with clearing on.
 
+### Did the changes since clearing went off bring the loop back? (added 2026-11-06)
+
+**Question:** in the cog rerun with the 27B (`~/.psi/sessions/-home-ndari-projects-cog-rerun-27b-/2026-11-06-1507_9187a24e.*`, TUI, default settings, clearing off), the first prompt ended in 623 calls of the same two `grep` commands in turn, with `no_progress` nudging 103 times; it was stopped by hand after 106 minutes. Clearing was off and nothing was cleared during the loop. Did the commits since `76fc900` (clearing off) bring the loop back?
+
+**Setup:** the same server for every run (Qwen3.8 27B, 64K, thinking off, `just llm-up qwen27b`, llama.cpp b12110), headless (`psi -p - --max-turns 120`), each in a fresh clone of cog at `991d099`. Prompt 1 is the 11-03 script's first prompt (the `cog_run` extension), with `.psi` and `--trust-project`; the review prompt is the one from the table above, with `.psi` removed. "Old" is Psi at `76fc900` built from `git archive`; "current" is the working tree of 2026-11-06 (the C1 to C14 and P1 fixes). Its requests differ from the old build's only in the gopls tool schemas (sent whole, C9).
+
+**What a loop is (the owner's definition):** the model clearly stuck, doing the same thing over and over in a row: the same exact call, or the same few exact calls, with nothing else between them. Repeats spread out between new calls don't count, nor do calls that change, such as a `sed` range moving forward through a file. `intent` is left out (the 27B rewords it for the same command), and so is an `echo` of a fixed marker added to the same command (`; echo ===A===`), which changes nothing it does. The same lookup with only its flags changed (`-A 5`, `-A 6`, `-B 3 -A 8`) also counts when nothing moves forward: the owner ruled the 11-05 15:47 run (`known-issues.md`) a loop, 113 of its last 114 calls being two lookups, 66 of them exact repeats.
+
+**Prompt 1** (5 runs per build, plus the TUI rerun; every headless run stopped at the 120-request cap):
+
+| Build | Run | Verdict | What it was doing | Session (`2026-11-06-`) |
+|---|---|---|---|---|
+| current | TUI rerun | loop | 2 exact `grep` commands in turn, 623 calls in a row from #87; `no_progress` 103 times | `1507_9187a24e` |
+| current | 1 | no loop | 122 calls, none repeated | `1717_429f4341` |
+| current | 2 | loop | one exact `go run ./cmd/cog <<'EOF' ...` call 103 times in a row (#20 to the cap) | `1820_337ddaaa` |
+| current | 3 | no loop | 3 repeats, at the end | `1834_2d138f2f` |
+| current | 4 | loop | wrote `.psi/extensions/cog-run`, then 2 exact calls in turn 85 times (#38 to the cap): write a probe test, run `psi ext test`, delete it | `1904_4176ba71` |
+| old | 1 | loop | the same `grep` 90 times in a row (#32 to the cap), 66 of them with a marker `echo` added; same output each time, no guard fired | `1728_963ab284` |
+| old | 2 | loop | 5 exact `psi ext example ... \| sed -n` commands, 79 in a row (#43 to the cap) | `1736_ca300e42` |
+| old | 3 | loop | 2 exact `grep` commands, 29 in a row (#93 to the cap) | `1812_45a2b294` |
+| old | 4 | loop | 4 exact `psi ext example` commands, 83 in a row (#39 to the cap) | `1827_7231f974` |
+| old | 5 | loop | 7 exact `psi ext example` commands, 72 in a row (#50 to the cap) | `1849_bc318ed3` |
+
+In old 2, 4 and 5 the few commands come in a varying order, not one fixed sequence, with nothing else between them.
+
+**The review prompt** (3 runs per build; each wrote its review and ended by itself):
+
+| Build | Run | Calls | Minutes | Verdict | Session (`2026-11-06-`) |
+|---|---|---|---|---|---|
+| current | 0 | 25 | 9.8 | no loop | `1748_07aa2326` |
+| current | 1 | 32 | 10.2 | no loop | `1927_aad1238a` |
+| current | 2 | 34 | 12.5 | no loop | `1950_d89eb475` |
+| current | 3 | 48 | 12.6 | no loop (one dropped request, retried) | `2023_ce3201c3` |
+| old | 1 | 28 | 10.0 | no loop | `1917_6fa756a5` |
+| old | 2 | 48 | 12.3 | no loop | `1937_8b69e43b` |
+| old | 3 | 73 | 20.5 | no loop: 18 repeats, one second pass over files already read, between new calls | `2002_c5f4f790` |
+
+**Outcome:** the changes didn't bring the loop back. On prompt 1 the old build looped 5 times in 5 and the current one 3 in 5 (2 in 4 headless); on the review prompt neither looped in 3 runs, as on 11-05. Clearing off doesn't prevent the loop: no run cleared anything before it looped. The loop comes with prompt 1, where the 27B explores the extension API (`psi ext example ...`, Psi's docs and source) without writing; only one of the ten prompt-1 runs wrote code, and it then looped on probing its test. The old/current split is a few runs each, so a direction, not proof.
+
+**A measuring mistake, kept as a lesson:** while scoring, a "near-repeat" count that ignored numbers was added after seeing a run, and it called a `sed` range moving forward through `env.go` a loop (current run 1); the owner caught it. The definition above was then fixed before scoring the rest.
+
+**Still open:** the same as above: `no_progress` only nudges, so an unheeded loop runs until someone stops it.
+
 ### The small reference models without line numbers (added 2026-11-03)
 
 **Question:** do Qwen3.5 4B and Gemma 4 12B cope with read output that has no line numbers (built 2026-11-03)? The eval after the change ran on the 35B only, and small models may lean on the numbers more: picking `offset`, or copying text for an edit.
