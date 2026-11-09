@@ -157,7 +157,154 @@ Flags worth sweeping: `-fa`, `-b`/`-ub`, `-ctk`/`-ctv` (KV cache type), `-t`, `-
 **Open:**
 - Psi sends no `reasoning_effort`, so the 27B with thinking runs at its template's default, xhigh. Whether medium or low does as well on agent work with less thinking is a separate question; it changes the system prompt, so it would be set once per session, never per request.
 
+### Not running an exact repeat (added 2026-11-09)
+
+**Question:** when the loop note fails and the model makes the same call again, should the harness not run it, and say so with the output it gave before?
+
+**Context:** "Does the loop note last?" (below). In run 1 the model sent one command 12 more times after the note, each a bare tool call, each with the same output. A refusal is the plan's second choice in principle 4 ("refuse with the exact fix"), ahead of a nudge, and it takes away the one thing the loop still gets: a fresh result.
+
+**How:** sampled replay first, no build. Take the requests that followed the note in runs 1 and 4 (`2026-11-09-2210_5f3b3b8d`, `2229_9ae9e8e4`) and the 14 recorded loops, and replace the last repeated result with a refusal, for example "Not run: you ran this exact command N times and no file changed since. Its output was: (the earlier output, cut)". A few seeds each, against the request as recorded. The measure as before, fixed up front: repeat, new or answer, with the new calls listed.
+
+**Open:**
+- When it applies. Only after the note has failed (the next rung), or for any exact repeat with no file changed since? The second also refuses honest repeats: polling a log, a command whose output depends on the time or on something outside the workspace.
+- "No file changed" is what the checkpoint sees, so a command that reads a gitignored file or the network can change its answer without it.
+- The model may make the call with a marker added to get past the refusal, as one run did by itself on 2026-11-06 (`; echo MARK99`).
+
+### Other sampling for a request that repeats (added 2026-11-09)
+
+**Question:** when the answer to a request is an exact repeat of an earlier call, does sending the same request again with other sampling give a different call?
+
+**Context:** in "Cutting a loop out of the context" (below), 2 of the 42 samples sent as recorded left the loop, with nothing changed but the seed. The loop runs use the card's thinking-off sampling (temp 0.7, top-p 0.8, top-k 20). Nothing is added to the context, so the prompt cache holds and a try costs only the generation (`fable-suggestions.md`, B5).
+
+**How:** sampled replay on the 14 recorded loop requests, as recorded, with a few seeds at each of a few settings (the server's; temp 1.0; temp 1.0 with top-p 0.95), then with the loop note added. Tally repeat, new and answer, and list the new calls.
+
+**Open:**
+- It needs sampling sent per request (`fable-suggestions.md`, A1), which Psi doesn't do yet; first check that llama-server's chat endpoint takes the fields.
+- A higher temperature may write worse calls or code; read the new calls, don't only count them.
+- Draft acceptance with MTP falls as sampling loosens, so each try is slower.
+- If it works, where it goes: before the nudge (the harness quietly asks again), or after the note fails.
+
 ## Done
+
+### Does the loop note last? (added 2026-11-09)
+
+**Question:** the note that names the repeated calls changed the next call in a one-step replay ("Cutting a loop out of the context", below). In a live run, does the model stay out of the loop after it, or come back to it?
+
+**Setup:** as the current-build runs of 2026-11-06 ("Did the changes since clearing went off bring the loop back?", below): the Qwen3.8 27B on the Mac (`just llm-up qwen27b`, 64K, thinking off, llama.cpp b12110), the `cog_run` extension prompt, headless (`psi -p - --max-turns 120 --trust-project`), each run in a fresh clone of cog at `991d099` (`~/projects/cog-note1` to `5`, removed after the runs). Psi is the working tree of 2026-11-09 with the note built, first on `PATH`, so the model's own `psi` calls are the same build. A headless run gets the note once at its first no-progress pause and stops at the second (plan §8.6).
+
+**How:** 5 runs, one after the other. On 2026-11-06 this prompt looped in 3 of the current build's 5 runs, so some runs may never reach the pause; those say nothing about the note.
+
+**The measure, fixed before any run.** A loop is as before: the pause's own rule, 12 turns in a row that only repeat earlier calls (exact, without `intent`) and change no file. For each run:
+- whether the pause came, and at which call;
+- the first call after the note: a repeat (equal to an earlier call) or new;
+- whether the pause came a second time (the run then stops, `stop: guard`), and how many calls after the note;
+- how the run ended: an answer, the guard, or the 120-request cap;
+- whether an extension's `init.lua` was written under `.psi/extensions` (other than the two the clone starts with).
+
+The calls after the note are listed for the reader. Whether the extension works is not scored: one run each, and this is about the loop.
+
+**Run 2026-11-09** (`~/.psi/evals/2026-11-09-1610-loop-note-live-qwen3.8-27b`: each run's output, `runs.log`, the scripts; sessions under `~/.psi/sessions/-home-ndari-projects-cog-note1-` to `5`; 31 minutes in all):
+
+| Run | Session (`2026-11-09-`) | The pause | First call after the note | Second pause | Ended | `init.lua` written |
+|---|---|---|---|---|---|---|
+| 1 | `2210_5f3b3b8d` | after call 55 | a repeat | yes, 12 calls later, all repeats | the guard, 67 calls, 4 min | no |
+| 2 | `2214_895c2753` | never: the nudge after call 42, then it left the loop by itself | | | an answer, 49 calls | yes |
+| 3 | `2219_0f7550e7` | never: no call repeated | | | the 120-request cap, 121 calls | no |
+| 4 | `2229_9ae9e8e4` | after call 64 | new: one of the loop's two commands with `"` for `'` | yes, 13 calls later, 12 of them repeats | the guard, 77 calls, 7 min | no |
+| 5 | `2236_e7fc5452` | after call 48 | new: a `write` of `.psi/extensions/cog-run/init.lua` | no: 9 calls, none a repeat | an answer, 57 calls | yes |
+
+The calls, for the reader:
+- **Run 1.** The loop was one command, `printf '5 :x let $x boom\n' | timeout 30 go run ./cmd/cog examples/factorial.cog; echo "exit=$?"`, which printed `{1 1 2 6 24 120} OK` and `exit=0` every time. The note named it. The next 12 replies were that command again, each a bare tool call with no text.
+- **Run 4.** The loop was two `grep ... readString ...; sed -n '187,205p' lexer.go` commands in turn. After the note came the first of them with double quotes for single (new by the measure, the same lookup in fact), then the two again, 12 times.
+- **Run 5.** The loop was seven `psi help api ...` lookups in varying order. After the note the model wrote "I have everything I need - writing the extension now." and called `write`. The file tool refused (`.psi` asks, and a headless run can't), so it wrote the file with a bash heredoc, added a test file, ran `psi ext test` and `psi ext check`, and answered.
+
+**Outcome:** three runs reached the pause, so this is three samples of one task.
+- **The note got one run of three out of the loop for good.** Run 5 went from seven lookups in turn to writing the extension and finishing.
+- **Two went straight back,** one on its very next call, one after the same command with its quotes changed. The second pause stopped both, 12 and 13 calls after the note.
+- **The one-step replay was too hopeful.** There the note changed the next call in 28 of 42 samples; here it changed what the run did in 1 of 3. In run 4 the next call did change, by the measure, and nothing else did: a new call is not a way out.
+- **The stop is what bounds the cost.** Runs 1 and 4 ended at 67 and 77 calls, 4 and 7 minutes, where the 2026-11-06 runs that looped went on to the 120-request cap. Trying the note first cost them about 12 calls each.
+- So the note stays as built: cheap, sometimes enough. It is not a fix for the loop.
+
+**Seen on the way:** in run 5 `write` to `.psi/extensions` was refused and bash wrote the same file, the known gap ("Bash can write what the file tools guard", `known-issues.md`).
+
+**Still open:**
+- What to do when the note fails. Two candidates, both under Open: "Not running an exact repeat" and "Other sampling for a request that repeats". Run 1's replies were bare calls with identical output, so there is little for more words to work on.
+- The same on ordinary coding tasks and another model (`fable-suggestions.md`, B2): every run here is the `cog_run` prompt.
+
+### Cutting a loop out of the context (added 2026-11-09)
+
+**Question:** when the model is stuck repeating calls, does removing the repeats from the context change what it does next, where the nudge and "Continue" don't? The repeated turns may be what primes the next repeat, and each nudge is one more line in that pattern (`fable-suggestions.md`, A2). The no-progress pause (plan §8.6, 2026-11-09) only stops the waste.
+
+**Setup:** the Qwen3.8 27B on the Mac as on 2026-11-06 (`just llm-up qwen27b`: 64K, thinking off, the card's sampling, llama.cpp b12110). 14 recorded sessions where the pause would have come, all with this model and build: the 7 of 2026-11-06 that the rule pauses (`experiments.md` below) and 7 of 2026-11-08. The 2026-11-05 clearing-on review is left out (an older llama.cpp, and clearing on).
+
+**How:** for each session, the request that followed the pause turn (the 12th turn in a row that only repeated earlier calls), from its wire log, sent again in four forms with seeds 1 to 3 each (nothing else changed but `max_tokens`: room for the session's longest earlier call, at least 300, so a repeat always fits whole and a response cut off by the limit is not one; it is counted by what it began):
+- **full:** as recorded. This is what "Continue" on the pause card gives today.
+- **full+note:** as recorded, plus a user message from the harness: "[Note from psi] You made the same calls again and again, the last 12 turns in a row, and no file changed. The calls: ... Don't make them again: use what you have, do something different, or answer."
+- **cut:** the 12 repeating turns removed; the context ends where the streak began.
+- **cut+note:** the 12 turns removed, plus the note, which also says the repeats were removed and that the calls' earlier results are still above.
+
+**The measure, fixed before any run:** each sample is one of
+- **repeat:** a tool call whose name and arguments (without `intent`) equal a call made earlier in the recorded session, up to the pause; a response with several calls is a repeat only if every call is one;
+- **new:** any other tool call;
+- **answer:** no tool call.
+
+A "new" call may still be a variant of a repeated one (a flag changed); those are shown and left to the reader, not counted as repeats. One step only: this says whether the next call changes, not whether the model stays out of the loop.
+
+**Before the runs:** one seed on the smallest session (`2026-11-08-2116_b9ef5c1a`) to test the script (as recorded: a repeat; the other three forms: a `write` of the extension, 660 to 815 tokens each). Seeing that a call that breaks out can be long, the seeds went from 5 to 3 and `max_tokens` from 1024 to the per-session cap, to bound the GPU time; the measure is unchanged.
+
+**Run 2026-11-09** (`~/.psi/evals/2026-11-09-1427-loop-cut-qwen3.8-27b`: `samples.jsonl`, `run.log`, the script `cut_exp.py`; 168 samples, 82 minutes of server time). Each cell is repeat / new / answer of 3 seeds:
+
+| Session | full | full+note | cut | cut+note |
+|---|---|---|---|---|
+| `2026-11-06-1507_9187a24e` (the TUI rerun) | 3 / 0 / 0 | 1 / 2 / 0 | 2 / 1 / 0 | 0 / 3 / 0 |
+| `2026-11-06-1820_337ddaaa` | 3 / 0 / 0 | 2 / 1 / 0 | 1 / 2 / 0 | 0 / 3 / 0 |
+| `2026-11-06-1904_4176ba71` | 3 / 0 / 0 | 3 / 0 / 0 | 3 / 0 / 0 | 1 / 2 / 0 |
+| `2026-11-06-1736_ca300e42` | 3 / 0 / 0 | 1 / 2 / 0 | 0 / 3 / 0 | 0 / 3 / 0 |
+| `2026-11-06-1812_45a2b294` | 3 / 0 / 0 | 2 / 1 / 0 | 3 / 0 / 0 | 1 / 2 / 0 |
+| `2026-11-06-1827_7231f974` | 3 / 0 / 0 | 1 / 2 / 0 | 2 / 1 / 0 | 0 / 3 / 0 |
+| `2026-11-06-1849_bc318ed3` | 2 / 1 / 0 | 0 / 3 / 0 | 3 / 0 / 0 | 0 / 3 / 0 |
+| `2026-11-08-1841_b123cd94` | 3 / 0 / 0 | 0 / 3 / 0 | 0 / 3 / 0 | 0 / 3 / 0 |
+| `2026-11-08-1854_d039213c` | 3 / 0 / 0 | 0 / 3 / 0 | 0 / 3 / 0 | 0 / 3 / 0 |
+| `2026-11-08-2006_3a2c6732` | 2 / 1 / 0 | 2 / 1 / 0 | 3 / 0 / 0 | 1 / 2 / 0 |
+| `2026-11-08-2019_1e222d3e` | 3 / 0 / 0 | 0 / 3 / 0 | 3 / 0 / 0 | 1 / 2 / 0 |
+| `2026-11-08-2034_4dd3053d` | 3 / 0 / 0 | 2 / 1 / 0 | 3 / 0 / 0 | 1 / 2 / 0 |
+| `2026-11-08-2046_5fa3abd5` | 3 / 0 / 0 | 0 / 3 / 0 | 3 / 0 / 0 | 0 / 3 / 0 |
+| `2026-11-08-2116_b9ef5c1a` | 3 / 0 / 0 | 0 / 3 / 0 | 0 / 3 / 0 | 0 / 3 / 0 |
+| **All 42 samples** | **40 / 2 / 0** | **14 / 28 / 0** | **26 / 16 / 0** | **5 / 37 / 0** |
+| Sessions where all 3 repeated | 12 | 1 | 7 | 0 |
+
+No sample answered: every one made a tool call. 38 of the new calls were cut off by `max_tokens`, every one of them the extension's `init.lua` being written (below); none could have been a repeat, since a repeat fits the limit.
+
+**What the new calls were (read after the run; a description, not the measure).** All 14 sessions are the same task, the `cog_run` extension prompt, and in all of them the model was looking things up without having written the extension's `init.lua`. So one kind of new call can be counted by rule: a `write` of `.psi/extensions/<name>/init.lua`, or a bash `cat >` of it.
+
+| | full | full+note | cut | cut+note |
+|---|---|---|---|---|
+| New calls | 2 | 28 | 16 | 37 |
+| Start writing `init.lua` | 2 | 17 | 2 | 17 |
+| `todo` | 0 | 2 | 0 | 1 |
+| Other calls | 0 | 9 | 14 | 19 |
+
+Samples of the other calls, for the reader to judge:
+- cut, `1736_ca300e42`, where the loop had `psi ext example ask-first | sed -n '60,80p'` and `psi ext example fetch-cache | sed -n '50,62p'`: `psi ext example ask-first | sed -n '58,72p'`, `... | sed -n '45,62p'`, `psi ext example fetch-cache | sed -n '52,60p'`. The same lookups with the line ranges moved a little.
+- cut, `1507_9187a24e`, where the loop had `grep -rn "func.*Text()" embedding.go; grep -n -B3 -A8 ") Text()" embedding.go | head -15`: the same command with `| head` added to its first half.
+- cut, `2116_b9ef5c1a`: `go run ./cmd/cog -check examples/factorial.cog; echo "exit=$?"` twice, where the loop had the same check piped through `cat` or to `/dev/null`.
+- cut+note, `1507_9187a24e`: `printf '2 3 + say\n' | go run ./cmd/cog; echo "exit=$?"` (trying the interpreter, a step toward the tool) and `todo add "Write .psi/extensions/cog-run/init.lua registering cog_run ..."`.
+- cut+note, `2046_5fa3abd5`: `grep -n -B2 -A10 "func (e \*Evaluator) Eval(" evaluator.go; sed -n 41,50p evaluator.go`, where the loop had `-A8`: a flag changed.
+- full+note, `2019_1e222d3e`: `printf '1 2 +\n' | bwrap --ro-bind / / ... -- go run ./cmd/cog` twice (trying the sandbox by hand), and a `cat > .psi/extensions/cog-run/init.lua`.
+
+**What the cut cost in reading.** A cut request is the start of the request before it, yet in 11 of the 14 sessions the server reused only about 3.6K tokens and read the rest again: 15.3K tokens and 104 s on average for the first cut sample (up to 34K and 244 s), against 2.3K and 26 s for the first full+note sample. This fits "Prompt cache lost after a long final answer" below: llama-server can't cut this cache back to an arbitrary point and restores an earlier checkpoint. This replay sent each prompt whole, so the server had no checkpoint near the cut; a live session reads its prompt a turn at a time and may have one (not checked: it depends on how many checkpoints the server keeps, and the cut is at least 12 requests back).
+
+**Outcome:** one step, one task and one model, so a direction, not proof.
+- **"Continue" as it is today repeats:** 40 of 42. The pause stops the waste, and going on brings the loop back.
+- **The note is what changes the next call:** with the note alone 28 of 42 samples left the loop, and 17 of them started writing the file the task asked for.
+- **The cut alone mostly doesn't:** 26 of 42 repeated, 7 sessions repeated in every sample, and 14 of its 16 new calls were other lookups, several of them the loop's own commands with a range or a flag changed. Taking the repeats away puts the model back where it was when it started repeating. The idea that the repeated turns are what primes the next repeat (`fable-suggestions.md`, A2) is not what these runs show.
+- **The cut adds a little to the note:** 5 repeats against 14, but the same 17 samples start writing the file either way, so the gain is in other calls, some of them variants. Against that, the cut costs a re-read where the note costs none.
+- **So the candidate to build is the note, not the cut:** when the user answers "Continue" on a no-progress pause, a user message from the harness that names the repeated calls and says not to make them again. A headless run could get the same note once in place of stopping, and stop if the pause comes again.
+
+**Still open:**
+- Whether it lasts: tried the same day ("Does the loop note last?", above). Of three live runs that reached the pause, one left the loop for good and two went back to it.
+- Another task and another model: all 14 sessions are the `cog_run` prompt on cog with the 27B (see the owner's rule that changes from the cog trial stay general).
+- The note as a user message against the same words on the last tool result, where the nudge goes today. Only the user message was tried.
 
 ### Qwen3.8 27B on the Mac (added 2026-11-05)
 

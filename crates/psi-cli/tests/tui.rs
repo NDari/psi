@@ -1408,7 +1408,28 @@ fn a_loop_of_the_same_call_pauses_and_asks() {
         std::thread::sleep(Duration::from_millis(2));
     }
     t.wait_screen(card, SLOW);
-    assert_eq!(s.chat_requests().len(), 25);
+    let reqs = s.chat_requests();
+    assert_eq!(reqs.len(), 25);
+    // "Continue" told the model which call it repeated, and the screen says so.
+    let last = reqs[13]["messages"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(last["role"], "user");
+    let note = last["content"].as_str().unwrap();
+    assert!(
+        note.starts_with("[Note from psi] You made the same calls"),
+        "{note}"
+    );
+    assert!(note.contains("\n- read: a.txt\n"), "{note}");
+    assert!(
+        t.all()
+            .contains("no_progress: going on with a note naming the repeated calls"),
+        "{}",
+        t.all()
+    );
     t.answer_safe(); // Stop the run
     t.wait_for("stopped: the last 12 turns repeated earlier calls", SLOW);
     t.quit();

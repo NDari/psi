@@ -815,6 +815,24 @@ async fn an_unheeded_no_progress_nudge_pauses_and_going_on_continues() {
     assert_eq!(out.stop, Stop::Done, "{:?}", out.stop);
     assert_eq!(out.tool_calls, 16);
     assert_eq!(*ap.pauses.lock().unwrap(), [NO_PROGRESS_PAUSE]);
+    // Going on tells the model which calls it repeated: as things were,
+    // the next call repeated in 40 of 42 samples (experiments.md, 2026-11-09).
+    let reqs = server.chat_requests();
+    let last_message = |i: usize| {
+        reqs[i]["messages"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(last_message(13)["role"], "tool");
+    assert_eq!(
+        last_message(14),
+        json!({"role": "user", "content": "[Note from psi] You made the same calls again and again, the last 12 turns in a row, and no file changed. The calls:\n- bash: echo a\n- bash: echo b\nDon't make them again: use what you have, do something different, or answer."})
+    );
+    let notes = |v: &Value| v.to_string().matches("[Note from psi]").count();
+    assert_eq!((notes(&reqs[13]), notes(&reqs[16])), (0, 1));
     // The nudge on the sixth repeat, the pause on the twelfth, no second
     // nudge between them.
     let r = results(&a);
@@ -827,7 +845,15 @@ async fn an_unheeded_no_progress_nudge_pauses_and_going_on_continues() {
             .iter()
             .map(|(g, m)| (g.as_str(), m.starts_with("paused: ")))
             .collect::<Vec<_>>(),
-        [("no_progress", false), ("no_progress", true)]
+        [
+            ("no_progress", false),
+            ("no_progress", true),
+            ("no_progress", false)
+        ]
+    );
+    assert_eq!(
+        guard_events(&a)[2].1,
+        "going on with a note naming the repeated calls"
     );
     let answers: Vec<Value> = a
         .session()
@@ -844,14 +870,50 @@ async fn an_unheeded_no_progress_nudge_pauses_and_going_on_continues() {
 }
 
 #[tokio::test]
-async fn an_unheeded_no_progress_nudge_stops_a_headless_run() {
+async fn a_headless_run_goes_on_once_with_the_note_and_stops_the_second_time() {
     let fx = Fx::new();
-    let server = ReplayServer::start(two_commands_in_turn(20)).unwrap();
+    let server = ReplayServer::start(two_commands_in_turn(40)).unwrap();
     let safety = fx.safety(Arc::new(Headless), None);
     let mut a = fx.agent(&server, fx.session(), safety, false);
     let out = a.run("look around").await;
+    // Nobody to ask: the note at the first pause (14 calls), the stop at
+    // the second (12 more).
     assert_eq!(out.stop, Stop::Guard(NO_PROGRESS_PAUSE.into()));
-    assert_eq!(out.tool_calls, 14);
+    assert_eq!(out.tool_calls, 26);
+    let reqs = server.chat_requests();
+    let notes = |v: &Value| v.to_string().matches("[Note from psi]").count();
+    assert_eq!(
+        (notes(&reqs[13]), notes(&reqs[14]), notes(&reqs[25])),
+        (0, 1, 1)
+    );
+    let events = guard_events(&a);
+    assert_eq!(
+        events.iter().map(|(_, m)| m.as_str()).collect::<Vec<_>>()[1..],
+        [
+            "paused: the last 12 turns repeated earlier calls and changed no file",
+            "this run can't ask, so it goes on once, with a note naming the repeated calls",
+            // After the note the nudge comes again first.
+            "The last 6 turns repeated earlier calls and changed no file. Try a different approach, or answer if you are done.",
+            "paused: the last 12 turns repeated earlier calls and changed no file",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_headless_run_that_leaves_the_loop_after_the_note_finishes() {
+    let fx = Fx::new();
+    let mut replies = two_commands_in_turn(14);
+    replies.push(call(
+        "write",
+        json!({"path": "notes.txt", "text": "found it\n"}),
+    ));
+    replies.push(text("done"));
+    let server = ReplayServer::start(replies).unwrap();
+    let safety = fx.safety(Arc::new(Headless), None);
+    let mut a = fx.agent(&server, fx.session(), safety, false);
+    let out = a.run("look around").await;
+    assert_eq!(out.stop, Stop::Done, "{:?}", out.stop);
+    assert_eq!(fx.read("notes.txt").as_deref(), Some("found it\n"));
 }
 
 #[tokio::test]

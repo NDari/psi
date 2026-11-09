@@ -17,6 +17,10 @@ pub const NO_PROGRESS_TURNS: u32 = 6;
 /// the two that were eval trials failed. The 2026-11-06 TUI rerun got 103
 /// nudges and went on for 106 minutes.
 pub const NO_PROGRESS_PAUSE: u32 = 2 * NO_PROGRESS_TURNS;
+/// Calls a loop note lists; the rest are counted.
+const NOTE_CALLS: usize = 10;
+/// Characters of each call a loop note shows.
+const NOTE_CALL_CHARS: usize = 200;
 /// Summaries in one run with no file changed since, before a pause: the
 /// context fills again as fast as it is compacted (Claude Code stops a
 /// "thrashing" autocompact the same way). In the 16K runs of 2026-11-01,
@@ -44,6 +48,47 @@ pub struct Guards {
     announced: bool,
     truncated: u32,
     compactions: u32,
+    /// This turn's calls, and the distinct calls of the turns that made
+    /// no progress so far, in order: what a loop note names.
+    turn_calls: Vec<String>,
+    idle_calls: Vec<String>,
+    /// The no-progress pause's reason and the note to go on with.
+    loop_note: Option<(String, String)>,
+}
+
+/// What the model is told when a run goes on after a no-progress pause.
+/// Going on as things were repeated in 40 of 42 samples of 14 recorded
+/// loops; with this note as a user message, in 14, and 17 samples started
+/// on the file the task asked for (experiments.md, 2026-11-09). Cutting
+/// the repeats out of the context did little without it.
+fn loop_note(calls: &[String]) -> String {
+    let mut lines: Vec<String> = calls.iter().take(NOTE_CALLS).map(|c| shown(c)).collect();
+    if calls.len() > NOTE_CALLS {
+        lines.push(format!("- and {} more", calls.len() - NOTE_CALLS));
+    }
+    format!(
+        "[Note from psi] You made the same calls again and again, the last {NO_PROGRESS_PAUSE} turns in a row, and no file changed. The calls:\n{}\nDon't make them again: use what you have, do something different, or answer.",
+        lines.join("\n")
+    )
+}
+
+/// One call of a loop note: the tool, and its command or path (all its
+/// arguments when it has neither), on one line.
+fn shown(sig: &str) -> String {
+    let (name, args) = sig.split_once(' ').unwrap_or((sig, ""));
+    let parsed: Option<serde_json::Value> = serde_json::from_str(args).ok();
+    let main = parsed.as_ref().and_then(|v| {
+        ["command", "path"]
+            .iter()
+            .find_map(|k| v.get(k).and_then(serde_json::Value::as_str))
+    });
+    let text = main.unwrap_or(args);
+    let mut line: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.chars().count() > NOTE_CALL_CHARS {
+        line = line.chars().take(NOTE_CALL_CHARS - 1).collect();
+        line.push('…');
+    }
+    format!("- {name}: {line}")
 }
 
 /// Answers cut off by the output limit that get another turn, per run.
@@ -69,6 +114,9 @@ impl Guards {
             announced: false,
             truncated: 0,
             compactions: 0,
+            turn_calls: Vec::new(),
+            idle_calls: Vec::new(),
+            loop_note: None,
         }
     }
 
@@ -79,6 +127,13 @@ impl Guards {
         self.streak = 0;
         self.idle_turns = 0;
         self.compactions = 0;
+        self.idle_calls.clear();
+    }
+
+    /// After a no-progress pause: its reason, and the note that names the
+    /// repeated calls, for the model if the run goes on. Once per pause.
+    pub fn take_loop_note(&mut self) -> Option<(String, String)> {
+        self.loop_note.take()
     }
 
     /// One call's outcome; `sig` is the tool and its arguments.
@@ -86,6 +141,7 @@ impl Guards {
         if self.seen.insert(sig.to_owned()) {
             self.turn_progress = true;
         }
+        self.turn_calls.push(sig.to_owned());
         let mut out = Vec::new();
         if !failed {
             self.last_failed = None;
@@ -179,19 +235,28 @@ impl Guards {
             self.compactions = 0;
         }
         let progress = std::mem::take(&mut self.turn_progress) || files_changed;
+        let calls = std::mem::take(&mut self.turn_calls);
         if progress {
             self.idle_turns = 0;
+            self.idle_calls.clear();
             return None;
         }
         self.idle_turns += 1;
+        for c in calls {
+            if !self.idle_calls.contains(&c) {
+                self.idle_calls.push(c);
+            }
+        }
         if self.idle_turns == NO_PROGRESS_PAUSE {
             // Going on resets the count (`reset`), so the nudge comes again
             // before the next pause.
+            let reason = format!(
+                "the last {NO_PROGRESS_PAUSE} turns repeated earlier calls and changed no file"
+            );
+            self.loop_note = Some((reason.clone(), loop_note(&self.idle_calls)));
             return Some(GuardAction::Pause {
                 guard: "no_progress",
-                reason: format!(
-                    "the last {NO_PROGRESS_PAUSE} turns repeated earlier calls and changed no file"
-                ),
+                reason,
             });
         }
         (self.idle_turns == NO_PROGRESS_TURNS).then(|| GuardAction::Nudge {
@@ -379,6 +444,61 @@ mod tests {
                 [GuardAction::Nudge { .. }, GuardAction::Pause { .. }]
             ),
             "{again:?}"
+        );
+    }
+
+    #[test]
+    fn the_pause_comes_with_a_note_that_names_the_repeated_calls() {
+        // The 2026-11-06 TUI rerun's two commands, as the agent signs them.
+        let a = r#"bash {"command":"grep -rn \"func.*Text()\" embedding.go;\n  grep -n -B3 -A8 \") Text()\" embedding.go | head -15"}"#;
+        let b = r#"read {"limit":40,"path":"embedding.go"}"#;
+        let mut g = Guards::new(10);
+        idle_turn(&mut g, a);
+        idle_turn(&mut g, b);
+        assert_eq!(g.take_loop_note(), None);
+        for i in 0..NO_PROGRESS_PAUSE {
+            idle_turn(&mut g, if i % 2 == 0 { a } else { b });
+        }
+        let (reason, note) = g.take_loop_note().unwrap();
+        assert_eq!(
+            reason,
+            "the last 12 turns repeated earlier calls and changed no file"
+        );
+        assert_eq!(
+            note,
+            "[Note from psi] You made the same calls again and again, the last 12 turns in a row, and no file changed. The calls:\n\
+             - bash: grep -rn \"func.*Text()\" embedding.go; grep -n -B3 -A8 \") Text()\" embedding.go | head -15\n\
+             - read: embedding.go\n\
+             Don't make them again: use what you have, do something different, or answer."
+        );
+        // Once per pause.
+        assert_eq!(g.take_loop_note(), None);
+    }
+
+    #[test]
+    fn a_loop_note_lists_ten_calls_cuts_long_ones_and_counts_the_rest() {
+        let mut g = Guards::new(10);
+        let sigs: Vec<String> = (0..12)
+            .map(|i| format!(r#"bash {{"command":"echo {i} {}"}}"#, "x".repeat(300)))
+            .collect();
+        // Twelve calls in each turn; the first turn makes them new.
+        for _ in 0..=NO_PROGRESS_PAUSE {
+            for s in &sigs {
+                g.on_call(s, false);
+            }
+            g.on_turn_end(false);
+        }
+        let (_, note) = g.take_loop_note().unwrap();
+        let lines: Vec<&str> = note.lines().collect();
+        assert_eq!(lines.len(), 13, "{note}");
+        assert!(lines[1].starts_with("- bash: echo 0 xxx") && lines[1].ends_with('…'));
+        assert_eq!(lines[1].chars().count(), "- bash: ".len() + 200);
+        assert_eq!(lines[11], "- and 2 more");
+        // A call that isn't a tool and JSON arguments is shown as it is.
+        assert_eq!(shown("strange"), "- strange: ");
+        assert_eq!(
+            shown(r#"todo {"action":"list"}"#),
+            r#"- todo: {"action":"list"}"#
         );
     }
 

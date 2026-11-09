@@ -966,6 +966,8 @@ impl Agent {
         // A limit the user goes past in the TUI moves on by the same amount.
         let (mut turn_limit, mut call_limit) = (b.max_turns, b.max_tool_calls);
         let mut guards = Guards::new(b.max_consecutive_errors);
+        // A run that can't ask went on from a no-progress pause already.
+        let mut loop_noted = false;
         let mut overflow_retries = 0u32;
         loop {
             if self.ctx.cancel.is_cancelled() {
@@ -1140,10 +1142,37 @@ impl Agent {
                 return Ok(Stop::Aborted);
             }
             if let Some(reason) = pause {
-                if let Some(stop) = self.pause_run(reason).await? {
+                // Going on from a no-progress pause as things were brings
+                // the loop back; a note that names the repeated calls
+                // mostly doesn't (experiments.md, 2026-11-09).
+                let note = guards
+                    .take_loop_note()
+                    .filter(|(r, _)| *r == reason)
+                    .map(|(_, note)| note);
+                // A run that can't ask gets the note once in place of the
+                // stop; the next such pause stops it.
+                let unasked = note.is_some() && !self.safety.approver.interactive() && !loop_noted;
+                if !unasked && let Some(stop) = self.pause_run(reason).await? {
                     return Ok(stop);
                 }
                 guards.reset();
+                if let Some(text) = note {
+                    loop_noted = true;
+                    let message = if unasked {
+                        "this run can't ask, so it goes on once, with a note naming the repeated calls"
+                    } else {
+                        "going on with a note naming the repeated calls"
+                    };
+                    self.record(EntryBody::GuardEvent {
+                        guard: "no_progress".into(),
+                        message: message.into(),
+                        tool_call_id: None,
+                    })?;
+                    self.record(EntryBody::CustomMessage {
+                        custom_type: "guard".into(),
+                        content: vec![Block::Text { text }],
+                    })?;
+                }
             }
             for s in Queues::take(&self.queues.steering) {
                 self.record(Self::user_message(&s))?;

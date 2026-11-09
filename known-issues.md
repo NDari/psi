@@ -28,7 +28,7 @@ In plan mode (and for read-only sub-agents) bash runs in the normal sandbox, whi
 
 ### Failure guards miss failures that aren't in a row (added 2026-11-05, medium priority, to implement; the `no_progress` pause built 2026-11-09)
 
-**Built 2026-11-09:** 12 turns in a row that only repeat earlier calls and change no file now pause the run (headless runs stop), after the one nudge at 6 (plan §8.6). Replayed over the recorded sessions, it pauses the two exact-repeat sessions below (the 11-05 clearing-on review at turn 36 of 110, the 11-06 TUI rerun at turn 96 of 708) and 7 of the 8 loops in `experiments.md`. The wording the model sees is unchanged, and no model run has been made with it.
+**Built 2026-11-09:** 12 turns in a row that only repeat earlier calls and change no file now pause the run (headless runs stop), after the one nudge at 6 (plan §8.6). Replayed over the recorded sessions, it pauses the two exact-repeat sessions below (the 11-05 clearing-on review at turn 36 of 110, the 11-06 TUI rerun at turn 96 of 708) and 7 of the 8 loops in `experiments.md`. Going on from the pause adds a note for the model that names the repeated calls (the same day, plan §8.6); a headless run gets it once in place of the stop.
 
 **Still open after that:**
 - The failure window ("To build", below): unchanged.
