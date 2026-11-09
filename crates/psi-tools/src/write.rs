@@ -21,6 +21,7 @@ pub(crate) fn schema() -> ToolSchema {
             Param::new("intent", ParamKind::String, "Optional: one line on why").optional(),
         ],
         example: json!({"path": "notes/todo.md", "text": "- first item\n"}),
+        parameters: None,
     }
 }
 

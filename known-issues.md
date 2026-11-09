@@ -41,6 +41,25 @@ From the 27B code eval (`~/.psi/evals/2026-11-05-1321-code-all-qwen3.8-27b`):
 
 **Test together:** one quick-set run once this is built, which also checks the 2026-11-05 denial wording (parse errors say to fix and run again), not yet run on a model.
 
+### A summary can contradict what the harness recorded (added 2026-11-08, medium priority, to implement)
+
+After a compaction the model gets its own summary and the harness's record (`harness_state` in `crates/psi-agent/src/compact.rs`: files read, files changed, todo, last post-edit check). When the two disagree, the model follows the summary.
+- **The cog review, old build** (`~/.psi/sessions/-home-ndari-projects-cog-rv-old3-/2026-11-06-2002_c5f4f790.*`): the second summary copied the first word for word. It said "Have NOT yet read: errors.go, source.go, options.go, word_metadata.go, stdlib.go..." and "Have NOT run: go build, go test", and under Corrections, "None to the prior summary". Calls #24 and #25 had built and run the tests, and #32 to #36 had read those files. The record beside it listed them under "Files read". The model rebuilt, re-read #32 to #36 exactly, and re-read three more files: about 12 calls.
+- **The 11-05 cog session** (`2026-11-05-1547_e61d66e2`): a summary after #166 said "I have NOT yet written the extension file", though #156 had. At #405 the model rediscovered its own file.
+
+**What the record leaves out:**
+- commands run through bash and their exit codes (builds, tests, `go run`);
+- files read or written through bash (`cat`, `sed -n`, a heredoc).
+
+The 27B reads and writes through bash often (the cog runs on 2026-11-06).
+
+**To build:**
+- Record the bash commands run, the last few distinct ones, each with its exit code.
+- Give the summarizer the harness record, so it doesn't write "not read" or "not run" for what the record shows.
+- When a summary still contradicts it, drop or correct the contradicting line before the model sees it.
+
+All three change model-facing text, so each needs an eval run. The cog review and the 16K tasks are the cases to rerun.
+
 ### Tool-call markup inside an argument (added 2026-11-04, low priority)
 
 In an eval trial the 35B wrote a todo call whose `action` held the next parameter too: `"add>\n<parameter=text>\nCreate textkit/ package ..."` (llama-server's parser for Qwen's XML tool calls took a stray `>` as part of the value; `~/.psi/evals/2026-11-04-0236-quick-batteries-agents-qwen3.6-35b/multi_split_package`). The todo tool refused it as an unknown action and the model redid it correctly in the next call, so it cost one request. Fix if it comes back: in `psi-ai`'s shape fixes, split a string argument holding `\n<parameter=NAME>\n` into that parameter, with this call as the fixture.

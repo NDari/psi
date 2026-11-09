@@ -17,8 +17,8 @@ use psi_session::{Entry, EntryBody, Role, text_of};
 use psi_tui::term::{Activity, Term, title_for};
 use psi_tui::theme::{self, Token};
 use psi_tui::{
-    Action, Color, Editor, EditorEvent, Keymap, Line, MdStream, Renderer, Style, render_block,
-    render_blocks,
+    Action, Color, Editor, EditorEvent, Keymap, Line, MdStream, Renderer, Style, render_blocks,
+    render_tail,
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -2345,9 +2345,7 @@ impl<W: Write> App<W> {
         let mut live: Vec<Line> = Vec::new();
         let pending = self.md.pending();
         if !pending.is_empty() {
-            let lines = render_block(pending, w);
-            let keep = lines.len().saturating_sub(6);
-            live.extend(lines.into_iter().skip(keep));
+            live.extend(render_tail(pending, w, 6));
         }
         if let Some(r) = &self.running {
             for (i, (_, name, args, started)) in r.tools.iter().enumerate() {

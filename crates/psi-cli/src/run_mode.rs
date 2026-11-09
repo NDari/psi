@@ -306,12 +306,12 @@ pub async fn prepare(args: &RunArgs, approver: Arc<dyn Approver>) -> Result<Prep
     let props = client.props().await;
     // The TUI starts without a server and connects when it comes up; the
     // other modes need it now.
-    let offline = matches!(props, Err(AiError::Connect { .. })) && mode == "interactive";
+    let offline = not_up(&props) && mode == "interactive";
     let (n_ctx, server, progress) = match props {
         Err(e @ AiError::Connect { .. }) if !offline => {
             bail!("{e}. Is llama-server running? (just llm-up)")
         }
-        Err(AiError::Connect { .. }) => (profile_window(&profile, None), None, false),
+        _ if offline => (profile_window(&profile, None), None, false),
         props => server_facts(&profile, props, mode == "interactive")?,
     };
     let client = client.with_progress(progress);
@@ -477,6 +477,15 @@ pub fn result_chars(n_ctx: u64) -> usize {
     (n_ctx as f64 * RESULT_SHARE * CHARS_PER_TOKEN) as usize
 }
 
+/// The server isn't up yet: nothing listens, or llama-server is still
+/// loading the model (503), when `/props` has no window to give.
+pub fn not_up(props: &Result<psi_ai::Props, AiError>) -> bool {
+    matches!(
+        props,
+        Err(AiError::Connect { .. } | AiError::Http { status: 503, .. })
+    )
+}
+
 /// What `/props` tells: the window, the server's record for the session,
 /// and whether to ask for prompt progress (llama-server in the TUI; other
 /// servers may refuse the field). Fails when the template can't call tools.
@@ -640,6 +649,9 @@ pub async fn run(args: RunArgs) -> Result<ExitCode> {
         std::io::stdin()
             .read_to_string(&mut s)
             .context("reading the prompt from stdin")?;
+        if s.trim().is_empty() {
+            bail!("the prompt from stdin was empty");
+        }
         s
     } else {
         args.prompt.clone()

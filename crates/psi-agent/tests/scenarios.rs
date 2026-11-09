@@ -767,6 +767,27 @@ const SUMMARY: &str =
     "## Goal\nPort the parser.\n## Constraints and facts\nCode word PELICAN-42; 7 retries.";
 
 #[tokio::test]
+async fn compact_with_a_focus_extending_the_last_request_keeps_the_focus() {
+    let f = Fixture::new(vec![text("ok"), text(SUMMARY)]);
+    write_files(&f.cwd, 1, 200);
+    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    prefill(&mut a, 25);
+    assert_eq!(a.run("go on").await.stop, Stop::Done);
+    a.compact_now(Some("the parser")).await.unwrap();
+    assert_eq!(compaction_info(&a)[0]["method"], "extend");
+    let reqs = f.server.chat_requests();
+    let instruction = reqs[1]["messages"].as_array().unwrap().last().unwrap()["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(instruction.contains("Summarize the conversation so far"));
+    assert!(
+        instruction.ends_with("The user asks the summary to focus on: the parser"),
+        "{instruction}"
+    );
+}
+
+#[tokio::test]
 async fn a_summary_extends_the_last_request_and_keeps_a_tail() {
     let f = Fixture::new(vec![read_at("f0.txt", 9500), text(SUMMARY), text("done")]);
     write_files(&f.cwd, 1, 200);

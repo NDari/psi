@@ -109,7 +109,7 @@ fn leak(s: &str) -> &'static str {
 
 /// Psi's schema for a tool: `name` as the model sees it, the server's
 /// description (cut at [`MAX_DESCRIPTION`]) and a parameter per top-level
-/// property, each sent with its whole cleaned schema. Tools are listed
+/// property; the whole cleaned schema is what is sent. Tools are listed
 /// once per connection, so their strings are leaked, as extension tools'
 /// are.
 pub fn tool_schema(name: &str, description: &str, cleaned: &Value) -> ToolSchema {
@@ -142,6 +142,7 @@ pub fn tool_schema(name: &str, description: &str, cleaned: &Value) -> ToolSchema
         description,
         params,
         example: Value::Object(example),
+        parameters: Some(Box::leak(Box::new(cleaned.clone()))),
     }
 }
 

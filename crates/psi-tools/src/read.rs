@@ -30,6 +30,7 @@ pub(crate) fn schema() -> ToolSchema {
             Param::new("limit", ParamKind::Integer, "How many lines to show").optional(),
         ],
         example: json!({"path": "src/main.py"}),
+        parameters: None,
     }
 }
 

@@ -15,8 +15,12 @@ true}} in your settings.
 psi ext check <path> lints one; psi ext test <path> runs its *_test.lua files.
 Tests use the global test: test.case, test.emit, test.command, test.tool,
 test.requests, test.ui.answer(kind, value) (kinds confirm, select, input, custom,
-exec, http; answers queue in order) and the assertions test.eq/neq, truthy/falsy,
-contains/not_contains (plain text), matches (a Lua pattern) and errors(fn, text?).
-psi ext example lists tested examples and psi ext example <name> prints one. The
-author guide is docs/extensions.md and the API reference docs/api.md in the psi
-repository.
+exec, http; answers queue in order), test.mock_tool(name, result) for execute_tool
+(result: text, or { text = ..., is_error = true } for a failure) and the assertions
+test.eq/neq, truthy/falsy, contains/not_contains (plain text), matches (a Lua
+pattern) and errors(fn, text?). psi ext example lists tested examples and psi ext
+example <name> prints one.
+
+A tool's execute returns text, or { text = ..., is_error = true } for a failure.
+The API follows: every function, the events and types, and the types a tool needs.
+psi help api <name> prints any other in full (psi help api psi.fs, psi help api events).

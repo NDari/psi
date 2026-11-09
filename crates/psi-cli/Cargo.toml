@@ -24,6 +24,7 @@ psi-safety = { path = "../psi-safety" }
 psi-mcp = { path = "../psi-mcp" }
 psi-lab = { path = "../psi-lab" }
 psi-ext = { path = "../psi-ext" }
+psi-ext-api = { path = "../psi-ext-api" }
 psi-session = { path = "../psi-session" }
 psi-tools = { path = "../psi-tools" }
 psi-tui = { path = "../psi-tui" }

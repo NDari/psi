@@ -147,6 +147,8 @@ enum Command {
     Help {
         #[arg(add = ArgValueCandidates::new(complete::topics))]
         topic: Option<String>,
+        /// For `psi help api`: a function, event part or type.
+        name: Option<String>,
     },
 }
 
@@ -348,10 +350,15 @@ fn run(cli: Cli) -> Result<ExitCode> {
             | Command::Update { .. }
             | Command::List),
         ) => package_command(cmd),
-        Some(Command::Help { topic }) => help_command(topic.as_deref()),
+        Some(Command::Help { topic, name }) => help_command(topic.as_deref(), name.as_deref()),
         None => {
             let cwd = std::env::current_dir().context("reading the working directory")?;
             let home = std::env::home_dir();
+            // An unset variable in `psi -p "$PROMPT"` would otherwise run
+            // as the interactive mode, with no request limit.
+            if cli.print.as_deref().is_some_and(|p| p.trim().is_empty()) {
+                bail!("psi -p got an empty prompt; give it one, or \"-\" to read it from stdin");
+            }
             let interactive = cli.print.is_none();
             let trusted = project_trusted(home.as_deref(), &cwd, interactive, cli.trust_project)?;
             let mut paths = SettingsPaths::discover(home.as_deref(), &cwd);
@@ -521,11 +528,26 @@ fn package_command(cmd: Command) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn help_command(topic: Option<&str>) -> Result<ExitCode> {
+fn help_command(topic: Option<&str>, name: Option<&str>) -> Result<ExitCode> {
     use psi_cli::help;
-    match topic {
-        None | Some("topics") => print!("{}", help::topics()),
-        Some(t) => match help::topic(t) {
+    match (topic, name) {
+        (Some("api"), None) => print!("{}", help::api_index()),
+        (Some("api"), Some(n)) => match help::api_entry(n) {
+            Ok(text) => print!("{text}"),
+            Err(e) => {
+                print!("{e}");
+                return Ok(ExitCode::FAILURE);
+            }
+        },
+        (_, Some(n)) => {
+            println!(
+                "psi help {} takes no '{n}': only psi help api takes a name.",
+                topic.unwrap_or("")
+            );
+            return Ok(ExitCode::FAILURE);
+        }
+        (None | Some("topics"), None) => print!("{}", help::topics()),
+        (Some(t), None) => match help::topic(t) {
             Some(text) => print!("{text}"),
             None => {
                 print!("no topic '{t}'. {}", help::topics());

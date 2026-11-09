@@ -157,6 +157,8 @@ struct State {
     replies: VecDeque<Reply>,
     requests: Vec<Recorded>,
     props: Value,
+    /// Answers 503 "Loading model", as llama-server does while it loads.
+    loading: bool,
 }
 
 pub struct ReplayServer {
@@ -188,6 +190,7 @@ impl ReplayServer {
                 "model_path": "replay",
                 "build_info": "replay",
             }),
+            loading: false,
         }));
         let stop = Arc::new(AtomicBool::new(false));
         let (st, sp) = (state.clone(), stop.clone());
@@ -220,6 +223,11 @@ impl ReplayServer {
 
     pub fn set_props(&self, props: Value) {
         lock(&self.state).props = props;
+    }
+
+    /// While on, every request gets llama-server's 503.
+    pub fn set_loading(&self, on: bool) {
+        lock(&self.state).loading = on;
     }
 
     pub fn port(&self) -> u16 {
@@ -308,6 +316,11 @@ fn serve(mut conn: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
             body: body.clone(),
         });
         match (method.as_str(), path.as_str()) {
+            _ if st.loading => http(
+                503,
+                "application/json",
+                br#"{"error":{"code":503,"message":"Loading model","type":"unavailable_error"}}"#,
+            ),
             ("GET", "/health") => http(200, "application/json", br#"{"status":"ok"}"#),
             ("GET", "/props") => http(200, "application/json", st.props.to_string().as_bytes()),
             ("POST", "/tokenize") => {

@@ -116,6 +116,7 @@ pub fn schema(defs: &[AgentDef]) -> ToolSchema {
             ),
         ],
         example: json!({"agent": "scout", "task": "Find where request timeouts are set and report the files and lines."}),
+        parameters: None,
     }
 }
 

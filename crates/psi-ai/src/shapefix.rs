@@ -462,6 +462,8 @@ fn rename_keys(args: &mut Map<String, Value>, tool: &ToolSchema, notes: &mut Vec
                     notes.push(format!("argument '{key}' read as '{}'", p.name));
                 }
             }
+            // The tool's own schema may allow it (MCP): its server decides.
+            None if tool.parameters.is_some() => {}
             None => {
                 args.remove(&key);
                 notes.push(format!("ignored unknown argument '{key}'"));
@@ -587,6 +589,7 @@ mod tests {
                     Param::new("limit", ParamKind::Integer, "").optional(),
                 ],
                 example: json!({"path": "src/app.py"}),
+                parameters: None,
             },
             ToolSchema {
                 name: "edit",
@@ -600,6 +603,7 @@ mod tests {
                     Param::new("intent", ParamKind::String, "").optional(),
                 ],
                 example: json!({"path": "app.py", "old_text": "x = 1", "new_text": "x = 2"}),
+                parameters: None,
             },
             ToolSchema {
                 name: "bash",
@@ -609,6 +613,7 @@ mod tests {
                     Param::new("timeout", ParamKind::Integer, "").optional(),
                 ],
                 example: json!({"command": "ls"}),
+                parameters: None,
             },
         ]
     }
@@ -738,6 +743,7 @@ mod tests {
                 Param::new("text", ParamKind::String, ""),
             ],
             example: json!({"path": "notes.md", "text": "x"}),
+            parameters: None,
         });
         let call = RawToolCall {
             id: "c".into(),

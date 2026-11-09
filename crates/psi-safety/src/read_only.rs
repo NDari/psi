@@ -149,6 +149,34 @@ pub fn last_program(command: &str) -> Option<String> {
     }
 }
 
+/// Whether the last statement in `command` runs whatever ran before it:
+/// after `;` or a newline, or the whole command, but not the right side of
+/// `&&` or `||` (`echo ---; grep x f` yes, `cd x && grep y f` no). Then the
+/// exit status bash reports is that statement's own. False when it can't
+/// be told.
+pub fn last_always_runs(command: &str) -> bool {
+    let mut parser = Parser::new();
+    if parser
+        .set_language(&tree_sitter_bash::LANGUAGE.into())
+        .is_err()
+    {
+        return false;
+    }
+    let Some(tree) = parser.parse(command, None) else {
+        return false;
+    };
+    let root = tree.root_node();
+    if error_line(root).is_some() {
+        return false;
+    }
+    let mut cursor = root.walk();
+    let last = root
+        .named_children(&mut cursor)
+        .filter(|n| n.kind() != "comment")
+        .last();
+    last.is_some_and(|n| n.kind() != "list")
+}
+
 fn script(parser: &mut Parser, src: &str, depth: usize) -> Result<(), String> {
     let tree = parser
         .parse(src, None)
@@ -868,6 +896,23 @@ mod tests {
             ("grep 'x", None),
         ] {
             assert_eq!(last_program(cmd).as_deref(), want, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn last_always_runs_after_a_semicolon_not_after_and() {
+        for (cmd, want) in [
+            ("grep x f", true),
+            ("echo ===; grep x f", true),
+            ("echo ===\ngrep x f # done", true),
+            ("cat f | grep x", true),
+            ("a && b; grep x f 2>&1", true),
+            ("cd src && grep x f", false),
+            ("echo ===; cd src && grep x f", false),
+            ("false || grep x f", false),
+            ("grep 'x", false),
+        ] {
+            assert_eq!(last_always_runs(cmd), want, "{cmd}");
         }
     }
 }

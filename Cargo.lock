@@ -1535,6 +1535,7 @@ dependencies = [
  "psi-agent",
  "psi-ai",
  "psi-ext",
+ "psi-ext-api",
  "psi-lab",
  "psi-mcp",
  "psi-safety",

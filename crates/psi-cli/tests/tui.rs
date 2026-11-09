@@ -1424,6 +1424,29 @@ fn starts_without_a_model_server_and_connects_when_it_is_up() {
 }
 
 #[test]
+fn a_server_still_loading_its_model_is_waited_for() {
+    // llama-server answers 503 while it loads a big model; taking that for
+    // "up" gave the session the 32K fallback window.
+    let server = psi_ai::replay::ReplayServer::start(vec![]).unwrap();
+    server.set_loading(true);
+    server.set_n_ctx(65_536);
+    let url = server.base_url();
+    let (t, _unused) = Tui::start(vec![], move |p| {
+        let models = json!({"models": [{"id": "local", "base_url": url, "max_output": 256}]});
+        std::fs::write(
+            p.parent().unwrap().join("home/.psi/models.jsonc"),
+            models.to_string(),
+        )
+        .unwrap();
+    });
+    t.wait_for("no model server at http://127.0.0.1", SLOW);
+    server.set_loading(false);
+    t.wait_for("connected to the model server", SLOW);
+    t.wait_screen("of 64K", SLOW);
+    t.quit();
+}
+
+#[test]
 fn the_input_box_is_pinned_to_the_bottom() {
     let (mut t, _s) = Tui::start(
         vec![call("read", json!({"path": "a.txt"})), text("ok")],

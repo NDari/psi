@@ -40,6 +40,7 @@ pub(crate) fn schema() -> ToolSchema {
             Param::new("intent", ParamKind::String, "Optional: one line on why").optional(),
         ],
         example: json!({"command": "python3 -m unittest"}),
+        parameters: None,
     }
 }
 
@@ -72,7 +73,7 @@ pub async fn run(args: Map<String, Value>, ctx: &ToolCtx, outside: bool) -> Tool
     quiet_answer(&command, out)
 }
 
-/// Programs whose exit code 1 with no output is an answer, not a failure.
+/// Programs whose exit code 1 is an answer, not a failure.
 const QUIET_ANSWERS: &[(&str, &str)] = &[
     ("grep", "no line matched"),
     ("egrep", "no line matched"),
@@ -86,16 +87,23 @@ const QUIET_ANSWERS: &[(&str, &str)] = &[
 /// A search that found nothing says so and isn't a failed call: in the
 /// cog trial 98 of a scout's 125 "failed" calls were greps that matched
 /// nothing ("(no output) [exit code 1]"), and the error-streak guard
-/// counted them until it paused the run.
+/// counted them until it paused the run. After other output too, when the
+/// search always runs last (`echo ===; grep x f`): two cog runs repeated
+/// such a grep, seeing only "===" and "[exit code 1]". After `&&` the 1 may
+/// be an earlier command's, so only an empty result counts there.
 fn quiet_answer(command: &str, out: ToolOutput) -> ToolOutput {
-    if !(out.is_error && out.text == "(no output)\n[exit code 1]") {
+    const MARK: &str = "\n[exit code 1]";
+    let Some(before) = out.text.strip_suffix(MARK).filter(|_| out.is_error) else {
+        return out;
+    };
+    if before != "(no output)" && !psi_safety::read_only::last_always_runs(command) {
         return out;
     }
     let Some(prog) = psi_safety::read_only::last_program(command) else {
         return out;
     };
     match QUIET_ANSWERS.iter().find(|(p, _)| *p == prog) {
-        Some((p, what)) => ToolOutput::ok(format!("(no output)\n[exit code 1: {p} says {what}]")),
+        Some((p, what)) => ToolOutput::ok(format!("{before}\n[exit code 1: {p} says {what}]")),
         None => out,
     }
 }
@@ -567,8 +575,17 @@ mod tests {
         assert_eq!(run("cd . && grep -n zzz a.txt").await, nothing);
         assert_eq!(run("cat a.txt | grep zzz").await, nothing);
         assert_eq!(run("timeout 5 grep zzz a.txt").await, nothing);
+        // After other output, when the search runs whatever came before.
+        assert_eq!(
+            run("echo ===; grep zzz a.txt").await,
+            ToolOutput::ok("===\n[exit code 1: grep says no line matched]")
+        );
+        // After `&&` the 1 may be the earlier command's.
+        assert!(run("echo ===; false && grep zzz a.txt").await.is_error);
+        assert!(run("echo === && grep zzz a.txt").await.is_error);
         // A real failure stays one: an error message, or another program.
         assert!(run("grep zzz missing.txt").await.is_error);
+        assert!(run("echo ===; grep zzz missing.txt").await.is_error);
         assert_eq!(
             run("false").await,
             ToolOutput::err("(no output)\n[exit code 1]")

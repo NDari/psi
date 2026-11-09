@@ -141,7 +141,7 @@ Known issues already in `known-issues.md` are left out.
   - the retries fail, and the session stays inflated.
 - **Fix:** run it over `branch[keep_from..]`, sized from what is sent.
 
-**C2. Medium, read. After "go on" at the tool-call limit, every later call is refused.**
+**C2. Medium, read. Fixed 2026-11-06. After "go on" at the tool-call limit, every later call is refused.**
 - **Where:** `run.rs:1132-1136` computes the allowance from `cfg.budgets.max_tool_calls`, not the raised `call_limit` (`run.rs:985`). The refusal text at `:1447` uses the old limit too.
 - **Effect:** after 200 calls and a "go on", calls 201 to 400 all get "Not run" and feed the error streak.
 - **Tests:** none cover going on past the call limit.
@@ -156,7 +156,7 @@ Known issues already in `known-issues.md` are left out.
   - the host only looks at `block` (`psi-ext/src/lib.rs:319,372`).
 - **Tests:** the scenario test passes because it returns `block`.
 
-**C5. Medium, read. `/compact <focus>` drops the focus on the normal path.**
+**C5. Medium, read. Fixed 2026-11-06. `/compact <focus>` drops the focus on the normal path.**
 - **Where:** `psi-agent/src/run/fit.rs:332-391`. The focus is added only to the plain fallback, not to the request that extends the last one.
 - **Tests:** the only test has no prior request, so it takes the fallback.
 
@@ -177,7 +177,7 @@ Known issues already in `known-issues.md` are left out.
 - **Where it hits:** the usual Python `pkg/pkg/` layout, and the `multi_split_package` task.
 - **Fix:** when the stripped rest has no directory part, refuse only if the fixed path exists.
 
-**C9. High, plausible. MCP schemas lose `$defs`, and arguments outside top-level properties are dropped.**
+**C9. High, plausible. Fixed 2026-11-06 (an MCP tool sends its whole cleaned schema and keeps keys outside its properties; llama.cpp's converter fails on an unresolved `$ref`, read in its source, not run). MCP schemas lose `$defs`, and arguments outside top-level properties are dropped.**
 - **`$defs`:** `psi-ai/src/schema.rs:86-121` rebuilds `parameters` from the top-level properties, so a `$ref` points at `$defs` that are never sent. Pydantic and FastMCP servers do this.
   - **Plausible effect** (llama.cpp's grammar builder, unverified): every request fails while that tool is listed.
 - **Dropped arguments:** `shapefix.rs:465` removes every key not in the top-level properties, so tools using `additionalProperties`, a bare object or a top-level `anyOf` get `{}`. The note goes only to a hidden entry.
@@ -188,7 +188,7 @@ Known issues already in `known-issues.md` are left out.
 - **Effect:** the pipe closes, so the server's next stderr write gets EPIPE; Rust servers using `eprintln!` panic.
 - **Fix:** read bytes and decode them lossily.
 
-**C11. Medium, plausible. Connecting while llama-server loads uses a 32K fallback window.**
+**C11. Medium, plausible. Fixed 2026-11-06 (a 503 counts as not up yet, in the TUI). Connecting while llama-server loads uses a 32K fallback window.**
 - **Where:** `interactive/mod.rs:195-205`, `run_mode.rs:503`. Only a connection error keeps the poll going; an HTTP 503 ("Loading model") counts as connected with no props.
 - **Effect:** a 27B/35B loads long enough to hit this, giving early compaction and smaller caps for the whole session.
 
@@ -205,7 +205,7 @@ Known issues already in `known-issues.md` are left out.
 - **Trigger:** `head -c 40000 /dev/zero | tr '\0' a` returns `[... 1 lines omitted ...]`. Minified JSON and `curl` output come back the same.
 - **Fix:** cut long lines first.
 
-**C14. Medium, reproduced. `psi -p ""` runs as interactive mode.**
+**C14. Medium, reproduced. Fixed 2026-11-06 (refused, as is an empty prompt from stdin). `psi -p ""` runs as interactive mode.**
 - **Where:** `run_mode.rs:243-249` derives the mode from an empty prompt.
 - **Trigger:** `psi -p "$PROMPT"` with the variable unset runs with no request cap and no server check.
 
@@ -235,7 +235,7 @@ Known issues already in `known-issues.md` are left out.
 
 ## Performance
 
-**P1. High, reproduced. A streaming code block is re-highlighted whole on every frame.**
+**P1. High, reproduced. Fixed 2026-11-06 (an open fence renders from its last 46 lines: about 2.4 ms a frame at any length, release). A streaming code block is re-highlighted whole on every frame.**
 - **Where:** `ui.rs:2307-2311` calls `render_block` on the whole pending block every 16 ms, then shows its last 6 lines. An open fence stays pending until it closes (`markdown.rs:104-111`).
 - **Measured (release):** 500 lines 70 ms per frame, 1000 lines 139 ms. Past about 110 lines it misses §11.3's 16 ms target, so typing lags while the model writes a file in a fence.
 - **Fix:** render only the tail, or keep the highlighter's state between frames.
@@ -291,11 +291,11 @@ Known issues already in `known-issues.md` are left out.
 ## Test gaps
 
 No test covers:
-- **Policy and context:** a read-only MCP tool with `approval: "ask"`; going past the call limit; `/compact <focus>` with a prior request.
+- **Policy and context:** a read-only MCP tool with `approval: "ask"`.
 - **TUI:** an ExecutePlan error.
 - **Trust:** a trust snapshot with `.ignore` or a symlink; `psi update` on an untrusted project; git argument injection.
 - **Shell checks:** options after operands in `read_only`; a double-quoted `sh -c` in always-ask.
-- **Schemas and paths:** an MCP `$ref` schema; the same-named-package path in shapefix.
+- **Schemas and paths:** the same-named-package path in shapefix.
 - **Files and logs:** a cut line in the wire log or mid-session.
 - **Output:** control characters in `psi inspect`.
 

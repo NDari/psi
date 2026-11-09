@@ -1129,12 +1129,9 @@ impl Agent {
                 continue;
             }
 
-            let allowed = self
-                .cfg
-                .budgets
-                .max_tool_calls
-                .saturating_sub(out.tool_calls) as usize;
-            let (n, pause) = self.run_calls(&resp, &mut guards, allowed).await?;
+            let (n, pause) = self
+                .run_calls(&resp, &mut guards, out.tool_calls, call_limit)
+                .await?;
             out.tool_calls += n;
             self.emit(AgentEvent::TurnEnd { turn });
             self.ext_notify("turn_end", json!({"turn": turn})).await;
@@ -1379,8 +1376,10 @@ impl Agent {
         &mut self,
         resp: &Response,
         guards: &mut Guards,
-        allowed: usize,
+        used: u32,
+        call_limit: u32,
     ) -> Result<(u32, Option<String>), String> {
+        let allowed = call_limit.saturating_sub(used) as usize;
         let truncated = resp.finish == FinishReason::Length;
         let n = resp.tool_calls.len();
         let mut planned: Vec<(RawToolCall, Planned)> = Vec::new();
@@ -1444,8 +1443,7 @@ impl Agent {
             // Past the budget: not run, though the response asked for it.
             let fixed = if i >= allowed {
                 Err(format!(
-                    "Not run: this run reached its limit of {} tool calls. Say in your answer what is left to do.",
-                    self.cfg.budgets.max_tool_calls
+                    "Not run: this run reached its limit of {call_limit} tool calls. Say in your answer what is left to do."
                 ))
             } else {
                 fixed

@@ -394,6 +394,37 @@ async fn file_tools_ask_for_psi_config_and_unrecoverable_paths() {
 }
 
 #[tokio::test]
+async fn going_on_at_the_tool_call_limit_runs_the_next_calls() {
+    let fx = Fx::new();
+    let ls = || call("bash", json!({"command": "true"}));
+    let server = ReplayServer::start(vec![ls(), ls(), ls(), text("done")]).unwrap();
+    let approver = Arc::new(Scripted::default());
+    approver.go_on.lock().unwrap().push_back(true);
+    let budgets = Budgets {
+        max_tool_calls: 2,
+        ..Budgets::default()
+    };
+    let mut a = fx.agent_with(
+        &server,
+        fx.session(),
+        fx.safety(approver.clone(), None),
+        false,
+        budgets,
+    );
+    let out = a.run("go").await;
+    assert_eq!(out.stop, Stop::Done, "{:?}", out.stop);
+    assert_eq!(out.tool_calls, 3);
+    let pauses = approver.pauses.lock().unwrap().clone();
+    assert_eq!(pauses.len(), 1, "{pauses:?}");
+    assert!(pauses[0].contains("limit of 2 tool calls"), "{pauses:?}");
+    let refused = a.session().entries().iter().any(|e| {
+        matches!(&e.body, EntryBody::ToolResult { content, .. }
+            if psi_session::text_of(content).starts_with("Not run"))
+    });
+    assert!(!refused, "a call after going on was refused");
+}
+
+#[tokio::test]
 async fn a_budget_pauses_in_the_tui_and_going_on_gives_as_much_again() {
     // §5: hitting a budget pauses and asks; headless runs stop (2026-11-03:
     // a long cog run ended at 40 requests instead).

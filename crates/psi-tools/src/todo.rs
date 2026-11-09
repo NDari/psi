@@ -80,6 +80,7 @@ pub(crate) fn schema() -> ToolSchema {
             Param::new("text", ParamKind::String, "The item, for add").optional(),
         ],
         example: json!({"action": "add", "text": "write the tests"}),
+        parameters: None,
     }
 }
 

@@ -269,3 +269,50 @@ async fn a_server_that_is_gone_says_so() {
         "{r:?}"
     );
 }
+
+#[tokio::test]
+async fn a_schema_with_defs_and_extra_keys_is_sent_and_kept_whole() {
+    // Pydantic and FastMCP servers put nested models in `$defs`; rebuilt from
+    // the top-level properties, the `$ref` pointed at nothing (llama-server
+    // can't build a grammar from it), and keys outside them were dropped.
+    let fx = Fx::new(vec![
+        call(
+            "mcp__gh__create",
+            json!({"issue": {"title": "crash"}, "extra": 1}),
+        ),
+        text("Created."),
+    ]);
+    fx.approver
+        .approvals
+        .lock()
+        .unwrap()
+        .push_back(Approval::Once);
+    let tools = json!([{"name": "create", "description": "Creates an issue.",
+        "inputSchema": {"type": "object",
+            "properties": {"issue": {"$ref": "#/$defs/Issue"}},
+            "required": ["issue"],
+            "additionalProperties": true,
+            "$defs": {"Issue": {"type": "object", "properties": {"title": {"type": "string"}}}}}}]);
+    let echo = |_: &str, args: &Map<String, Value>| json!({"content": [{"type": "text", "text": Value::Object(args.clone()).to_string()}]});
+    let mcp = fake_manager(config("gh"), tools, Arc::new(echo)).await;
+    let mut a = fx.agent(mcp);
+    assert_eq!(a.run("file it").await.stop, Stop::Done);
+    let reqs = fx.server.chat_requests();
+    let declared = reqs[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["function"]["name"] == "mcp__gh__create")
+        .unwrap()
+        .clone();
+    let params = &declared["function"]["parameters"];
+    let target = params["properties"]["issue"]["$ref"].as_str().unwrap();
+    assert_eq!(
+        params.pointer(&target[1..]).unwrap()["properties"]["title"]["type"],
+        "string"
+    );
+    assert_eq!(params["additionalProperties"], true);
+    let r = results(&a);
+    let sent: Value = serde_json::from_str(&r[0].0).unwrap();
+    assert_eq!(sent, json!({"issue": {"title": "crash"}, "extra": 1}));
+}

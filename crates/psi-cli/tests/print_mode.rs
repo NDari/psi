@@ -623,6 +623,21 @@ fn the_prompt_can_come_from_stdin() {
 }
 
 #[test]
+fn an_empty_prompt_is_refused() {
+    let server = ReplayServer::start(vec![text("x")]).unwrap();
+    let e = env_for(&server);
+    let out = psi(&e, &["-p", ""]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("psi -p got an empty prompt"), "{err}");
+    let out = psi(&e, &["-p", "-"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("the prompt from stdin was empty"), "{err}");
+    assert!(server.chat_requests().is_empty());
+}
+
+#[test]
 fn a_failure_mid_run_says_why_and_exits_1() {
     let server = ReplayServer::start(vec![
         Reply::Chat(ScriptedReply::call("bash", json!({"command": "true"}))),

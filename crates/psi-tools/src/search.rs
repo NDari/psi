@@ -47,6 +47,7 @@ pub(crate) fn grep_schema() -> ToolSchema {
             .optional(),
         ],
         example: json!({"pattern": "def parse_", "glob": "*.py"}),
+        parameters: None,
     }
 }
 
@@ -71,6 +72,7 @@ pub(crate) fn find_schema() -> ToolSchema {
             .optional(),
         ],
         example: json!({"pattern": "**/test_*.py"}),
+        parameters: None,
     }
 }
 
@@ -88,6 +90,7 @@ pub(crate) fn ls_schema() -> ToolSchema {
             .optional(),
         ],
         example: json!({"path": "src"}),
+        parameters: None,
     }
 }
 

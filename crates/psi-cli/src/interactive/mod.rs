@@ -192,7 +192,7 @@ async fn wait_for_server(
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         let props = client.props().await;
-        if matches!(props, Err(psi_ai::AiError::Connect { .. })) {
+        if crate::run_mode::not_up(&props) {
             continue;
         }
         let msg = match crate::run_mode::server_facts(&profile, props, true) {

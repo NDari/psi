@@ -177,7 +177,7 @@ Helpers: `test.case(name, fn)`, `test.emit(event, payload)` (returns
 `{ payload, results, blocked }`), `test.tool(name, args)`,
 `test.command(name, args)`, `test.shortcut(key)`,
 `test.render(tool, call, width)`, `test.mock_tool(name, result)` for
-`execute_tool`, `test.requests(kind)` (everything the extension asked of
+`execute_tool` (result: text, or `{ text = ..., is_error = true }`), `test.requests(kind)` (everything the extension asked of
 psi), `test.clear()`, `test.set_entries({{type, data}, ...})`,
 `test.set_flag(name, value)` (as `--ext-flag name=value`: a string),
 `test.providers()` (what `psi.register_provider` registered),

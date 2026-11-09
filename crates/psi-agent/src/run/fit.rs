@@ -369,11 +369,9 @@ impl Agent {
         let mut done = None;
         if fallback.is_none() {
             let mut r = req;
-            r.messages.push(ChatMessage::User(summary_instruction(
-                after_summary,
-                words,
-                set.summary,
-            )));
+            r.messages.push(ChatMessage::User(
+                summary_instruction(after_summary, words, set.summary) + &focus_text,
+            ));
             match self.summary_request(&r).await {
                 Ok(resp) => match check_summary(&resp) {
                     Ok(s) => done = Some(("extend", s, resp)),

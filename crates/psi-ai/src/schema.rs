@@ -79,11 +79,23 @@ pub struct ToolSchema {
     pub params: Vec<Param>,
     /// One correct call, shown when a call is refused.
     pub example: Value,
+    /// The whole parameters schema, sent instead of one built from
+    /// `params` (MCP tools: `$defs`, `additionalProperties` and a top-level
+    /// `anyOf` don't fit the flat model). Arguments outside `params` are
+    /// then kept, since the schema may allow them.
+    pub parameters: Option<&'static Value>,
 }
 
 impl ToolSchema {
     /// The `tools` entry for a chat request.
     pub fn to_openai(&self) -> Value {
+        if let Some(parameters) = self.parameters {
+            return json!({"type": "function", "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": parameters,
+            }});
+        }
         let mut props = Map::new();
         for p in &self.params {
             if let Some(s) = p.schema {

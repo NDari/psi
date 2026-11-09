@@ -84,6 +84,7 @@ pub fn schema_of(info: &ToolInfo) -> ToolSchema {
         description: info.description.clone(),
         params,
         example: Value::Object(example),
+        parameters: None,
     }
 }
 

@@ -263,6 +263,34 @@ pub fn render_block(block: &str, width: usize) -> Vec<Line> {
     out
 }
 
+/// Code lines before the shown ones that a streaming fence is highlighted
+/// with, so a construct opened just above (a string, a comment) still colors.
+const TAIL_CONTEXT: usize = 40;
+
+/// The last `n` lines of [`render_block`], for a block still streaming. An
+/// open fence is rendered from its fence line and its last lines only, so
+/// the cost of a frame doesn't grow with the code (§11.3: a 500-line block
+/// took 70 ms a frame). The whole block is rendered once it is committed.
+pub fn render_tail(block: &str, width: usize, n: usize) -> Vec<Line> {
+    let window = n + TAIL_CONTEXT;
+    let (first, rest) = block.split_once('\n').unwrap_or((block, ""));
+    let open = fence_open(first).filter(|&f| !rest.split('\n').any(|l| fence_close(l, f)));
+    let lines = match open {
+        Some(_) if rest.split('\n').nth(window).is_some() => {
+            let tail: Vec<&str> = rest.rsplit('\n').take(window).collect();
+            let mut s = first.to_owned();
+            for l in tail.iter().rev() {
+                s.push('\n');
+                s.push_str(l);
+            }
+            render_block(&s, width)
+        }
+        _ => render_block(block, width),
+    };
+    let keep = lines.len().saturating_sub(n);
+    lines.into_iter().skip(keep).collect()
+}
+
 /// Code as written, colored when its tag names a known language (§11.5).
 fn code_lines(tag: &str, code: &[&str]) -> Vec<Line> {
     if !tag.is_empty()
@@ -729,6 +757,39 @@ mod tests {
 
     fn plain(lines: &[Line]) -> Vec<String> {
         lines.iter().map(Line::plain).collect()
+    }
+
+    #[test]
+    fn a_streaming_fence_tail_matches_the_whole_render() {
+        let last6 = |block: &str| {
+            let all = render_block(block, 80);
+            all[all.len().saturating_sub(6)..].to_vec()
+        };
+        let code: String = (0..1000)
+            .map(|i| format!("    let x{i} = {i};\n"))
+            .collect();
+        for block in [
+            format!("```rust\n{code}    let partial"),
+            format!("```\n{code}"),
+            "```rust\nfn a() {}\n".to_owned(),
+            format!("```rust\n{code}```"),
+            "Some *prose* that is\nstill streaming".to_owned(),
+        ] {
+            assert_eq!(
+                render_tail(&block, 80, 6),
+                last6(&block),
+                "{}",
+                &block[..20]
+            );
+        }
+        assert_eq!(
+            plain(&render_tail(
+                &format!("```rust\n{code}    let partial"),
+                80,
+                2
+            )),
+            ["    let x999 = 999;", "    let partial"]
+        );
     }
 
     #[test]

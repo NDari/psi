@@ -153,17 +153,23 @@ impl Backend for FakeBackend {
                 record(self, json!({"kind": "emit", "name": name, "data": data}))
             }
             Request::Exec { call, reply } => {
+                let stdin = call
+                    .stdin
+                    .as_ref()
+                    .map(|b| String::from_utf8_lossy(b).into_owned());
+                let env: serde_json::Map<String, Json> = call
+                    .env
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Json::String(v.clone())))
+                    .collect();
                 record(
                     self,
-                    json!({"kind": "exec", "argv": call.argv, "cwd": call.cwd}),
+                    json!({"kind": "exec", "argv": call.argv, "cwd": call.cwd,
+                           "stdin": stdin, "env": (!env.is_empty()).then_some(env),
+                           "timeout_ms": call.timeout.as_millis() as u64}),
                 );
                 let out = match self.answer("exec") {
-                    Some(v) => Ok(crate::host::ExecOutput {
-                        code: Some(v["code"].as_i64().unwrap_or(0) as i32),
-                        stdout: v["stdout"].as_str().unwrap_or("").as_bytes().to_vec(),
-                        stderr: v["stderr"].as_str().unwrap_or("").as_bytes().to_vec(),
-                        ..Default::default()
-                    }),
+                    Some(v) => Ok(exec_answer(&v)),
                     None => Err(format!(
                         "test: no answer for {} (use test.ui.answer(\"exec\", {{ code = 0, stdout = \"...\" }}))",
                         call.argv.join(" ")
@@ -604,6 +610,14 @@ fn install(
                     answer_shape(&kind)
                 ))
             })?;
+            if kind == "exec"
+                && let Err(e) = check_exec_answer(&v)
+            {
+                return Err(mlua::Error::runtime(format!(
+                    "test.ui.answer(\"exec\", ...): {e}; {}",
+                    answer_shape("exec")
+                )));
+            }
             f.0.borrow_mut()
                 .answers
                 .entry(kind)
@@ -616,15 +630,34 @@ fn install(
     let f = fake.clone();
     t.set(
         "mock_tool",
-        lua.create_function(move |lua, (name, result): (String, Value)| {
-            let r: Json = lua.from_value(result).map_err(|e| {
-                mlua::Error::runtime(format!(
-                    "test.mock_tool({name:?}, ...): the result must be a string or a plain table ({e})"
-                ))
-            })?;
-            f.0.borrow_mut().tools.insert(name, r);
-            Ok(())
-        })?,
+        lua.create_function(
+            move |lua, (name, result, rest): (String, Value, mlua::Variadic<Value>)| {
+                // Lua drops extra arguments silently: a cog run passed `true`
+                // for a failure, never got one, and probed it 85 times.
+                const SHAPE: &str = "takes (name, result), result a string or { text = ..., is_error = true }";
+                if !rest.is_empty() {
+                    return Err(mlua::Error::runtime(format!(
+                        "test.mock_tool({name:?}, ...) {SHAPE}; it got {} arguments",
+                        2 + rest.len()
+                    )));
+                }
+                let r: Json = lua.from_value(result).map_err(|e| {
+                    mlua::Error::runtime(format!(
+                        "test.mock_tool({name:?}, ...): the result must be a string or a plain table ({e})"
+                    ))
+                })?;
+                if let Some(k) = r
+                    .as_object()
+                    .and_then(|o| o.keys().find(|k| *k != "text" && *k != "is_error"))
+                {
+                    return Err(mlua::Error::runtime(format!(
+                        "test.mock_tool({name:?}, ...) {SHAPE}; the result has a field '{k}'"
+                    )));
+                }
+                f.0.borrow_mut().tools.insert(name, r);
+                Ok(())
+            },
+        )?,
     )?;
     let f = fake.clone();
     t.set(
@@ -706,11 +739,57 @@ fn install(
 }
 
 /// What `test.ui.answer` takes for each kind, for its error message.
+/// The fields an exec answer may have: ExecResult's (`ok` follows from
+/// `code`, and is accepted when it agrees).
+const EXEC_FIELDS: &[&str] = &["code", "ok", "stdout", "stderr", "killed", "truncated"];
+
+/// What a queued exec answer is unless it is wrong for one: why, naming
+/// the field. A cog run's tests passed `code = nil, killed = true` and got
+/// a clean exit, since the fake read only code, stdout and stderr.
+fn check_exec_answer(v: &Json) -> Result<(), String> {
+    let Some(o) = v.as_object() else {
+        return Err("the answer must be a table".into());
+    };
+    if let Some(k) = o.keys().find(|k| !EXEC_FIELDS.contains(&k.as_str())) {
+        return Err(format!(
+            "the answer has a field '{k}'; ExecResult's are {}",
+            EXEC_FIELDS.join(", ")
+        ));
+    }
+    if let (Some(code), Some(ok)) = (o.get("code"), o.get("ok").and_then(Json::as_bool))
+        && (code.as_i64() == Some(0)) != ok
+    {
+        return Err(format!("ok = {ok} disagrees with code = {code}"));
+    }
+    Ok(())
+}
+
+/// A queued exec answer as psi.exec's result. No `code` means 0, or 1 with
+/// `ok = false`, or none (stopped) with `killed = true`, as the real one.
+fn exec_answer(v: &Json) -> crate::host::ExecOutput {
+    let killed = v["killed"].as_bool().unwrap_or(false);
+    let code = match v["code"].as_i64() {
+        Some(c) => Some(c as i32),
+        None if killed => None,
+        None if v["ok"].as_bool() == Some(false) => Some(1),
+        None => Some(0),
+    };
+    crate::host::ExecOutput {
+        code,
+        stdout: v["stdout"].as_str().unwrap_or("").as_bytes().to_vec(),
+        stderr: v["stderr"].as_str().unwrap_or("").as_bytes().to_vec(),
+        killed,
+        truncated: v["truncated"].as_bool().unwrap_or(false),
+    }
+}
+
 fn answer_shape(kind: &str) -> &'static str {
     match kind {
         "confirm" => "pass true or false",
         "select" | "input" => "pass a string",
-        "exec" => "pass a table like { code = 0, stdout = \"...\", stderr = \"\" }",
+        "exec" => {
+            "pass a table like { code = 0, stdout = \"...\", stderr = \"\" }, or { killed = true } for a stopped run"
+        }
         "http" => "pass a table like { status = 200, body = \"...\" }",
         _ => "pass a string, number, boolean or table of those, not a function",
     }
@@ -911,6 +990,95 @@ mod tests {
             text.contains("test: no answer for git branch --show-current"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn exec_answers_keep_every_field_and_calls_record_their_input() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("init.lua"),
+            r#"return { name = "e", version = "1", description = "d", setup = function(psi)
+                 psi.register_command("run", { description = "r", handler = function()
+                   local r = psi.exec({ "go", "run", "." }, { stdin = "1 2 +", env = { A = "b" }, timeout_ms = 5000 })
+                   psi.ui.notify(tostring(r.code) .. " " .. tostring(r.ok) .. " "
+                     .. tostring(r.killed) .. " " .. tostring(r.truncated))
+                 end })
+               end }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            d.path().join("e_test.lua"),
+            r#"
+            local function run(answer)
+              test.clear()
+              test.ui.answer("exec", answer)
+              test.command("/run", "")
+              return test.requests("notify")[1].message
+            end
+            test.case("fields", function()
+              test.eq(run({ killed = true }), "nil false true false")
+              test.eq(run({ code = 2, truncated = true }), "2 false false true")
+              test.eq(run({ ok = false }), "1 false false false")
+              test.eq(run({ ok = true, stdout = "x" }), "0 true false false")
+              local call = test.requests("exec")[1]
+              test.eq(call.stdin, "1 2 +")
+              test.eq(call.env, { A = "b" })
+              test.eq(call.timeout_ms, 5000)
+            end)
+            test.case("an unknown field", function() test.ui.answer("exec", { exit = 1 }) end)
+            test.case("ok against code", function() test.ui.answer("exec", { code = 1, ok = true }) end)
+            "#,
+        )
+        .unwrap();
+        let r = run(d.path());
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert!(r.cases[0].error.is_none(), "{}", r.render(true));
+        let field = r.cases[1].error.as_deref().unwrap();
+        assert!(field.contains("the answer has a field 'exit'"), "{field}");
+        let ok = r.cases[2].error.as_deref().unwrap();
+        assert!(ok.contains("ok = true disagrees with code = 1"), "{ok}");
+    }
+
+    #[test]
+    fn mock_tool_refuses_what_it_would_ignore() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("init.lua"),
+            r#"return { name = "k", version = "1", description = "d", setup = function(psi)
+                 psi.register_command("run", { description = "r", handler = function(_, ctx)
+                   local r = ctx.execute_tool("bash", { command = "x" })
+                   psi.ui.notify(r.text .. tostring(r.is_error))
+                 end })
+               end }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            d.path().join("k_test.lua"),
+            r#"
+            test.case("a failure as a table", function()
+              test.mock_tool("bash", { text = "boom", is_error = true })
+              test.command("/run", "")
+              test.eq(test.requests("notify")[1].message, "boomtrue")
+            end)
+            test.case("a third argument", function()
+              test.mock_tool("bash", "boom", true)
+            end)
+            test.case("an unknown field", function()
+              test.mock_tool("bash", { text = "boom", error = true })
+            end)
+            "#,
+        )
+        .unwrap();
+        let r = run(d.path());
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert!(r.cases[0].error.is_none(), "{}", r.render(true));
+        let third = r.cases[1].error.as_deref().unwrap();
+        assert!(
+            third.contains("is_error = true }; it got 3 arguments"),
+            "{third}"
+        );
+        let field = r.cases[2].error.as_deref().unwrap();
+        assert!(field.contains("the result has a field 'error'"), "{field}");
     }
 
     #[test]

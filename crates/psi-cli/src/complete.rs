@@ -21,9 +21,12 @@ fn candidate(value: impl Into<OsString>, help: &str) -> CompletionCandidate {
 
 /// `psi help <topic>`.
 pub fn topics() -> Vec<CompletionCandidate> {
-    psi_cli::help::TOPICS
-        .iter()
-        .map(|(name, text)| candidate(*name, text.lines().next().unwrap_or("")))
+    std::iter::once(candidate("api", psi_cli::help::API_SUMMARY))
+        .chain(
+            psi_cli::help::TOPICS
+                .iter()
+                .map(|(name, text)| candidate(name, text.lines().next().unwrap_or(""))),
+        )
         .collect()
 }
 
