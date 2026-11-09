@@ -22,7 +22,8 @@ yourself and gives its output to the model (!!cmd keeps it out). Rebind keys in
 ~/.psi/keybindings.json (psi help keybindings).
 
 Status line: context used (yellow from 70%, red from 90%), tok/s, prompt read speed,
-cache reuse, time to first token; the spinner shows llama-server reading a long prompt.
+cache reuse, time to first token; the spinner shows llama-server reading a long prompt,
+and says when the model is thinking or writing a tool call, with a size that grows.
 File paths and links are clickable (OSC 8; tmux 3.4+: terminal-features ',*:hyperlinks').
 Shell completion: in fish, COMPLETE=fish psi | source in config.fish (bash, zsh: the same
 with COMPLETE=bash or zsh).

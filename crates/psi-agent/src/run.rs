@@ -26,6 +26,7 @@ use crate::approval::{
 use crate::compact::CompactionSettings;
 use crate::events::AgentEvent;
 use crate::ext::{Callable, decide, invoke, schema_of, tool_runner};
+use crate::generating::Generating;
 use crate::guards::{GuardAction, Guards};
 use crate::messages::{build_messages, plan_drop};
 use crate::plan::{self, PlanState};
@@ -1239,29 +1240,40 @@ impl Agent {
             tx
         });
         let events = self.events.clone();
-        let mut on_delta = move |d: Delta| match d {
-            Delta::Text(t) => {
-                if let Some(u) = &updates {
-                    let _ = u.send(t.clone());
-                }
-                if let Some(tx) = &events {
-                    let _ = tx.send(AgentEvent::TextDelta { text: t });
-                }
+        // Thinking and tool-call arguments, as sizes; a retry counts again
+        // from nothing.
+        let generating = Arc::new(Mutex::new(Generating::default()));
+        let counts = generating.clone();
+        let mut on_delta = move |d: Delta| {
+            if let (Some(tx), Ok(mut g)) = (&events, counts.lock())
+                && let Some(ev) = g.on(&d)
+            {
+                let _ = tx.send(ev);
             }
-            Delta::PromptProgress {
-                total,
-                cache,
-                processed,
-            } => {
-                if let Some(tx) = &events {
-                    let _ = tx.send(AgentEvent::PromptProgress {
-                        total,
-                        cache,
-                        processed,
-                    });
+            match d {
+                Delta::Text(t) => {
+                    if let Some(u) = &updates {
+                        let _ = u.send(t.clone());
+                    }
+                    if let Some(tx) = &events {
+                        let _ = tx.send(AgentEvent::TextDelta { text: t });
+                    }
                 }
+                Delta::PromptProgress {
+                    total,
+                    cache,
+                    processed,
+                } => {
+                    if let Some(tx) = &events {
+                        let _ = tx.send(AgentEvent::PromptProgress {
+                            total,
+                            cache,
+                            processed,
+                        });
+                    }
+                }
+                _ => {}
             }
-            _ => {}
         };
         let mut retried = false;
         loop {
@@ -1287,6 +1299,9 @@ impl Agent {
                 other => return other,
             }
             retried = true;
+            if let Ok(mut g) = generating.lock() {
+                *g = Generating::default();
+            }
             tokio::select! {
                 () = tokio::time::sleep(RETRY_DELAY) => {}
                 () = self.ctx.cancel.cancelled() => return Err(AiError::Aborted),
@@ -1594,9 +1609,14 @@ impl Agent {
         if let Some(action) = guards.on_turn_end(self.turn_changed || wrote)
             && let (Some((call, _)), Some(o)) = (planned.last(), outputs.last_mut())
         {
-            if let GuardAction::Nudge { text, .. } = &action {
-                o.text.push('\n');
-                o.text.push_str(text);
+            match &action {
+                GuardAction::Nudge { text, .. } => {
+                    o.text.push('\n');
+                    o.text.push_str(text);
+                }
+                GuardAction::Pause { reason, .. } => {
+                    pause.get_or_insert(reason.clone());
+                }
             }
             fired.push((call.id.clone(), action));
         }

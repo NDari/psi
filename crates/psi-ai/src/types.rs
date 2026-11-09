@@ -157,6 +157,11 @@ pub enum Delta {
         index: usize,
         name: String,
     },
+    /// The next piece of a tool call's arguments, as JSON text.
+    ToolCallArgs {
+        index: usize,
+        text: String,
+    },
     /// llama-server reading the prompt (`return_progress`): tokens done of
     /// `total`, `cache` of them reused.
     PromptProgress {

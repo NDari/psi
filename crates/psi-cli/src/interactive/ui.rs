@@ -172,6 +172,9 @@ struct Running {
     progress: Option<(u64, u64, u64)>,
     /// A summary being written: when it started and the tokens it covers.
     compacting: Option<(Instant, u64)>,
+    /// The model is thinking or writing a tool call: nothing of it shows
+    /// until the response ends, so the spinner says so.
+    generating: Option<view::Generating>,
     /// Started by /compact, not a prompt: its reply ends it.
     compact_only: bool,
 }
@@ -183,6 +186,7 @@ impl Running {
             tools: Vec::new(),
             progress: None,
             compacting: None,
+            generating: None,
             compact_only,
         }
     }
@@ -2069,8 +2073,23 @@ impl<W: Write> App<W> {
             && let Some(r) = &mut self.running
         {
             r.progress = None;
+            // Thinking or a call being written ends with whatever comes
+            // next: answer text, the call starting, the response's entry.
+            r.generating = None;
         }
         match ev {
+            AgentEvent::Thinking { chars } => {
+                if let Some(r) = &mut self.running {
+                    r.generating = Some(view::Generating::Thinking(chars));
+                }
+            }
+            AgentEvent::CallProgress {
+                name, path, chars, ..
+            } => {
+                if let Some(r) = &mut self.running {
+                    r.generating = Some(view::Generating::Call { name, path, chars });
+                }
+            }
             AgentEvent::PromptProgress {
                 total,
                 cache,
@@ -2357,19 +2376,20 @@ impl<W: Write> App<W> {
                     CallState::Running(started.elapsed().as_secs_f64()),
                 ));
             }
-            if r.tools.is_empty() && pending.is_empty() && self.card.is_none() {
+            // Under unfinished answer text too while a call is written:
+            // the text stands still then, and the call can take minutes.
+            let quiet = pending.is_empty() || r.generating.is_some();
+            if r.tools.is_empty() && quiet && self.card.is_none() {
                 let spin = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
                 let i = (r.started.elapsed().as_millis() / 80) as usize % spin.len();
+                let text = view::spinner_text(
+                    r.progress,
+                    r.compacting.map(|(t, n)| (t.elapsed(), n)),
+                    r.started.elapsed(),
+                    r.generating.as_ref(),
+                );
                 live.push(Line::styled(
-                    format!(
-                        "{} {}",
-                        spin[i],
-                        view::spinner_text(
-                            r.progress,
-                            r.compacting.map(|(t, n)| (t.elapsed(), n)),
-                            r.started.elapsed()
-                        )
-                    ),
+                    view::cut(&format!("{} {text}", spin[i]), w),
                     dim(),
                 ));
             }

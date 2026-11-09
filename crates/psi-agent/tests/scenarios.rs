@@ -1378,6 +1378,48 @@ async fn events_stream_in_order() {
     }
 }
 
+#[tokio::test]
+async fn thinking_and_a_call_being_written_are_reported_as_sizes() {
+    // Nothing of either shows until the response ends, and a local model
+    // can take minutes over them.
+    let args = json!({"path": "notes.txt", "text": "x".repeat(300)});
+    let f = Fixture::new(vec![
+        Reply::Chat(ScriptedReply {
+            reasoning: "SECRET-THOUGHT ".repeat(10),
+            ..ScriptedReply::call("write", args.clone())
+        }),
+        text("done"),
+    ]);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut a = f.agent(Budgets::default()).with_events(tx);
+    a.run("x").await;
+    drop(a);
+    let mut seen = Vec::new();
+    while let Some(ev) = rx.recv().await {
+        match &ev {
+            AgentEvent::Thinking { .. } | AgentEvent::CallProgress { .. } => {
+                seen.push(serde_json::to_value(&ev).unwrap());
+            }
+            // The call runs after the progress on writing it.
+            AgentEvent::ToolStart { .. } => seen.push(json!("tool_start")),
+            _ => {}
+        }
+    }
+    let chars = args.to_string().len();
+    assert_eq!(
+        seen,
+        [
+            json!({"type": "thinking", "chars": 150}),
+            json!({"type": "call_progress", "index": 0, "name": "write", "chars": 0}),
+            json!({"type": "call_progress", "index": 0, "name": "write",
+                   "path": "notes.txt", "chars": chars}),
+            json!("tool_start"),
+        ]
+    );
+    // The reasoning's words are in no event.
+    assert!(!seen.iter().any(|v| v.to_string().contains("SECRET")));
+}
+
 fn copy_dir(src: &Path, dst: &Path) {
     std::fs::create_dir_all(dst).unwrap();
     for e in std::fs::read_dir(src).unwrap() {

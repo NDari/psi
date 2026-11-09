@@ -11,6 +11,12 @@ pub const REPEAT_NUDGE: u32 = 3;
 pub const REPEAT_PAUSE: u32 = 5;
 /// Turns that only repeat earlier calls and change no file, before a nudge (G-12).
 pub const NO_PROGRESS_TURNS: u32 = 6;
+/// Such turns in a row before a pause: the nudge went unheeded. Replayed
+/// over the recorded sessions and eval trials (2026-11-09, about 800 Psi
+/// runs): 18 reach this count, none of them changed a file afterwards, and
+/// the two that were eval trials failed. The 2026-11-06 TUI rerun got 103
+/// nudges and went on for 106 minutes.
+pub const NO_PROGRESS_PAUSE: u32 = 2 * NO_PROGRESS_TURNS;
 /// Summaries in one run with no file changed since, before a pause: the
 /// context fills again as fast as it is compacted (Claude Code stops a
 /// "thrashing" autocompact the same way). In the 16K runs of 2026-11-01,
@@ -178,11 +184,17 @@ impl Guards {
             return None;
         }
         self.idle_turns += 1;
-        if self.idle_turns < NO_PROGRESS_TURNS {
-            return None;
+        if self.idle_turns == NO_PROGRESS_PAUSE {
+            // Going on resets the count (`reset`), so the nudge comes again
+            // before the next pause.
+            return Some(GuardAction::Pause {
+                guard: "no_progress",
+                reason: format!(
+                    "the last {NO_PROGRESS_PAUSE} turns repeated earlier calls and changed no file"
+                ),
+            });
         }
-        self.idle_turns = 0;
-        Some(GuardAction::Nudge {
+        (self.idle_turns == NO_PROGRESS_TURNS).then(|| GuardAction::Nudge {
             guard: "no_progress",
             text: format!(
                 "The last {NO_PROGRESS_TURNS} turns repeated earlier calls and changed no file. Try a different approach, or answer if you are done."
@@ -190,8 +202,11 @@ impl Guards {
         })
     }
 
-    /// The context was summarized before a request.
+    /// The context was summarized before a request. The results of
+    /// earlier calls are gone from the context, so making one again is not
+    /// a repeat (a loop of summaries is this guard's own count).
     pub fn on_compaction(&mut self) -> Option<GuardAction> {
+        self.seen.clear();
         self.compactions += 1;
         (self.compactions == COMPACTIONS_PAUSE).then(|| GuardAction::Pause {
             guard: "compaction_loop",
@@ -317,6 +332,91 @@ mod tests {
         for _ in 0..NO_PROGRESS_TURNS + 1 {
             g.on_call("read a", false);
             assert_eq!(g.on_turn_end(true), None);
+        }
+    }
+
+    /// One turn that makes `sig`, with no file changed.
+    fn idle_turn(g: &mut Guards, sig: &str) -> Option<GuardAction> {
+        g.on_call(sig, false);
+        g.on_turn_end(false)
+    }
+
+    #[test]
+    fn an_unheeded_no_progress_nudge_becomes_a_pause() {
+        // The 2026-11-06 TUI rerun: two exact greps in turn, 623 calls.
+        let mut g = Guards::new(10);
+        idle_turn(&mut g, "grep a");
+        idle_turn(&mut g, "grep b");
+        let mut fired = Vec::new();
+        for i in 0..NO_PROGRESS_PAUSE {
+            let sig = if i % 2 == 0 { "grep a" } else { "grep b" };
+            fired.push(idle_turn(&mut g, sig));
+        }
+        let at = |n: u32| fired[n as usize - 1].clone();
+        assert!(matches!(
+            at(NO_PROGRESS_TURNS),
+            Some(GuardAction::Nudge {
+                guard: "no_progress",
+                ..
+            })
+        ));
+        assert_eq!(
+            at(NO_PROGRESS_PAUSE),
+            Some(GuardAction::Pause {
+                guard: "no_progress",
+                reason: "the last 12 turns repeated earlier calls and changed no file".into(),
+            })
+        );
+        assert_eq!(fired.iter().flatten().count(), 2, "{fired:?}");
+        // The user went on: the nudge comes again first, then the pause.
+        g.reset();
+        let again: Vec<_> = (0..NO_PROGRESS_PAUSE)
+            .filter_map(|_| idle_turn(&mut g, "grep a"))
+            .collect();
+        assert!(
+            matches!(
+                &again[..],
+                [GuardAction::Nudge { .. }, GuardAction::Pause { .. }]
+            ),
+            "{again:?}"
+        );
+    }
+
+    #[test]
+    fn a_new_call_or_a_changed_file_between_repeats_starts_the_count_over() {
+        let mut g = Guards::new(10);
+        idle_turn(&mut g, "read a");
+        for _ in 0..NO_PROGRESS_PAUSE - 1 {
+            idle_turn(&mut g, "read a");
+        }
+        // One turn short of the pause: a call not made before.
+        assert_eq!(idle_turn(&mut g, "read b"), None);
+        for _ in 0..NO_PROGRESS_TURNS - 1 {
+            assert_eq!(idle_turn(&mut g, "read a"), None);
+        }
+        // A changed file does the same.
+        g.on_call("read a", false);
+        assert_eq!(g.on_turn_end(true), None);
+        for _ in 0..NO_PROGRESS_TURNS - 1 {
+            assert_eq!(idle_turn(&mut g, "read a"), None);
+        }
+        assert!(matches!(
+            idle_turn(&mut g, "read a"),
+            Some(GuardAction::Nudge { .. })
+        ));
+    }
+
+    #[test]
+    fn reading_again_after_a_summary_is_not_a_repeat() {
+        // multi_split_package at 16K (2026-11-01): the file was read in
+        // four pieces again after each summary had replaced them.
+        let mut g = Guards::new(10);
+        let pieces = ["sed 1,200p", "sed 200,400p", "sed 400,600p", "sed 600,837p"];
+        for _ in 0..4 {
+            for p in pieces {
+                assert_eq!(idle_turn(&mut g, p), None);
+            }
+            assert_eq!(g.on_compaction(), None);
         }
     }
 }

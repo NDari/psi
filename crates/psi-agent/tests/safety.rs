@@ -771,6 +771,89 @@ async fn undo_and_rewind_restore_edits_and_bash_changes() {
     assert!(!cp.capture("check").unwrap().changed);
 }
 
+/// The guard events a run recorded, as (guard, message).
+fn guard_events(a: &Agent) -> Vec<(String, String)> {
+    a.session()
+        .entries()
+        .iter()
+        .filter_map(|e| match &e.body {
+            EntryBody::GuardEvent { guard, message, .. } => Some((guard.clone(), message.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Two exact commands in turn, each working and changing nothing: the
+/// shape of the 2026-11-06 TUI rerun's loop (two `grep`s, 623 calls, 103
+/// nudges, stopped by hand after 106 minutes).
+fn two_commands_in_turn(n: usize) -> Vec<Reply> {
+    (0..n)
+        .map(|i| {
+            let cmd = if i % 2 == 0 { "echo a" } else { "echo b" };
+            // The model rewords the intent; the guard leaves it out.
+            call(
+                "bash",
+                json!({"command": cmd, "intent": format!("look, {i}")}),
+            )
+        })
+        .collect()
+}
+
+const NO_PROGRESS_PAUSE: &str = "the last 12 turns repeated earlier calls and changed no file";
+
+#[tokio::test]
+async fn an_unheeded_no_progress_nudge_pauses_and_going_on_continues() {
+    let fx = Fx::new();
+    // Two new calls, twelve repeats (the pause), two more, then an answer.
+    let mut replies = two_commands_in_turn(16);
+    replies.push(text("done"));
+    let server = ReplayServer::start(replies).unwrap();
+    let ap = Arc::new(Scripted::default());
+    ap.go_on.lock().unwrap().push_back(true);
+    let mut a = fx.agent(&server, fx.session(), fx.safety(ap.clone(), None), false);
+    let out = a.run("look around").await;
+    assert_eq!(out.stop, Stop::Done, "{:?}", out.stop);
+    assert_eq!(out.tool_calls, 16);
+    assert_eq!(*ap.pauses.lock().unwrap(), [NO_PROGRESS_PAUSE]);
+    // The nudge on the sixth repeat, the pause on the twelfth, no second
+    // nudge between them.
+    let r = results(&a);
+    let nudged: Vec<usize> = (0..r.len())
+        .filter(|&i| r[i].0.contains("repeated earlier calls"))
+        .collect();
+    assert_eq!(nudged, [7], "{r:?}");
+    assert_eq!(
+        guard_events(&a)
+            .iter()
+            .map(|(g, m)| (g.as_str(), m.starts_with("paused: ")))
+            .collect::<Vec<_>>(),
+        [("no_progress", false), ("no_progress", true)]
+    );
+    let answers: Vec<Value> = a
+        .session()
+        .entries()
+        .iter()
+        .filter_map(|e| match &e.body {
+            EntryBody::Custom { custom_type, data } if custom_type == "pause" => {
+                Some(json!([data["reason"], data["answer"]]))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(answers, [json!([NO_PROGRESS_PAUSE, "go on"])]);
+}
+
+#[tokio::test]
+async fn an_unheeded_no_progress_nudge_stops_a_headless_run() {
+    let fx = Fx::new();
+    let server = ReplayServer::start(two_commands_in_turn(20)).unwrap();
+    let safety = fx.safety(Arc::new(Headless), None);
+    let mut a = fx.agent(&server, fx.session(), safety, false);
+    let out = a.run("look around").await;
+    assert_eq!(out.stop, Stop::Guard(NO_PROGRESS_PAUSE.into()));
+    assert_eq!(out.tool_calls, 14);
+}
+
 #[tokio::test]
 async fn repeated_failures_nudge_then_pause() {
     let fx = Fx::new();

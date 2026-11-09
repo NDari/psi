@@ -346,15 +346,52 @@ pub fn short_tokens(n: u64) -> String {
     }
 }
 
+/// What the model is writing that the screen doesn't show as it comes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Generating {
+    /// Characters of reasoning so far.
+    Thinking(u64),
+    /// A tool call: its name, its path once known, characters of arguments.
+    Call {
+        name: String,
+        path: Option<String>,
+        chars: u64,
+    },
+}
+
+impl Generating {
+    fn text(&self) -> String {
+        let size = |n: u64| format!(": {} characters", short_tokens(n));
+        match self {
+            Generating::Thinking(n) => format!("thinking{}", size(*n)),
+            Generating::Call { name, path, chars } => {
+                let mut s = format!("writing a {name} call");
+                if let Some(p) = path {
+                    s.push_str(&format!(" for {p}"));
+                }
+                if *chars > 0 {
+                    s.push_str(&size(*chars));
+                }
+                s
+            }
+        }
+    }
+}
+
 /// The spinner's text and timer: what the run waits for, and for how long.
 /// A summary counts from its own start and says Esc stops it (a summary at
 /// 100K tokens took 47 s in the cog trial, with nothing on screen moving).
+/// While the model thinks or writes a tool call it says so, with a size
+/// that grows: at a local model's speed either can take minutes.
 pub fn spinner_text(
     progress: Option<(u64, u64, u64)>,
     compacting: Option<(Duration, u64)>,
     since_start: Duration,
+    generating: Option<&Generating>,
 ) -> String {
-    let reading = progress.map(prompt_progress);
+    let reading = progress
+        .map(prompt_progress)
+        .or_else(|| generating.map(Generating::text));
     match compacting {
         Some((took, tokens)) => {
             let mut s = format!("summarizing about {} tokens", short_tokens(tokens));
@@ -558,21 +595,45 @@ mod tests {
     fn the_spinner_says_when_it_is_summarizing() {
         let s = Duration::from_secs;
         assert_eq!(
-            spinner_text(None, None, s(3)),
+            spinner_text(None, None, s(3), None),
             "waiting for the model… (3s)"
         );
         assert_eq!(
-            spinner_text(Some((800, 0, 200)), None, s(3)),
+            spinner_text(Some((800, 0, 200)), None, s(3), None),
             "reading the prompt: 25% of 800 tokens (3s)"
         );
         // A summary has its own timer, and says how to stop it.
         assert_eq!(
-            spinner_text(None, Some((s(12), 100_352)), s(90)),
+            spinner_text(None, Some((s(12), 100_352)), s(90), None),
             "summarizing about 98K tokens (12s) · Esc stops"
         );
         assert_eq!(
-            spinner_text(Some((6000, 0, 3000)), Some((s(4), 100_352)), s(90)),
+            spinner_text(Some((6000, 0, 3000)), Some((s(4), 100_352)), s(90), None),
             "summarizing about 98K tokens · reading the prompt: 50% of 5.9K tokens (4s) · Esc stops"
+        );
+    }
+
+    #[test]
+    fn the_spinner_says_when_the_model_thinks_or_writes_a_call() {
+        let s = Duration::from_secs;
+        let say = |g: Generating| spinner_text(None, None, s(41), Some(&g));
+        assert_eq!(
+            say(Generating::Thinking(1300)),
+            "thinking: 1.3K characters (41s)"
+        );
+        let call = |path: Option<&str>, chars| Generating::Call {
+            name: "write".into(),
+            path: path.map(str::to_owned),
+            chars,
+        };
+        assert_eq!(say(call(None, 0)), "writing a write call (41s)");
+        assert_eq!(
+            say(call(Some("src/big.rs"), 0)),
+            "writing a write call for src/big.rs (41s)"
+        );
+        assert_eq!(
+            say(call(Some("src/big.rs"), 9000)),
+            "writing a write call for src/big.rs: 8.8K characters (41s)"
         );
     }
 

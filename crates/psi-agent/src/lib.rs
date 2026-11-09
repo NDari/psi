@@ -6,6 +6,7 @@ pub mod approval;
 mod compact;
 mod events;
 pub mod ext;
+mod generating;
 pub mod guards;
 mod messages;
 pub mod plan;

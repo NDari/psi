@@ -1367,16 +1367,50 @@ fn the_stats_sit_under_the_input_box_and_user_text_is_white() {
 fn the_tui_has_no_request_limit_by_default() {
     // 2026-11-03: a long cog run stopped at 40 model requests, the print
     // runs' backstop; the TUI has none unless --max-turns asks for one.
+    // Each call a different one: the same call over and over is a loop,
+    // which pauses (below).
     let mut replies: Vec<Reply> = (0..45)
-        .map(|_| call("read", json!({"path": "a.txt"})))
+        .map(|i| call("read", json!({"path": format!("a{i}.txt")})))
         .collect();
     replies.push(text("all done"));
-    let (mut t, s) = Tui::start(replies, |p| std::fs::write(p.join("a.txt"), "x\n").unwrap());
+    let (mut t, s) = Tui::start(replies, |p| {
+        for i in 0..45 {
+            std::fs::write(p.join(format!("a{i}.txt")), "x\n").unwrap();
+        }
+    });
     t.wait_for("› ", SLOW);
     t.typ("read it a lot\r");
     t.wait_for("all done", Duration::from_secs(30));
     assert!(!t.all().contains("stopped:"), "{}", t.all());
+    assert!(!t.all().contains("paused:"), "{}", t.all());
     assert_eq!(s.chat_requests().len(), 46);
+    t.quit();
+}
+
+#[test]
+fn a_loop_of_the_same_call_pauses_and_asks() {
+    // 2026-11-06: 623 calls of two commands over 106 minutes; the nudges
+    // went unheeded and nothing stopped the run (§8.6).
+    let same = || call("read", json!({"path": "a.txt"}));
+    let mut replies: Vec<Reply> = (0..13).map(|_| same()).collect();
+    // After "Continue": twelve more, and the pause again.
+    replies.extend((0..12).map(|_| same()));
+    let (mut t, s) = Tui::start(replies, |p| std::fs::write(p.join("a.txt"), "x\n").unwrap());
+    t.wait_for("› ", SLOW);
+    t.typ("read it a lot\r");
+    let card = "paused: the last 12 turns repeated earlier calls and changed no file";
+    t.wait_screen(card, Duration::from_secs(30));
+    assert_eq!(s.chat_requests().len(), 13);
+    t.answer(-1); // Continue
+    // The card is drawn many times, so the requests say when it is back.
+    let start = Instant::now();
+    while s.chat_requests().len() < 25 && start.elapsed() < Duration::from_secs(30) {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    t.wait_screen(card, SLOW);
+    assert_eq!(s.chat_requests().len(), 25);
+    t.answer_safe(); // Stop the run
+    t.wait_for("stopped: the last 12 turns repeated earlier calls", SLOW);
     t.quit();
 }
 
@@ -1586,6 +1620,64 @@ fn thinking_never_reaches_the_screen() {
     t.typ("hi\r");
     t.wait_for("the visible answer", SLOW);
     assert!(!t.all().contains("SECRET-THOUGHT"), "{}", t.all());
+    t.quit();
+}
+
+#[test]
+fn the_spinner_says_the_model_is_thinking() {
+    // The Qwen3.8 27B thought for minutes at a time with "waiting for the
+    // model" on screen (2026-11-05).
+    let (mut t, _s) = Tui::start(
+        vec![
+            Reply::stall(vec![
+                json!({"role": "assistant", "content": null}),
+                json!({"reasoning_content": "SECRET-THOUGHT ".repeat(100)}),
+            ]),
+            text("the visible answer"),
+        ],
+        |_| {},
+    );
+    t.wait_for("› ", SLOW);
+    t.typ("hi\r");
+    t.wait_screen("thinking: 1.5K characters (", SLOW);
+    assert!(!t.all().contains("SECRET-THOUGHT"), "{}", t.all());
+    t.esc();
+    t.wait_for("aborted", SLOW);
+    // The next response starts from nothing.
+    t.typ("again\r");
+    t.wait_for("the visible answer", SLOW);
+    assert!(!t.contents().contains("thinking:"), "{}", t.contents());
+    t.quit();
+}
+
+#[test]
+fn the_spinner_names_the_call_the_model_is_writing() {
+    // A long write call: its arguments come for a minute or more, under
+    // answer text that has stopped moving.
+    // The name comes once, with the call's first chunk; arguments follow.
+    let more = |arguments: String| json!({"tool_calls": [{"index": 0, "function": {"arguments": arguments}}]});
+    let (mut t, _s) = Tui::start(
+        vec![Reply::stall(vec![
+            json!({"role": "assistant", "content": null}),
+            json!({"content": "I'll write the module now."}),
+            json!({"tool_calls": [{"index": 0, "id": "c1", "type": "function",
+                   "function": {"name": "write", "arguments": ""}}]}),
+            more(r#"{"path":"src/big.py","text":""#.into()),
+            more("x = 1\\n".repeat(400)),
+        ])],
+        |_| {},
+    );
+    t.wait_for("› ", SLOW);
+    t.typ("hi\r");
+    t.wait_screen(
+        "writing a write call for src/big.py: 2.8K characters (",
+        SLOW,
+    );
+    // The text before the call is still there, above the line.
+    assert!(t.contents().contains("I'll write the module now."));
+    assert!(!t.contents().contains("x = 1"), "{}", t.contents());
+    t.esc();
+    t.wait_for("aborted", SLOW);
     t.quit();
 }
 

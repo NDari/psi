@@ -31,6 +31,10 @@ pub enum Reply {
     /// A stream that starts with `text` and then sends nothing more for
     /// half a minute (a stalled server; tests abort it).
     Hang { text: String },
+    /// A stream that sends these deltas (`{"reasoning_content": ...}`,
+    /// `{"tool_calls": [...]}`) and then nothing more for half a minute:
+    /// a model in the middle of thinking or of writing a call.
+    Stall { deltas: Vec<Value> },
 }
 
 impl Reply {
@@ -72,6 +76,10 @@ impl Reply {
 
     pub fn hang(text: &str) -> Self {
         Reply::Hang { text: text.into() }
+    }
+
+    pub fn stall(deltas: Vec<Value>) -> Self {
+        Reply::Stall { deltas }
     }
 
     /// A stream whose data isn't JSON.
@@ -346,6 +354,13 @@ fn serve(mut conn: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
                     std::thread::sleep(std::time::Duration::from_secs(30));
                     return Ok(());
                 }
+                Some(Reply::Stall { deltas }) => {
+                    drop(st);
+                    conn.write_all(&delta_bytes(&deltas))?;
+                    conn.flush()?;
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                    return Ok(());
+                }
                 None => http(
                     500,
                     "application/json",
@@ -380,15 +395,23 @@ fn stream_bytes(body: &str) -> Vec<u8> {
 }
 
 fn cut_bytes(text: &str) -> Vec<u8> {
-    let chunk = |delta: Value| {
-        json!({"choices": [{"finish_reason": null, "index": 0, "delta": delta}],
-               "object": "chat.completion.chunk"})
-    };
-    stream_bytes(&format!(
-        "data: {}\n\ndata: {}\n\n",
-        chunk(json!({"role": "assistant", "content": null})),
-        chunk(json!({"content": text}))
-    ))
+    delta_bytes(&[
+        json!({"role": "assistant", "content": null}),
+        json!({"content": text}),
+    ])
+}
+
+/// A stream of one chunk per delta, left unfinished.
+fn delta_bytes(deltas: &[Value]) -> Vec<u8> {
+    let body: String = deltas
+        .iter()
+        .map(|delta| {
+            let chunk = json!({"choices": [{"finish_reason": null, "index": 0, "delta": delta}],
+                               "object": "chat.completion.chunk"});
+            format!("data: {chunk}\n\n")
+        })
+        .collect();
+    stream_bytes(&body)
 }
 
 fn http(status: u16, content_type: &str, body: &[u8]) -> Vec<u8> {

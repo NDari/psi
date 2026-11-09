@@ -73,6 +73,12 @@ impl Accumulator {
                 }
                 if let Some(args) = tc["function"]["arguments"].as_str() {
                     call.arguments.push_str(args);
+                    if !args.is_empty() {
+                        out.push(Delta::ToolCallArgs {
+                            index,
+                            text: args.to_owned(),
+                        });
+                    }
                 }
             }
             if let Some(f) = choice["finish_reason"].as_str() {
@@ -165,6 +171,40 @@ mod tests {
             (t.prompt_n, t.cache_n, t.prompt_per_second),
             (2000, 1000, 5000.0)
         );
+    }
+
+    #[test]
+    fn a_tool_call_streams_its_name_then_its_arguments() {
+        let mut a = Accumulator::default();
+        let chunk = |f: &str| {
+            format!(
+                r#"{{"choices":[{{"index":0,"delta":{{"tool_calls":[{{"index":0,"function":{f}}}]}}}}]}}"#
+            )
+        };
+        let mut deltas = Vec::new();
+        for f in [
+            r#"{"name":"write","arguments":""}"#,
+            r#"{"arguments":"{\"path\":"}"#,
+            r#"{"arguments":"\"a.py\"}"}"#,
+        ] {
+            deltas.extend(a.apply(&chunk(f)).ok().unwrap_or_default());
+        }
+        let args = |text: &str| Delta::ToolCallArgs {
+            index: 0,
+            text: text.into(),
+        };
+        assert_eq!(
+            deltas,
+            [
+                Delta::ToolCallStart {
+                    index: 0,
+                    name: "write".into()
+                },
+                args(r#"{"path":"#),
+                args(r#""a.py"}"#),
+            ]
+        );
+        assert_eq!(a.finish(None).tool_calls[0].arguments, r#"{"path":"a.py"}"#);
     }
 
     #[test]

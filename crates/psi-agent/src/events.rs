@@ -25,6 +25,23 @@ pub enum AgentEvent {
     TextDelta {
         text: String,
     },
+    /// The model is thinking: the characters of reasoning so far in this
+    /// response. Sent about every 64 characters, for a live display; the
+    /// reasoning itself is in the response's session entry.
+    Thinking {
+        chars: u64,
+    },
+    /// The model is writing a tool call (the `index`-th of its response):
+    /// the characters of arguments so far, and the `path` argument once it
+    /// is whole. Sent when the call starts and about every 64 characters;
+    /// `ToolStart` follows when the response has ended and the call runs.
+    CallProgress {
+        index: usize,
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        chars: u64,
+    },
     /// Every entry appended to the session, as written.
     Entry {
         entry: Entry,

@@ -26,7 +26,15 @@ In plan mode (and for read-only sub-agents) bash runs in the normal sandbox, whi
 
 **The fuller fix:** run plan-mode bash in a read-only sandbox (a read-only bind of the workspace in bubblewrap, a `file-write*` deny in Seatbelt). It needs a plan edit (§8 and the plan-mode section) and does nothing when isolation is off. Worth it if a model is seen getting past the check.
 
-### Failure guards miss failures that aren't in a row (added 2026-11-05, medium priority, to implement)
+### Failure guards miss failures that aren't in a row (added 2026-11-05, medium priority, to implement; the `no_progress` pause built 2026-11-09)
+
+**Built 2026-11-09:** 12 turns in a row that only repeat earlier calls and change no file now pause the run (headless runs stop), after the one nudge at 6 (plan §8.6). Replayed over the recorded sessions, it pauses the two exact-repeat sessions below (the 11-05 clearing-on review at turn 36 of 110, the 11-06 TUI rerun at turn 96 of 708) and 7 of the 8 loops in `experiments.md`. The wording the model sees is unchanged, and no model run has been made with it.
+
+**Still open after that:**
+- The failure window ("To build", below): unchanged.
+- A marker that changes with each repeat: old-build run 1 of 2026-11-06 (`2026-11-06-1728_963ab284`) ran one `grep` 90 times, most with `; echo MARK_XYZ`, `; echo MARK99`, `; echo ===Z===` added, so every call was new to the guard. Catching it means reading the command (dropping a trailing `echo` of a literal), not comparing output: the marker is in the output too.
+- A lookup whose flags change (`-A 5`, `-A 6`, the 11-05 15:47 session below): a new variant every 2 to 4 turns starts the count over. Counting output seen before doesn't catch it either, since each variant prints something a little different. A window (most of the last N turns were repeats) would, but an edit-then-test cycle repeats its test command every other turn, so it first needs "repeat" to mean "since the last file change".
+- A cycle that changes files and changes them back in separate calls: each turn's checkpoint sees a change. It needs the checkpoint's tree compared with earlier ones.
 
 From the 27B code eval (`~/.psi/evals/2026-11-05-1321-code-all-qwen3.8-27b`):
 - `sh_manifest` (2/9, step cap): about 20 steps of one-line `bash -c` probes, each slightly different, nearly all failing with `$3: unbound variable`. `error_streak` (10 failed calls in a row) fired only at step 39, since a few calls in between succeeded and reset the count. `repeated_failure` didn't fire, since the calls differed.
