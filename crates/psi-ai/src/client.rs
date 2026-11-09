@@ -112,7 +112,7 @@ impl Client {
     fn connect_err(&self, e: reqwest::Error) -> AiError {
         AiError::Connect {
             url: self.root.clone(),
-            message: e.to_string(),
+            message: with_cause(&e),
         }
     }
 
@@ -306,6 +306,23 @@ fn http_error(status: u16, body: &str) -> AiError {
         return AiError::Template(message);
     }
     AiError::Http { status, message }
+}
+
+/// The error's message plus its deepest cause. reqwest's own message is
+/// only the kind ("error sending request"); the reason, such as
+/// "Connection refused", is at the end of the source chain.
+fn with_cause(e: &dyn std::error::Error) -> String {
+    let mut deepest = None;
+    let mut cur = e.source();
+    while let Some(s) = cur {
+        deepest = Some(s);
+        cur = s.source();
+    }
+    let message = e.to_string();
+    match deepest.map(|s| s.to_string()) {
+        Some(cause) if !message.contains(&cause) => format!("{message}: {cause}"),
+        _ => message,
+    }
 }
 
 #[cfg(test)]

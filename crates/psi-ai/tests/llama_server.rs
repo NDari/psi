@@ -219,5 +219,11 @@ async fn unreachable_server_is_a_connect_error() {
     let r = Client::new(&format!("http://127.0.0.1:{port}/v1"))
         .props()
         .await;
-    assert!(matches!(r, Err(AiError::Connect { .. })), "{r:?}");
+    match r {
+        // The reason, not only reqwest's "error sending request".
+        Err(AiError::Connect { message, .. }) => {
+            assert!(message.contains("refused"), "{message}")
+        }
+        r => panic!("{r:?}"),
+    }
 }
