@@ -25,6 +25,13 @@ Problems we know about and have chosen not to fix yet, with how much they matter
 - **One summary at a time (accepted).** A new summary takes the earlier one's place, so what the model leaves out is gone from the context (the session keeps it). The design gives up faithful summaries over many compactions; a task that needs a third stops.
 - **Names from before (low).** `GuardAction::Pause` and the `*_PAUSE` constants stop the run now; `Activity::Waiting` in `psi-tui` is unused.
 
+### Trying a model: what is not there yet (added 2026-11-09, with step 4 of `design-going-forward.md`)
+
+- **The trial set has one real prompt (medium, grows with use).** `cog_bare_words` is a prompt from daily use on cog, started from a branch of the local repository; the other eight are existing tasks with the most to read and change. More real prompts on other projects should join it (`evals/README.md`, "A task from a real project"). The cog task works only on a machine with `~/projects/cog`, and was not run with a model yet: its grader is checked on the untouched project (1 of 3 checks pass, as it should).
+- **`psi guards` reads what the session recorded (low).** A call's identity comes from the recorded arguments, which for a call the harness refused before running are not the ones the live guards saw; a session from before 2026-11-09 doesn't say whether a person was at the keyboard, and is taken as unattended (the `announced_stop` nudge may show where it did not apply). Its stops were not compared one by one with the 2026-11-09 script's (18 runs of about 800 then; 17 no-progress stops in 520 runs on this machine now, which holds only part of those recordings).
+- **`psi replay --count` matches text (low).** The rule to judge an edit by is "the next action contains this text"; anything finer still needs reading the tally.
+- **Model runs go one request at a time (as before).** `--samples` sends them in turn; the server has one slot.
+
 ### Failure guards miss failures that aren't in a row (added 2026-11-05, medium priority, to implement; the `no_progress` pause built 2026-11-09)
 
 **Built 2026-11-09:** 12 turns in a row that only repeat earlier calls and change no file now pause the run (headless runs stop), after the one nudge at 6 (plan §8.6). Replayed over the recorded sessions, it pauses the two exact-repeat sessions below (the 11-05 clearing-on review at turn 36 of 110, the 11-06 TUI rerun at turn 96 of 708) and 7 of the 8 loops in `experiments.md`. Going on from the pause adds a note for the model that names the repeated calls (the same day, plan §8.6); a headless run gets it once in place of the stop.

@@ -827,3 +827,121 @@ fn psi_run_carries_out_a_plan_and_reports_each_task() {
     );
     assert!(!psi(&e, &["-p", "x", "run"]).status.success());
 }
+
+/// Goal 4's two questions from recordings, each with a command: "would
+/// today's guards have stopped this" (`psi guards`) and "would this
+/// wording help" (`psi replay` with an edit), and a profile's sampling on
+/// every request.
+#[test]
+fn recordings_answer_would_it_stop_and_would_this_wording_help() {
+    let same = || Reply::Chat(ScriptedReply::call("bash", json!({"command": "echo a"})));
+    let server = ReplayServer::start((0..30).map(|_| same()).collect()).unwrap();
+    let e = env_for(&server);
+    std::fs::write(
+        e.home.join(".psi/models.jsonc"),
+        json!({"models": [{"id": "local", "base_url": server.base_url(), "max_output": 256,
+            "sampling": {"temperature": 0.7, "top_k": 20}}]})
+        .to_string(),
+    )
+    .unwrap();
+    // The loop is recorded: the run goes on once with the note, then stops.
+    let out = psi(&e, &["-p", "look", "--max-turns", "200"]);
+    assert_eq!(out.status.code(), Some(3));
+    let recorded = server.chat_requests();
+    assert_eq!(recorded.len(), 25);
+    assert_eq!(recorded[0]["temperature"], 0.7);
+    assert_eq!(recorded[0]["top_k"], 20);
+    let session = sessions(&e).pop().unwrap();
+
+    let out = psi(&e, &["guards", session.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        stdout.contains("  run 1: requests 1 to 25; recorded then: no_progress 5 times from 7\n"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("    after 13: no_progress note: "),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("    after 25: no_progress stop (0 requests before the recording ended): "),
+        "{stdout}"
+    );
+    assert!(
+        stdout.ends_with("1 sessions, 1 runs; today's guards would stop 1 (no_progress 1), 0 requests before the recordings ended\n"),
+        "{stdout}"
+    );
+
+    // The request at the loop's start, sent again four times with a note
+    // added and the result's text changed.
+    let again = ReplayServer::start(vec![
+        same(),
+        text("I'll stop."),
+        text("I'll stop."),
+        text("I'll stop."),
+    ])
+    .unwrap();
+    std::fs::write(
+        e.home.join(".psi/models.jsonc"),
+        json!({"models": [{"id": "local", "base_url": again.base_url()}]}).to_string(),
+    )
+    .unwrap();
+    let out = psi(
+        &e,
+        &[
+            "replay",
+            session.to_str().unwrap(),
+            "--at",
+            "3",
+            "--samples",
+            "4",
+            "--append",
+            "[Note] You already ran that.",
+            "--replace",
+            "echo a",
+            "echo b",
+            "--set",
+            "temperature=1.0",
+            "--count",
+            "answer:",
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        stdout,
+        "  3  answer: I'll stop.\n  1  bash {\"command\":\"echo a\"}\n3 of 4 contain \"answer:\"\n"
+    );
+    let sent = &again.chat_requests()[0];
+    let messages = sent["messages"].as_array().unwrap();
+    assert_eq!(
+        messages.last().unwrap(),
+        &json!({"role": "user", "content": "[Note] You already ran that."})
+    );
+    assert!(!sent["messages"].to_string().contains("echo a"));
+    assert_eq!(sent["temperature"], 1.0);
+    // An edit that matches nothing fails, and says so.
+    let out = psi(
+        &e,
+        &[
+            "replay",
+            session.to_str().unwrap(),
+            "--at",
+            "3",
+            "--replace",
+            "nope",
+            "x",
+        ],
+    );
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("\"nope\" is not in the request"));
+}

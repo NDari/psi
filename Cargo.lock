@@ -1055,6 +1055,7 @@ dependencies = [
 name = "psi-lab"
 version = "0.1.0"
 dependencies = [
+ "psi-agent",
  "psi-ai",
  "psi-session",
  "serde",

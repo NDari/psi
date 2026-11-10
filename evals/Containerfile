@@ -9,3 +9,10 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       python3 git make gcc libc6-dev ripgrep fd-find file ca-certificates procps less xz-utils \
  && rm -rf /var/lib/apt/lists/*
+
+# Go, for tasks from real Go projects (cog_bare_words): the release itself,
+# since the project asks for a newer one than Debian's. Trials have no
+# network, so modules come vendored with the task and nothing is fetched.
+ADD https://go.dev/dl/go1.27.3.linux-amd64.tar.gz /tmp/go.tar.gz
+RUN tar -C /usr/local -xzf /tmp/go.tar.gz && rm /tmp/go.tar.gz
+ENV PATH=/usr/local/go/bin:$PATH GOTOOLCHAIN=local GOPROXY=off GOFLAGS=-mod=vendor

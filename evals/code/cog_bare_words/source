@@ -1,0 +1,4 @@
+# The project this task starts from: a local git repository and a ref in it
+# (evals/README.md, "A task from a real project"). The trial gets that
+# ref's files; the repository itself is not touched.
+~/projects/cog psi-trial-bare-words

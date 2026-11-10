@@ -19,6 +19,12 @@ pub struct ModelProfile {
     /// "endpoint" (the server's tokenizer) or "estimate" (D-20).
     #[serde(default = "default_tokenizer")]
     pub tokenizer: String,
+    /// Sampling fields sent with every request, by the server's names
+    /// (llama-server: `temperature`, `top_p`, `top_k`, `min_p`,
+    /// `presence_penalty`, `repeat_penalty`): the model card's values, kept
+    /// with the model. Empty leaves the server's own settings in force.
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub sampling: serde_json::Map<String, serde_json::Value>,
     /// Request headers, such as `Authorization` for a registered provider.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub headers: Vec<(String, String)>,
@@ -87,8 +93,39 @@ impl ModelProfile {
             max_output: default_max_output(),
             reasoning: Reasoning::default(),
             tokenizer: default_tokenizer(),
+            sampling: serde_json::Map::new(),
             headers: Vec::new(),
         }
+    }
+
+    /// What is wrong with the profile's sampling, if anything: each field
+    /// is a number, and none is one of the request's own fields.
+    pub fn check_sampling(&self) -> Result<(), String> {
+        const OWN: [&str; 8] = [
+            "model",
+            "messages",
+            "tools",
+            "stream",
+            "stream_options",
+            "max_tokens",
+            "chat_template_kwargs",
+            "return_progress",
+        ];
+        for (k, v) in &self.sampling {
+            if OWN.contains(&k.as_str()) {
+                return Err(format!(
+                    "model {}: sampling can't set \"{k}\", a field of the request itself",
+                    self.id
+                ));
+            }
+            if !v.is_number() {
+                return Err(format!(
+                    "model {}: sampling.{k} must be a number, not {v}",
+                    self.id
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -115,6 +152,29 @@ mod tests {
         let f: ModelsFile = serde_json::from_value(v).unwrap();
         assert_eq!(f.models[0].context_window, ContextWindow::Auto);
         assert_eq!(f.models[0].max_output, 4096);
+    }
+
+    #[test]
+    fn sampling_is_numbers_by_the_servers_names() {
+        let p: ModelProfile = serde_json::from_value(json!({"id": "q",
+            "sampling": {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "presence_penalty": 1.5}}))
+        .unwrap();
+        assert_eq!(p.sampling["top_k"], 20);
+        assert_eq!(p.check_sampling(), Ok(()));
+        assert!(ModelProfile::local().sampling.is_empty());
+        let bad: ModelProfile =
+            serde_json::from_value(json!({"id": "q", "sampling": {"temperature": "hot"}})).unwrap();
+        assert_eq!(
+            bad.check_sampling().unwrap_err(),
+            "model q: sampling.temperature must be a number, not \"hot\""
+        );
+        let bad: ModelProfile =
+            serde_json::from_value(json!({"id": "q", "sampling": {"max_tokens": 9}})).unwrap();
+        assert!(
+            bad.check_sampling()
+                .unwrap_err()
+                .contains("a field of the request itself")
+        );
     }
 
     #[test]

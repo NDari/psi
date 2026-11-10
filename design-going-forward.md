@@ -176,6 +176,13 @@ Each step ends with `just check` passing and a short note here of what was done.
   - Planning (open question 2): an ordinary conversation, with undo and no read-only switch.
   - Model-facing text changed: the task prompt and the `/plan` request are new; the summary instruction after an earlier summary asks for one that replaces it, and the "Corrections" heading is gone. No eval was run.
   - Left for later, in `known-issues.md`: no second try after a failed end-of-task check; the record of earlier items is per session; `psi inspect` doesn't show tasks.
+- **Step 4 (2026-11-09).** A model's settings live in its profile, and recordings answer questions with a command; `just check` passes.
+  - Sampling in the profile: `sampling` in `~/.psi/models.jsonc` holds the model card's values by the server's field names and goes out with every request (the summary requests too). The justfile's flags stay as the server's defaults. `psi eval run --model <id>` gives the trials that profile's sampling and thinking setting and records them in `run.json`.
+  - The trial set: `psi eval run --tasks trial`, eight of the existing tasks with the most to read and change, 120 requests each (a set file can carry its own `@steps`, and any upper-case file in `evals/code` is a set), and one real prompt on a real project, `cog_bare_words`. A task can start from a ref in a local git repository (`source`), with a `setup.sh` run on the host and no reference solution; the trial image has Go. `evals/README.md` has the steps for trying a model and for adding such a task. More real prompts should follow.
+  - `psi guards <paths>`: today's guards run over recorded sessions, eval trials or whole directories, with the loop's own `Guards` and call signature, and say where each would nudge, add the loop note, or stop, and how many requests earlier than the recording ended. Over the 452 sessions on this machine it stops 21 runs, 17 of them for no progress.
+  - `psi replay` with edits: `--append`, `--replace OLD NEW`, `--drop-last N` and `--set key=value` change a recorded request before it is sent again, and `--count TEXT` tallies the samples by a rule given up front. An edit that matches nothing is an error.
+  - Sessions record whether a person was at the keyboard (`attended` in `session_info`).
+  - No model was run: the tools are tested against the replay server and the recordings on disk.
 
 ## Open questions
 

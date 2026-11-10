@@ -30,6 +30,8 @@ pub(crate) struct TrialCtx<'a> {
     pub network: String,
     /// The psi binary mounted into psi trials.
     pub psi_binary: Option<&'a Path>,
+    /// The profile whose sampling and thinking setting the trial uses.
+    pub profile: Option<&'a psi_ai::profile::ModelProfile>,
     /// Copied into the trial's ~/.psi before it starts.
     pub psi_config: Option<&'a Path>,
 }
@@ -83,7 +85,7 @@ fn trial(ctx: &TrialCtx, task: &Task, dir: &Path) -> Result<TrialResult> {
     let work = dir.join("work");
     let project = work.join("project");
     fsutil::create_dir_all(&home)?;
-    fsutil::copy_dir(&task.dir.join("repo"), &project, &[])?;
+    task.materialize(&project)?;
     // The project is /work/project inside the git repository /work.
     git_init(&work)?;
     let prompt = task.prompt()?;
@@ -162,9 +164,14 @@ fn psi_run(
     if let Some(c) = ctx.psi_config {
         fsutil::copy_dir(c, &home.join(".psi"), &["models.jsonc"])?;
     }
-    let models = json!({"models": [{"id": "local",
+    let mut model = json!({"id": "local",
         "base_url": format!("http://127.0.0.1:{}/v1", ctx.port),
-        "context_window": ctx.n_ctx, "max_output": ctx.max_output}]});
+        "context_window": ctx.n_ctx, "max_output": ctx.max_output});
+    if let Some(p) = ctx.profile {
+        model["sampling"] = Value::Object(p.sampling.clone());
+        model["reasoning"] = json!(p.reasoning);
+    }
+    let models = json!({"models": [model]});
     fsutil::write(
         &home.join(".psi/models.jsonc"),
         serde_json::to_string_pretty(&models).unwrap_or_default(),

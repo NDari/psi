@@ -45,6 +45,7 @@ async fn replay(model: &str, name: &str) -> (Result<psi_ai::Response, AiError>, 
         tools: vec![],
         max_tokens: 64,
         enable_thinking: None,
+        sampling: Default::default(),
     };
     let client = Client::new(&server.base_url());
     let mut deltas = Vec::new();
@@ -176,6 +177,7 @@ async fn wire_log_keeps_exact_bytes() {
         tools: vec![],
         max_tokens: 5,
         enable_thinking: None,
+        sampling: Default::default(),
     };
     let r = client
         .chat(&req, &CancellationToken::new(), &mut |_| {})
@@ -204,6 +206,7 @@ async fn abort_returns_quickly() {
         tools: vec![],
         max_tokens: 5,
         enable_thinking: None,
+        sampling: Default::default(),
     };
     let r = Client::new(&server.base_url())
         .chat(&req, &cancel, &mut |_| {})

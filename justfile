@@ -13,7 +13,9 @@ spec := "auto"
 # One state directory per port, so two servers can run side by side.
 state := justfile_directory() / ".llm" / port
 
-# The reference models (D-29) and each model card's sampling.
+# Models to start with llm-up, each with its model card's sampling as the
+# server's default. A profile's "sampling" in ~/.psi/models.jsonc goes out
+# with every request and wins over these (psi help models).
 qwen := "-hf bartowski/Qwen_Qwen3.5-4B-GGUF:Q4_K_M --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0 --presence-penalty 1.5 --repeat-penalty 1.0"
 gemma := "-hf google/gemma-4-12B-it-qat-q4_0-gguf:Q4_0 --temp 1.0 --top-p 0.95 --top-k 64 --min-p 0"
 # A larger model, not yet a reference model: the owner's command on the Mac,

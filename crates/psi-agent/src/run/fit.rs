@@ -297,6 +297,7 @@ impl Agent {
             tools: vec![],
             max_tokens: self.cfg.max_output,
             enable_thinking: self.cfg.enable_thinking,
+            sampling: self.cfg.sampling.clone(),
         }
     }
 
@@ -330,6 +331,7 @@ impl Agent {
 fn extends_request(last: &ChatRequest, new: &ChatRequest) -> bool {
     last.tools == new.tools
         && last.enable_thinking == new.enable_thinking
+        && last.sampling == new.sampling
         && last.model == new.model
         && new.messages.len() >= last.messages.len()
         && new.messages[..last.messages.len()] == last.messages[..]

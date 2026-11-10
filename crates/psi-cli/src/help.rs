@@ -33,6 +33,10 @@ const ALIASES: &[(&str, &str)] = &[
     ("limits", "plans"),
     ("config", "settings"),
     ("slash", "commands"),
+    ("sampling", "models"),
+    ("replay", "sessions"),
+    ("guards", "sessions"),
+    ("recordings", "sessions"),
 ];
 
 /// The topic list, one per line with its summary.

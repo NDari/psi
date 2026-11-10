@@ -82,6 +82,10 @@ fn first_prompt(path: &Path) -> Option<String> {
 pub fn tasks() -> Vec<CompletionCandidate> {
     let mut out = vec![
         candidate("quick", "the quick set (evals/code/SET)"),
+        candidate(
+            "trial",
+            "longer tasks for trying a model (evals/code/TRIAL)",
+        ),
         candidate("all", "every task"),
     ];
     let mut names: Vec<String> = std::fs::read_dir("evals/code")

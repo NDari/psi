@@ -51,6 +51,7 @@ impl Fx {
             max_output: 512,
             n_ctx: 32_768,
             enable_thinking: None,
+            sampling: Default::default(),
             // The chat's own limits: none, as in the TUI.
             budgets: Budgets {
                 max_turns: u32::MAX,

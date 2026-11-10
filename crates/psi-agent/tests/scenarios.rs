@@ -56,6 +56,7 @@ impl Fixture {
             max_output: 512,
             n_ctx,
             enable_thinking: None,
+            sampling: Default::default(),
             budgets,
             system_prompt: "sys".into(),
             tools,

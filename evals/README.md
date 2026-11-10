@@ -13,14 +13,17 @@ agent or model does, and don't re-run it for more trials.
 
 | Path | |
 |---|---|
-| `Containerfile` | The trial image (`localhost/psi-eval:latest`): Debian trixie, Python 3.13, git, make, gcc, ripgrep |
+| `Containerfile` | The trial image (`localhost/psi-eval:latest`): Debian trixie, Python 3.13, git, make, gcc, ripgrep, Go |
 | `code/<task>/prompt.md` | The request, as a developer would write it |
 | `code/<task>/repo/` | The starting project |
-| `code/<task>/reference/` | A correct solution's files, overlaid on `repo/` |
+| `code/<task>/source` | In place of `repo/`: a local git repository and a ref to start from (a task from a real project) |
+| `code/<task>/setup.sh` | Optional: run on the host in the trial's copy of the project before the trial (fetch what it needs; trials have no network) |
+| `code/<task>/reference/` | A correct solution's files, overlaid on `repo/`; tasks from real projects have none |
 | `code/<task>/hidden/check.sh` | The grader; prints one `PASS <name>` or `FAIL <name>: <why>` line per check |
 | `code/<task>/hidden/total` | How many check lines `check.sh` prints |
 | `code/_lib/` | Helpers for the graders (`check`, `check_output`, `unittests`) |
 | `code/SET` | The quick set: what `psi eval run` runs by default |
+| `code/TRIAL` | The trial set (`--tasks trial`): longer tasks, 120 requests each, for trying a model |
 
 The 40 coding tasks were ported from Heimdall. Names start with the kind of
 task: `fix_` (Python bug fixes), `feat_` (Python features), `sh_` (shell
@@ -46,6 +49,7 @@ Run these from the repository root (or pass `--evals`). Results go to
 ```
 psi eval check                     # every grader: reference passes, untouched repo fails
 psi eval run                       # psi on the quick set, one trial each
+psi eval run --tasks trial --model qwen27b   # the trial set with a profile's sampling
 psi eval run --tasks all           # every task
 psi eval run --tasks fix_env_parser,sh_logreport
 psi eval diff RUN_A RUN_B          # two runs side by side
@@ -66,8 +70,53 @@ build, context window, default sampling) in `run.json`.
 
 The reference models (D-29) start with `just llm-up qwen` or `just llm-up gemma` (`just llm-down` stops it): Qwen3.5 4B Q4_K_M and Gemma 4 12B QAT Q4_0, context 131072, thinking off, seed 0, on port 9931. The exact command goes to `.llm/<port>/cmd`. Two servers can run side by side on different ports, for example `just port=9932 llm-up qwen`, then `just port=9932 eval-run`. `just eval-check` and `just eval-run` wrap the commands above.
 
-The sampling flags are each model card's recommendation; the agents send
-no sampling fields, so the server's flags apply (H-08).
+The sampling flags in the justfile are each model card's recommendation
+and the server's defaults. A model profile's `sampling` goes out with
+every request and wins over them; `psi eval run --model <id>` gives the
+trials that profile's sampling and thinking setting, and `run.json`
+records them. Without `--model` the trials send no sampling fields.
+
+## Trying a new model
+
+1. Add a profile to `~/.psi/models.jsonc` with the model card's sampling
+   (`psi help models`), and start the server.
+2. `psi eval run --tasks trial --model <id>`: the trial set, one trial
+   each, 120 requests a trial. The results directory is named after the
+   model.
+3. Read how each trial ended (`summary.md`, then `psi inspect` on the ones
+   that did not pass). `psi eval diff RUN_A RUN_B` puts it next to a run
+   of the model in use. One run each: it shows what goes wrong, not which
+   model is better by a task or two.
+4. `psi guards <run directory>`: which trials today's guards would stop,
+   and how early.
+5. For a failure worth a closer look, `psi replay <trial> --at <n>
+   --samples 10` shows what the model does at that point, and the edit
+   flags (`--append`, `--replace`, `--drop-last`, `--set`) try a change
+   there before anything in psi is changed.
+
+The trial set has one real prompt on a real project (`cog_bare_words`)
+and the tasks here with the most to read and change. It should grow more
+real prompts of the kind used by hand, on more than one project.
+
+## A task from a real project
+
+The loops in daily use came from long prompts on real projects, which the
+small tasks here don't bring out. Such a task is:
+
+- `prompt.md`: the prompt as it was typed.
+- `source`: one line, the path to a local git repository and a ref in it,
+  for example `~/projects/cog psi-trial-bare-words`. Make a branch or tag
+  for the task, so the start stays the same while the project moves on.
+  The trial gets that ref's files (`git archive`); the repository itself
+  is not touched, and the task works only on a machine that has it.
+- `setup.sh`, if the project needs something a trial can't fetch: it runs
+  on the host in the trial's copy, before the trial (`go mod vendor`).
+- `hidden/check.sh` and `hidden/total`: a simple outcome check, such as
+  "the tests pass and this input gives that output".
+- The project's toolchain in `Containerfile`.
+
+There is no `reference/`: `psi eval check` then checks only that the
+untouched project fails the grader. Add the task to `code/TRIAL`.
 
 ## What a trial does
 

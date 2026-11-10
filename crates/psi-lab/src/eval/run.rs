@@ -34,6 +34,10 @@ pub struct RunConfig {
     pub n_ctx: Option<u64>,
     /// The psi binary for psi trials (the one running `psi eval`).
     pub psi_binary: Option<PathBuf>,
+    /// The model profile the trials use (`--model`, from the host's
+    /// models.jsonc): its sampling and thinking setting go into each
+    /// trial's own models.jsonc. `None` sends neither.
+    pub profile: Option<psi_ai::profile::ModelProfile>,
     /// Copied into each psi trial's `~/.psi` (settings): a variant, such
     /// as a battery turned on.
     pub psi_config: Option<PathBuf>,
@@ -91,6 +95,9 @@ pub fn run(cfg: &RunConfig, progress: &mut dyn FnMut(&str)) -> Result<Vec<TrialR
             .unwrap_or("?")
             .to_owned(),
         server_props: server.props.clone(),
+        profile: cfg.profile.as_ref().map(
+            |p| serde_json::json!({"id": p.id, "sampling": p.sampling, "reasoning": p.reasoning}),
+        ),
         psi_config: cfg.psi_config.as_ref().map(|p| p.display().to_string()),
     };
     fsutil::write(
@@ -108,6 +115,7 @@ pub fn run(cfg: &RunConfig, progress: &mut dyn FnMut(&str)) -> Result<Vec<TrialR
         timeout_s: cfg.timeout_s,
         network,
         psi_binary: cfg.psi_binary.as_deref(),
+        profile: cfg.profile.as_ref(),
         psi_config: cfg.psi_config.as_deref(),
     };
     let mut results = Vec::new();
@@ -200,17 +208,18 @@ probe example.com 443 internet-dns"#
 }
 
 /// One task's grader check: the reference must pass every check and the
-/// untouched repo must not.
+/// untouched repo must not. A task without a reference (one from a real
+/// project) is checked only for the second.
 #[derive(Debug, Clone)]
 pub struct CheckRow {
     pub task: String,
-    pub reference: Grade,
+    pub reference: Option<Grade>,
     pub blank: Grade,
 }
 
 impl CheckRow {
     pub fn ok(&self) -> bool {
-        self.reference.all_passed() && !self.blank.all_passed()
+        self.reference.is_none_or(|r| r.all_passed()) && !self.blank.all_passed()
     }
 }
 
@@ -225,7 +234,8 @@ impl CheckReport {
     }
 }
 
-/// Grades each task's `repo/` with `reference/` overlaid, and the bare `repo/`.
+/// Grades each task's starting project with `reference/` overlaid (when
+/// it has one), and the starting project as it is.
 pub fn check_graders(
     evals_dir: &Path,
     results_dir: &Path,
@@ -240,21 +250,26 @@ pub fn check_graders(
     let mut report = CheckReport::default();
     for task in &tasks {
         let out = results_dir.join(&task.name);
-        let src = out.join("reference-src");
-        fsutil::copy_dir(&task.dir.join("repo"), &src, &[])?;
-        fsutil::copy_dir(&task.dir.join("reference"), &src, &[])?;
-        let reference = grade(task, &lib, &src, &out.join("reference"))?;
-        let blank = grade(task, &lib, &task.dir.join("repo"), &out.join("blank"))?;
+        let start = out.join("blank-src");
+        task.materialize(&start)?;
+        let reference = if task.has_reference() {
+            let src = out.join("reference-src");
+            fsutil::copy_dir(&start, &src, &[])?;
+            fsutil::copy_dir(&task.dir.join("reference"), &src, &[])?;
+            Some(grade(task, &lib, &src, &out.join("reference"))?)
+        } else {
+            None
+        };
+        let blank = grade(task, &lib, &start, &out.join("blank"))?;
         let row = CheckRow {
             task: task.name.clone(),
             reference,
             blank,
         };
+        let shown = reference.map_or("none".to_owned(), |r| format!("{}/{}", r.passed, r.total));
         progress(&format!(
-            "{:<24} reference {}/{}  blank {}/{}  {}",
+            "{:<24} reference {shown}  blank {}/{}  {}",
             row.task,
-            reference.passed,
-            reference.total,
             blank.passed,
             blank.total,
             if row.ok() { "ok" } else { "WRONG" }

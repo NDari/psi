@@ -68,6 +68,8 @@ pub struct AgentConfig {
     /// The context window in tokens.
     pub n_ctx: u64,
     pub enable_thinking: Option<bool>,
+    /// The model profile's sampling, sent with every request.
+    pub sampling: serde_json::Map<String, Value>,
     pub budgets: Budgets,
     /// The limits on one task of a plan (`run_plan`): the TUI's own chat
     /// has no request limit, a task always does.
@@ -195,11 +197,7 @@ type Planned = Result<(Tool, serde_json::Map<String, Value>), String>;
 /// the free-text intent.
 fn signature(call: &RawToolCall, p: &Planned) -> String {
     match p {
-        Ok((c, args)) => {
-            let mut a = args.clone();
-            a.remove("intent");
-            format!("{} {}", c.name(), Value::Object(a))
-        }
+        Ok((c, args)) => crate::guards::call_signature(c.name(), args),
         Err(_) => format!("{} {}", call.name, call.arguments),
     }
 }
@@ -444,6 +442,7 @@ impl Agent {
         if self.session.entries().is_empty() {
             let mut data = json!({"agent": "psi", "version": env!("CARGO_PKG_VERSION"),
                                   "cwd": self.ctx.cwd, "model": self.cfg.model,
+                                  "attended": self.cfg.attended,
                                   "safety": self.safety.info});
             if let Some(s) = &self.server {
                 data["server"] = s.clone();
@@ -685,6 +684,7 @@ impl Agent {
             tools,
             max_tokens: self.cfg.max_output,
             enable_thinking: self.cfg.enable_thinking,
+            sampling: self.cfg.sampling.clone(),
         }
     }
 

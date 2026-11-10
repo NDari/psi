@@ -21,6 +21,15 @@ pub const NO_PROGRESS_PAUSE: u32 = 2 * NO_PROGRESS_TURNS;
 const NOTE_CALLS: usize = 10;
 /// Characters of each call a loop note shows.
 const NOTE_CALL_CHARS: usize = 200;
+/// A call's identity for the guards: the tool and its arguments, without
+/// the free-text intent. The loop and `psi guards` (which runs the guards
+/// over recordings) both use it.
+pub fn call_signature(name: &str, args: &serde_json::Map<String, serde_json::Value>) -> String {
+    let mut a = args.clone();
+    a.remove("intent");
+    format!("{name} {}", serde_json::Value::Object(a))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuardAction {
     /// Add this line to the call's result.

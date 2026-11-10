@@ -1,4 +1,6 @@
-//! `psi replay` (psi-plan.md §12.4) and replay scripts from recorded runs.
+//! `psi replay` (psi-plan.md §12.4; design-going-forward.md, goal 4): a
+//! recorded request sent again, as it was or with an edit, and replay
+//! scripts from recorded runs.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -71,6 +73,80 @@ pub fn request_at(wire: &Path, step: usize) -> Result<Vec<u8>> {
         )));
     }
     Ok(reqs[step - 1].body.clone().into_bytes())
+}
+
+/// A change to a recorded request before it is sent again: the way to try
+/// a wording, a note or a cut against what the model really saw.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Edit {
+    /// Add a user message at the end.
+    Append(String),
+    /// Replace text wherever it is in the messages and the tool
+    /// descriptions (the system prompt, a tool result, a tool's text).
+    Replace { old: String, new: String },
+    /// Remove the last messages.
+    DropLast(usize),
+    /// Set a field of the request itself, such as `temperature`.
+    Set { key: String, value: Value },
+}
+
+fn replace_in(v: &mut Value, old: &str, new: &str) -> usize {
+    match v {
+        Value::String(s) => {
+            let n = s.matches(old).count();
+            if n > 0 {
+                *s = s.replace(old, new);
+            }
+            n
+        }
+        Value::Array(a) => a.iter_mut().map(|x| replace_in(x, old, new)).sum(),
+        Value::Object(o) => o.values_mut().map(|x| replace_in(x, old, new)).sum(),
+        _ => 0,
+    }
+}
+
+/// The recorded request `body` with `edits` applied in order. An edit that
+/// changes nothing is an error: the answer would be about the wrong request.
+pub fn edit_request(body: &[u8], edits: &[Edit]) -> Result<Vec<u8>> {
+    if edits.is_empty() {
+        return Ok(body.to_vec());
+    }
+    let mut v: Value = serde_json::from_slice(body)
+        .map_err(|e| other(format!("the recorded request is not JSON: {e}")))?;
+    for edit in edits {
+        match edit {
+            Edit::Append(text) => {
+                let messages = v["messages"]
+                    .as_array_mut()
+                    .ok_or_else(|| other("the recorded request has no messages"))?;
+                messages.push(serde_json::json!({"role": "user", "content": text}));
+            }
+            Edit::Replace { old, new } => {
+                let mut n = replace_in(&mut v["messages"], old, new);
+                n += replace_in(&mut v["tools"], old, new);
+                if n == 0 {
+                    return Err(other(format!(
+                        "--replace: {old:?} is not in the request's messages or tools"
+                    )));
+                }
+            }
+            Edit::DropLast(n) => {
+                let messages = v["messages"]
+                    .as_array_mut()
+                    .ok_or_else(|| other("the recorded request has no messages"))?;
+                // The system prompt and the first user message stay.
+                if *n == 0 || messages.len() < n + 2 {
+                    return Err(other(format!(
+                        "--drop-last {n}: the request has {} messages, and the first two stay",
+                        messages.len()
+                    )));
+                }
+                messages.truncate(messages.len() - n);
+            }
+            Edit::Set { key, value } => v[key.as_str()] = value.clone(),
+        }
+    }
+    Ok(serde_json::to_vec(&v).unwrap_or_default())
 }
 
 /// One line describing what a response does next.
@@ -167,6 +243,7 @@ mod tests {
             tools: vec![],
             max_tokens: 5,
             enable_thinking: None,
+            sampling: Default::default(),
         };
         client
             .chat(&req, &CancellationToken::new(), &mut |_| {})
@@ -187,5 +264,67 @@ mod tests {
             .map(|r| r["seed"].clone())
             .collect();
         assert_eq!(seeds, [Value::from(0), Value::from(1)]);
+    }
+
+    #[test]
+    fn a_recorded_request_is_edited_before_it_is_sent_again() {
+        let body = serde_json::json!({
+            "model": "local",
+            "messages": [
+                {"role": "system", "content": "Be brief. Don't repeat calls."},
+                {"role": "user", "content": "go"},
+                {"role": "assistant", "content": "", "tool_calls": [
+                    {"id": "c1", "function": {"name": "bash", "arguments": "{\"command\":\"ls\"}"}}]},
+                {"role": "tool", "tool_call_id": "c1", "content": "a.txt\n[exit code 1]"},
+            ],
+            "tools": [{"type": "function", "function": {"name": "bash", "description": "Run a bash command"}}],
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        assert_eq!(
+            edit_request(&bytes, &[]).unwrap(),
+            bytes,
+            "no edit: the exact bytes"
+        );
+        let edits = [
+            Edit::Replace {
+                old: "[exit code 1]".into(),
+                new: "[exit code 1: nothing matched]".into(),
+            },
+            Edit::Replace {
+                old: "Run a bash command".into(),
+                new: "Run a command".into(),
+            },
+            Edit::Append("[Note from psi] Stop repeating.".into()),
+            Edit::Set {
+                key: "temperature".into(),
+                value: serde_json::json!(1.0),
+            },
+        ];
+        let v: Value = serde_json::from_slice(&edit_request(&bytes, &edits).unwrap()).unwrap();
+        assert_eq!(
+            v["messages"][3]["content"],
+            "a.txt\n[exit code 1: nothing matched]"
+        );
+        assert_eq!(v["tools"][0]["function"]["description"], "Run a command");
+        assert_eq!(
+            v["messages"][4],
+            serde_json::json!({"role": "user", "content": "[Note from psi] Stop repeating."})
+        );
+        assert_eq!(v["temperature"], 1.0);
+        // The last turn cut out: the call and its result.
+        let cut = edit_request(&bytes, &[Edit::DropLast(2)]).unwrap();
+        let v: Value = serde_json::from_slice(&cut).unwrap();
+        assert_eq!(v["messages"].as_array().unwrap().len(), 2);
+        // An edit that changes nothing is an error, not a silent no-op.
+        let missing = Edit::Replace {
+            old: "not there".into(),
+            new: "x".into(),
+        };
+        let err = edit_request(&bytes, &[missing]).unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "--replace: \"not there\" is not in the request's messages or tools"
+        );
+        assert!(edit_request(&bytes, &[Edit::DropLast(3)]).is_err());
     }
 }

@@ -195,6 +195,7 @@ pub async fn prepare(args: &RunArgs) -> Result<Prepared> {
         max_output: profile.max_output,
         n_ctx,
         enable_thinking: profile.reasoning.enable_thinking,
+        sampling: profile.sampling.clone(),
         budgets,
         task_budgets,
         system_prompt: system,

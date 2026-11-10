@@ -72,6 +72,7 @@ impl Fx {
             max_output: 8192,
             n_ctx: 65_536,
             enable_thinking: None,
+            sampling: Default::default(),
             budgets: Budgets::default(),
             system_prompt: "sys".into(),
             tools: core_tools(),

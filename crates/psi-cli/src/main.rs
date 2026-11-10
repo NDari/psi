@@ -81,8 +81,20 @@ enum Command {
     Eval(EvalCommand),
     /// Show a session or eval trial as a timeline, with patterns flagged.
     Inspect(InspectArgs),
-    /// Resend the exact request of one step from a session's wire log.
+    /// Send one step's recorded request again, as it was or with an edit, and tally what the model does next.
     Replay(ReplayArgs),
+    /// Run today's guards over recorded sessions: where each would nudge or stop.
+    Guards {
+        /// Session files, eval trials or runs, or directories of them.
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+        /// Only runs the guards would stop.
+        #[arg(long)]
+        stops: bool,
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Serve a recorded run's model responses like llama-server (for tests).
     #[command(hide = true)]
     ReplayServer(ReplayServerArgs),
@@ -106,7 +118,22 @@ struct ReplayArgs {
     /// The model profile to send to (default: the first in models.jsonc).
     #[arg(long)]
     model: Option<String>,
-    // TODO(phase-7): --variant (§12.4).
+    /// Edit: add a user message at the end (a note, an instruction).
+    #[arg(long, value_name = "TEXT")]
+    append: Vec<String>,
+    /// Edit: replace text wherever it is in the messages and tool descriptions.
+    #[arg(long, num_args = 2, value_names = ["OLD", "NEW"], action = clap::ArgAction::Append)]
+    replace: Vec<String>,
+    /// Edit: remove the last N messages (a loop's repeating turns).
+    #[arg(long, value_name = "N")]
+    drop_last: Option<usize>,
+    /// Edit: set a field of the request, like temperature=1.0.
+    #[arg(long, value_name = "KEY=VALUE")]
+    set: Vec<String>,
+    /// Count the samples whose next action contains this text: the rule to
+    /// judge the edit by, given up front.
+    #[arg(long, value_name = "TEXT")]
+    count: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -123,7 +150,7 @@ struct ReplayServerArgs {
 
 #[derive(Debug, Subcommand)]
 enum EvalCommand {
-    /// Check the graders: every reference passes, every untouched repo fails.
+    /// Check the graders: every reference passes (where a task has one), every untouched repo fails.
     Check {
         #[command(flatten)]
         common: EvalCommon,
@@ -137,15 +164,16 @@ enum EvalCommand {
     Run {
         #[command(flatten)]
         common: EvalCommon,
-        /// quick, all, or task names separated by commas.
+        /// quick, trial, all, or task names separated by commas.
         #[arg(long, default_value = "quick", add = ArgValueCandidates::new(complete::tasks))]
         tasks: String,
         /// llama-server's port on 127.0.0.1.
         #[arg(long, default_value_t = 9931)]
         port: u16,
-        /// Model requests per trial before it is stopped.
-        #[arg(long, default_value_t = 40)]
-        steps: u32,
+        /// Model requests per trial before it is stopped (default: the set's
+        /// own `@steps`, else 40).
+        #[arg(long)]
+        steps: Option<u32>,
         /// Seconds per trial.
         #[arg(long, default_value_t = 1200)]
         timeout: u64,
@@ -156,7 +184,11 @@ enum EvalCommand {
         /// than the server's, it tests compaction without restarting llama-server.
         #[arg(long, value_name = "TOKENS")]
         n_ctx: Option<u64>,
-        /// Appended to the results directory's name.
+        /// The model profile from ~/.psi/models.jsonc whose sampling and thinking
+        /// setting the trials use (default: none; the server's own settings apply).
+        #[arg(long, add = ArgValueCandidates::new(complete::models))]
+        model: Option<String>,
+        /// Appended to the results directory's name (default: the model, or psi).
         #[arg(long)]
         label: Option<String>,
         /// The psi binary the trials run (default: this one). It must run in
@@ -233,6 +265,15 @@ fn run(mut cli: Cli) -> Result<ExitCode> {
         Some(Command::Eval(cmd)) => eval_command(cmd),
         Some(Command::Inspect(args)) => inspect_command(args),
         Some(Command::Replay(args)) => runtime()?.block_on(replay_command(args)),
+        Some(Command::Guards { paths, stops, json }) => {
+            let sessions = psi_lab::guards::replay_paths(&paths)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&sessions)?);
+            } else {
+                print!("{}", psi_lab::guards::report(&sessions, stops));
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         Some(Command::ReplayServer(args)) => replay_server_command(args),
         Some(Command::Help { topic }) => help_command(topic.as_deref()),
         None => agent_command(cli, None),
@@ -313,15 +354,46 @@ fn wire_path(p: &Path) -> PathBuf {
 async fn replay_command(args: ReplayArgs) -> Result<ExitCode> {
     let wire = wire_path(&args.path);
     let body = psi_lab::replay::request_at(&wire, args.at)?;
+    // Edits apply in this order: cut, replace, set, then the added message.
+    use psi_lab::replay::Edit;
+    let mut edits = Vec::new();
+    edits.extend(args.drop_last.map(Edit::DropLast));
+    for pair in args.replace.chunks(2) {
+        if let [old, new] = pair {
+            edits.push(Edit::Replace {
+                old: old.clone(),
+                new: new.clone(),
+            });
+        }
+    }
+    for s in &args.set {
+        let (key, value) = s
+            .split_once('=')
+            .with_context(|| format!("--set {s}: write it as key=value"))?;
+        let value = serde_json::from_str(value).unwrap_or_else(|_| Value::from(value));
+        edits.push(Edit::Set {
+            key: key.to_owned(),
+            value,
+        });
+    }
+    edits.extend(args.append.iter().cloned().map(Edit::Append));
+    let body = psi_lab::replay::edit_request(&body, &edits)?;
     let profile = run_mode::pick_profile(std::env::home_dir().as_deref(), args.model.as_deref())?;
     let client = psi_ai::Client::new(&profile.base_url).with_headers(&profile.headers);
     let (actions, dist) = psi_lab::replay::replay(&client, body, args.samples).await?;
     if args.samples <= 1 {
         println!("{}", actions.join("\n"));
     } else {
-        for (action, n) in dist.iter().rev() {
+        // Most frequent first.
+        let mut rows: Vec<_> = dist.iter().collect();
+        rows.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        for (action, n) in rows {
             println!("{n:>3}  {action}");
         }
+    }
+    if let Some(text) = &args.count {
+        let n = actions.iter().filter(|a| a.contains(text.as_str())).count();
+        println!("{n} of {} contain {text:?}", actions.len());
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -426,21 +498,34 @@ fn eval_command(cmd: EvalCommand) -> Result<ExitCode> {
             timeout,
             max_output,
             n_ctx,
+            model,
             label,
             psi_binary,
             psi_config,
         } => {
             check_evals_dir(&common.evals)?;
-            let suffix = label.unwrap_or_else(|| "psi".to_owned());
+            let profile = match &model {
+                Some(id) => Some(run_mode::pick_profile(
+                    std::env::home_dir().as_deref(),
+                    Some(id),
+                )?),
+                None => None,
+            };
+            let suffix = label.or(model).unwrap_or_else(|| "psi".to_owned());
+            let selection = Selection::parse(&tasks);
+            let steps = steps
+                .or_else(|| eval::set_steps(&common.evals.join("code"), &selection))
+                .unwrap_or(40);
             let cfg = RunConfig {
                 evals_dir: common.evals,
                 results_dir: results_dir(common.results, Some(&suffix))?,
-                selection: Selection::parse(&tasks),
+                selection,
                 port,
                 steps,
                 timeout_s: timeout,
                 max_output,
                 n_ctx,
+                profile,
                 psi_binary: psi_binary
                     .map(|p| std::path::absolute(&p).unwrap_or(p))
                     .or_else(|| std::env::current_exe().ok()),

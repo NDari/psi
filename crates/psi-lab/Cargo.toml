@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+psi-agent = { path = "../psi-agent" }
 psi-ai = { path = "../psi-ai" }
 psi-session = { path = "../psi-session" }
 serde.workspace = true

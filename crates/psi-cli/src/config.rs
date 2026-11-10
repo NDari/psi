@@ -45,7 +45,13 @@ pub fn load_models(home: Option<&Path>) -> Result<psi_ai::profile::ModelsFile> {
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
     let origin = path.display().to_string();
-    serde_json::from_value(parse_jsonc(&text, &origin)?).with_context(|| origin.clone())
+    let models: psi_ai::profile::ModelsFile =
+        serde_json::from_value(parse_jsonc(&text, &origin)?).with_context(|| origin.clone())?;
+    for m in &models.models {
+        m.check_sampling()
+            .map_err(|e| anyhow::anyhow!("{origin}: {e}"))?;
+    }
+    Ok(models)
 }
 
 /// Parses JSONC: JSON plus comments and trailing commas, nothing looser.

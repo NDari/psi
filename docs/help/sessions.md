@@ -10,5 +10,12 @@ prompting again starts a new branch.
   restores the files too. /label names the current point.
 - /fork starts a new session from the history before one of your prompts and puts that
   prompt in the editor to edit and send; the original session is left as it was.
-- psi inspect <session> shows a session as a timeline; psi replay <session> --at <n>
-  resends one request.
+- psi inspect <session> shows a session as a timeline.
+- psi guards <session or directory>... runs today's guards over recordings and says
+  where each would nudge or stop a run (--stops: only runs they would stop).
+- psi replay <session> --at <n> sends request n again. --samples <k> draws k
+  continuations and tallies what the model does next. Edits try a change against what
+  the model really saw: --append <text> adds a user message, --replace <old> <new>
+  changes text in the messages or tool descriptions, --drop-last <n> removes the last
+  messages, --set temperature=1.0 sets a request field. --count <text> counts the
+  samples whose next action contains the text.

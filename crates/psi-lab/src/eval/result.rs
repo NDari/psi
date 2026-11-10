@@ -84,6 +84,10 @@ pub struct RunMeta {
     pub server_build: String,
     /// `/props` as the server reported it at the start of the run.
     pub server_props: Value,
+    /// The model profile the trials used (id, sampling, thinking), if one
+    /// was named with `--model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<Value>,
     /// The directory copied into each psi trial's ~/.psi, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub psi_config: Option<String>,

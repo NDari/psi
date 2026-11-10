@@ -61,10 +61,13 @@ pub struct ChatRequest {
     pub max_tokens: u64,
     /// Sent as `chat_template_kwargs.enable_thinking` when set.
     pub enable_thinking: Option<bool>,
+    /// The model profile's sampling (`temperature`, `top_p`, ...), sent as
+    /// top-level fields. Empty leaves the server's own settings in force.
+    pub sampling: serde_json::Map<String, Value>,
 }
 
 impl ChatRequest {
-    /// The exact bytes sent. No sampling fields: the server's settings apply.
+    /// The exact bytes sent.
     pub fn to_bytes(&self) -> Vec<u8> {
         self.body(false)
     }
@@ -84,6 +87,12 @@ impl ChatRequest {
         }
         if let Some(t) = self.enable_thinking {
             body["chat_template_kwargs"] = json!({"enable_thinking": t});
+        }
+        for (k, v) in &self.sampling {
+            // A profile can't replace the request's own fields.
+            if body.get(k).is_none() {
+                body[k] = v.clone();
+            }
         }
         if progress {
             body["return_progress"] = json!(true);
@@ -176,7 +185,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn request_has_no_sampling_and_flat_messages() {
+    fn request_has_flat_messages_and_the_profiles_sampling() {
         let req = ChatRequest {
             model: "local".into(),
             messages: vec![
@@ -198,9 +207,20 @@ mod tests {
             tools: vec![],
             max_tokens: 10,
             enable_thinking: None,
+            sampling: Default::default(),
         };
         let v: Value = serde_json::from_slice(&req.to_bytes()).unwrap();
         assert!(v.get("temperature").is_none());
+        // A profile's sampling goes out as top-level fields, and can't
+        // replace the request's own.
+        let mut sampled = req.clone();
+        sampled.sampling = json!({"temperature": 0.7, "top_k": 20, "max_tokens": 99999})
+            .as_object()
+            .cloned()
+            .unwrap();
+        let s: Value = serde_json::from_slice(&sampled.to_bytes()).unwrap();
+        assert_eq!((&s["temperature"], &s["top_k"]), (&json!(0.7), &json!(20)));
+        assert_eq!(s["max_tokens"], 10);
         assert!(v.get("tools").is_none());
         assert_eq!(
             v["messages"][2]["tool_calls"][0]["function"]["arguments"],

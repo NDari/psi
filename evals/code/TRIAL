@@ -1,0 +1,22 @@
+# The trial set: `psi eval run --tasks trial`, for trying a new model
+# (design-going-forward.md, step 4; evals/README.md, "Trying a new model").
+# Longer tasks than the quick set, with room to run: 120 requests each, so a
+# loop or a run that never ends shows, where 40 would cut it off. Read each
+# trial for how it ended; the count of passes says little.
+#
+# cog_bare_words is a real prompt on a real project (the kind that looped
+# in daily use); the rest are the tasks here with the most to read and
+# change. More real prompts, on more than one project, belong here: each is
+# a task with prompt.md, a source file, a setup.sh if it needs one, and
+# hidden/ (evals/README.md, "A task from a real project").
+@steps 120
+
+cog_bare_words
+multi_config_object
+multi_ini_to_json
+multi_split_package
+multi_sqlite_migration
+multi_priority_feature
+multi_storage_backend
+feat_todo_tags
+long_api_docs
