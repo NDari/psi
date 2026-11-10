@@ -1,5 +1,7 @@
 # Code review, 2026-11-05
 
+> **History.** A review of the code at `d6419be`, before the cuts of 2026-11-09. Many findings are marked fixed, and many are about code that is gone (extensions, MCP, sub-agents, packages, trust, plan mode, the always-ask and read-only checkers). The findings that were open and concern code that still exists are listed in `known-issues.md` ("From the code review of 2026-11-05"). File names and line numbers here are of that day.
+
 A critical review of the whole workspace at `d6419be`, done by seven reviewers in parallel (one per area) and merged here. Nothing was changed. Every area's tests and clippy passed when it was reviewed.
 
 How sure each finding is:

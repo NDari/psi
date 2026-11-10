@@ -1,14 +1,14 @@
 # Experiments to run
 
-Ideas the owner wants to try, kept so they don't get lost. Each entry says what to find out, how, and what's still open. When an experiment is run, note the date, where the results are, and what came of it; if it leads to a change, the change goes through `psi-plan.md` as usual.
+Questions put to a model or a machine, kept so they don't get lost. Each entry says what to find out, how, and what's still open. When an experiment is run, note the date, where the results are, and what came of it. A change that follows from one goes through `design-going-forward.md`: a harness change needs the problem seen more than once, on ordinary tasks.
 
-Not the hypothesis table (`psi-plan.md` §14): those are design bets the plan commits to testing. These are the owner's own questions, often about the machine or the models rather than Psi.
+Entries under "Done" are dated records and are left as written, so some name features that were cut on 2026-11-09 (extensions, sub-agents, MCP, clearing old results, the pi adapter) and cite sections of the old plan (`docs/history/psi-plan-2026-11-09.md`).
 
 ## Open
 
 ### llama-server flags per machine (added 2026-11-01)
 
-**Question:** which llama.cpp settings give the best prompt and generation speed for each reference model on each machine (this Linux box, RTX 4070 Ti SUPER 16 GB; the Mac, M4 Max 64 GB)?
+**Question:** which llama.cpp settings give the best prompt and generation speed for each model in use on each machine (this Linux box, RTX 4070 Ti SUPER 16 GB; the Mac, M4 Max 64 GB)?
 
 **How:** `llama-bench` (ships with llama.cpp) runs every combination of the values given and reports tokens per second for prompt processing and generation. Test at depth, since agent runs spend most of their time with 30K+ tokens in context:
 
@@ -35,28 +35,6 @@ Flags worth sweeping: `-fa`, `-b`/`-ub`, `-ctk`/`-ctv` (KV cache type), `-t`, `-
 
 2048 is about 8% faster up to 16K and the same at 40K; 4096 is slower deep in the context. Adopted: `-ub 2048` in the `qwen35b` recipe, and the Mac server restarted with it. The batch size isn't what slows reading late in a session: the speed falls with depth at every size (attention over the whole context), so the levers there are fewer tokens read (no line numbers, clearing less often) rather than server flags.
 
-### Speculative decoding for Gemma (added 2026-11-01)
-
-**Question:** can Gemma 4 12B generate faster with speculative decoding, the way Qwen does with MTP (about 1.8x)? Gemma's GGUF has no MTP layers, so `llm-up gemma` runs with `--spec-type none`: about 58 tok/s generation and 2,500 tok/s prompt on the 4070 Ti SUPER (2026-11-01 eval run).
-
-**How:** two kinds to try with llama-server, each on a short eval run or a few long answers, reading the server's timing lines:
-- A small draft model with the same tokenizer: `--spec-type draft-simple --hf-repo-draft <small Gemma 4 GGUF>`. Which small Gemma 4 works as a draft is unchecked.
-- No draft model: the n-gram types (`ngram-simple`, `ngram-mod`, `ngram-cache`, ...), which guess from text already in the context. They may suit agent work, where the model often rewrites code it just read.
-
-**Open:**
-- A draft model costs VRAM; check it still fits at 128K context on 16 GB.
-- Speculative decoding shouldn't change the output, but confirm on one run that nothing looks off.
-
-### A lower step cap for eval runs (added 2026-11-01)
-
-**Question:** can eval runs be faster, and fail sooner, with a lower step cap? The owner asked about a cap of 10 (the default is 40).
-
-**How:** a flat cap of 10 would turn most of the quick set into step-cap failures (35B passes took 6 to 40 steps; only `fix_invoice_rounding` and `sh_logreport` always finish within 10), which say nothing about the harness. The better candidate is a per-task cap of about twice the steps a pass takes (an optional `steps` file per task), as `just eval-ext` does with 20: a trial that hits it has gone well past normal and is worth reading.
-
-**Open:**
-- Earlier runs and the pi baselines used 40, so a changed cap breaks comparisons with them.
-- Deferred by the owner until run time becomes a problem.
-
 ### write says what a replacement removed (added 2026-11-01)
 
 **Question:** does the model keep code it didn't mean to drop if write's result names what the replacement removed? In `fix_retry_backoff` the 35B replaced `retry.py` with write and dropped the `retrying` decorator that `sync_job.py` imports, in both runs (`~/.psi/evals/2026-11-01-1638-screen-qwen3.6-35b`, `2026-11-01-1705-quick-g19-qwen3.6-35b`); the result only said "Replaced retry.py (29 lines)".
@@ -67,79 +45,6 @@ Flags worth sweeping: `-fa`, `-b`/`-ub`, `-ctk`/`-ctv` (KV cache type), `-t`, `-
 - Model-facing text: a longer result on every replacement, and a nudge that may make the model restore code it meant to remove.
 - Matching definitions across languages is a heuristic; a rename shows up as a removal.
 - The owner isn't sure it's worth it yet.
-
-### Sub-agent answers survive compaction (added 2026-11-01)
-
-**Question:** at a small window, does a scout's report help the main agent if the harness keeps it through compactions?
-
-**Context:** in the 16K rerun of `long_api_docs` with sub-agents on (`~/.psi/evals/2026-11-01-2045-h15-16k-fix-qwen3.6-35b`), the step budget's hint made the 35B call scout twice. Each scout read all 8 source files in its own context and returned a complete list of public functions (about 7,500 characters). The main agent then re-read files "to make sure", and two compactions later the report had been squeezed into a 230-word summary (n_ctx/70 words) that no longer held the function lists. It never wrote `docs/API.md`, and the compaction backstop paused it at step 33. Delegation works, but its result is lost before it pays off. At 64K this doesn't come up: the task passes without sub-agents.
-
-**How:** put the latest one or two sub-agent answers into the harness state block written after the summaries (psi-plan.md §7.4 stage 3), taken as of the cut like the rest of the block so the prefix cache holds, with a size cap (say a tenth of the window, cut with a note). Then rerun `long_api_docs` at 16K (`--max-output 4096`, `subagents` on) once.
-
-**Open:**
-- Costs context on every request after a compaction; the cap decides how much.
-- Which answers to keep: the latest, or only those from read-only agents.
-- The main agent may still re-read to check, whatever it is given; that is a model habit, not something this fixes.
-
-### Nudge when re-reading lines whose earlier read is gone (added 2026-11-01)
-
-**Question:** does a one-line note stop the model re-reading a file that can't fit in the window, and get it to act on one part at a time?
-
-**Context:** `multi_split_package` asks to split an 840-line `textkit.py` (about 8K tokens) into a package. At 16K the model wants the whole file in context before writing anything: in the rerun above it read it in 200-line pieces from top to bottom eight times, each piece pushing the previous one out, and never wrote a submodule (paused by the backstop at step 31; the 2026-11-01 16K runs before the fixes looped to the step cap the same way). The step budget can't help, since each step reads one piece. psi-plan.md §7.4 stage 4 already lists this as a candidate guard. `long_api_docs` loops the same way at 16K (2026-11-02): it reads all nine files whole, the step budget holds some back, and it reads them again until the backstop pauses it. It passed once before the step budget existed (`2026-11-01-1557`, a summary absorbed the files it hadn't read yet) and failed in all five 16K runs since.
-
-**How:** count, per file, how often a read covers lines whose earlier read was cleared or summarized away. On the third time, add a line to the result, for example: "You have read these lines of textkit.py 3 times; the whole file can't fit in your 16384-token context. Write what this part needs now (or move lines with bash, e.g. `sed -n`), then read the next part." Rerun `multi_split_package` at 16K once.
-
-**Open:**
-- Model-facing text, and a nudge the 35B may ignore (the no-progress nudge fired twice without effect in the first 16K runs).
-- Line ranges overlap loosely (the model picks different offsets each pass), so "the same lines" needs a tolerant match.
-- Splitting a file without reading it all is hard for a model; this may only move the failure.
-
-### MCP in the eval, and language-server tools (added 2026-11-01)
-
-**Question:** does the 35B use MCP tools correctly in real runs, and do language-server tools (definition, references, diagnostics, rename) help on multi-file changes? This is H-16 in `psi-plan.md`; no eval run has used an MCP server yet, so this is the first MCP eval to do.
-
-**Context:** two hands-on tries in the Psi repo (rust-analyzer, the 35B, "where is fit_context called" and "what breaks if plan_clear changes"):
-- `isaacphi/mcp-language-server` v0.1.1 killed its own rust-analyzer half a second after starting (it sent a malformed message), so every call failed with "broken pipe" while the server stayed connected. That led to showing failed calls and stderr in `/mcp` and `psi mcp list`.
-- The STRd6 fork (`go install github.com/STRd6/mcp-language-server@latest`, 19 tools, trimmed to definition, references, diagnostics, hover and rename_symbol: about 900 tokens) worked. The model called `references` first on its own both times. Rough spots: it guessed qualified names (`Agent::fit_context`, `Agent.plan_clear`) three times before the bare name worked; one `references` answer missed the production caller (`fit.rs:157`), probably rust-analyzer still indexing; results are positions only, so it read the files after; for callers of callers it went back to grep. On "where is X used" grep is already good, so the gain was small; diagnostics after an edit and cross-file renames are where it should matter more.
-
-**How:**
-1. Put a server in the eval image: pyright (`npm i -g pyright`) and the bridge binary built into the Containerfile, since the tasks are mostly Python and the container has no network. The `--psi-config` directory then holds an `mcp.json` (the bridge with `--lsp pyright-langserver -- --stdio`, `tools` trimmed, `approval: never` for the reading tools).
-2. One quick-set run with it, read the transcripts: are the tools called, with correct names and arguments, and do failures stay readable? This is the correctness check for MCP itself.
-3. Then the multi-file tasks (`multi_rename_callers`, `multi_config_object`, `multi_split_package`, `multi_shipping_bug`) with and without the server, one run each, directional only: steps, reads, and whether `rename_symbol` or `diagnostics` replace grep and test runs.
-
-**Open:**
-- The bridge is a third-party binary in the eval image; pin its version.
-- The cold index may make the first calls incomplete; a warm-up (the first prompt waits up to 10 seconds for servers) may not cover indexing.
-- The model guessing qualified symbol names is a model habit; a line in the tool description from the server can't be changed by Psi, but a skill or prompt line could say to use bare names.
-- One run each; per AGENTS.md, a difference here is a direction, not a score.
-
-**Run 2026-11-01** (`~/.psi/evals/2026-11-01-2215-h16-lsp-qwen3.6-35b`, the 35B at 64K, the quick set plus `multi_rename_callers` and `multi_shipping_bug`, variant `evals/variants/lsp`): 10 of 12 pass (8 of 10 on the quick set), no harness failures, and not one MCP call in 12 trials, though the five tools were declared on every request (about 900 tokens each time) and the server worked (checked in the image before the run; no errors in any trial). On `multi_rename_callers`, the task `rename_symbol` exists for, the model grepped, read the 8 files, made 11 edits and passed in 14 steps. So step 3 (with and without) has nothing to compare. The same pattern as sub-agents (H-15): the 35B uses an extra tool when the request points at it ("where is X called", in the hands-on tries) and not otherwise, and at 64K on these small projects grep and read are enough.
-
-**Still open:** whether one system-prompt line naming the MCP tools and what they are for changes that (pi lists MCP servers in its system prompt); model-facing text, so a separate run. Projects big enough that grep misleads (many same-named symbols) would be the case where these tools should matter.
-
-### The model card's sampling for the 35B (added 2026-11-03)
-
-**Question:** do the model card's non-thinking settings (`--temp 0.7 --top-p 0.8 --top-k 20 --min-p 0 --presence-penalty 1.5`) beat the server's defaults (temp 1.0, top-p 0.95, min-p 0.05)? Sharper sampling should mean fewer odd token splits (the cache losses after long answers) and higher MTP draft acceptance (a server log line on 2026-11-03 showed 0.45, against 0.84 on average on 2026-11-01).
-
-**How:** replay a fixed set of recorded requests against llama-server with each setting, as in the 2026-11-01 speed runs, and read generation tok/s and draft acceptance; count answers whose generated token count exceeds their re-tokenized length (the odd splits). Not pass rates: one run can't compare those.
-
-**Open:**
-- Presence penalty may hurt code (repeated identifiers); watch for it in the transcripts.
-
-**Applied 2026-11-05 without the comparison:** `llm-up qwen35b` and `qwen27b` now pass the card's thinking-off settings. Before, the 35B ran on the sampling in its GGUF (`general.sampling.*`: temp 1.0, top-p 0.95, top-k 20, the card's thinking setting) and llama.cpp's defaults for the rest (min-p 0.05, presence penalty 0, which no GGUF key can set). The 27B had the thinking setting by flag.
-
-### An outline in place of a cleared read (added 2026-11-05)
-
-**Question:** when clearing is on, would replacing a cleared `read` with an outline of the file, made by a parser and not the model, keep what the model needs, so it doesn't read the file again blindly?
-
-**Context:** the cog review with clearing on looped after its reads were cleared, and the note said "Run it again if you need it" (the cog review entry, below). The Complexity Trap (Lindenbauer et al., [arXiv 2508.21433](https://arxiv.org/abs/2508.21433), NeurIPS 2025 DL4C) found the opposite on SWE-bench Verified: masking old observations matched LLM summaries at about half the cost, with large models on bug-fix tasks, in SWE-agent only. So the note may matter more than the clearing. Aider's repo map (tree-sitter, ranked by references) is the known example of a parser outline in a coding agent.
-
-**How:** for a cleared `read` of a source file, the note lists the file's top-level items with their line ranges (functions, types, sections of a Markdown file), from tree-sitter, and says to read a range when the body is needed; other results keep today's note. Model-facing text, so an eval run (D-32) on the owner's go, with clearing on: the cog review again and the 16K tasks where clearing mattered. Look for re-reads of whole files after a clearing, against the clearing-on cog run.
-
-**Open:**
-- Which languages: tree-sitter grammars cost build size; psi already has tree-sitter-bash for always-ask.
-- An outline of a long file can itself be large; cap it.
-- Whether to clear only results the model has used since (it answered or acted after them), as masking older turns does, whatever the note says.
 
 ### Summaries without thinking (added 2026-11-05)
 
@@ -161,7 +66,7 @@ Flags worth sweeping: `-fa`, `-b`/`-ub`, `-ctk`/`-ctv` (KV cache type), `-t`, `-
 
 **Question:** when the loop note fails and the model makes the same call again, should the harness not run it, and say so with the output it gave before?
 
-**Context:** "Does the loop note last?" (below). In run 1 the model sent one command 12 more times after the note, each a bare tool call, each with the same output. A refusal is the plan's second choice in principle 4 ("refuse with the exact fix"), ahead of a nudge, and it takes away the one thing the loop still gets: a fresh result.
+**Context:** "Does the loop note last?" (below). In run 1 the model sent one command 12 more times after the note, each a bare tool call, each with the same output. A refusal ("refuse with the exact fix") comes ahead of a nudge in the harness's order of choices, and it takes away the one thing the loop still gets: a fresh result.
 
 **How:** sampled replay first, no build. Take the requests that followed the note in runs 1 and 4 (`2026-11-09-2210_5f3b3b8d`, `2229_9ae9e8e4`) and the 14 recorded loops, and replace the last repeated result with a refusal, for example "Not run: you ran this exact command N times and no file changed since. Its output was: (the earlier output, cut)". A few seeds each, against the request as recorded. The measure as before, fixed up front: repeat, new or answer, with the new calls listed.
 
@@ -179,7 +84,7 @@ Flags worth sweeping: `-fa`, `-b`/`-ub`, `-ctk`/`-ctv` (KV cache type), `-t`, `-
 **How:** sampled replay on the 14 recorded loop requests, as recorded, with a few seeds at each of a few settings (the server's; temp 1.0; temp 1.0 with top-p 0.95), then with the loop note added. Tally repeat, new and answer, and list the new calls.
 
 **Open:**
-- It needs sampling sent per request (`fable-suggestions.md`, A1), which Psi doesn't do yet; first check that llama-server's chat endpoint takes the fields.
+- Sampling goes out per request since 2026-11-09 (the profile's `sampling`), and `psi replay --set temperature=1.0` tries a setting on a recorded request, so this needs no build to try.
 - A higher temperature may write worse calls or code; read the new calls, don't only count them.
 - Draft acceptance with MTP falls as sampling loosens, so each try is slower.
 - If it works, where it goes: before the nudge (the harness quietly asks again), or after the note fails.
@@ -231,6 +136,20 @@ The note, as a user message at the end: "[Note from psi] This task has made N re
 **Open:**
 - A note for a task that has only read, built into `psi run`. Not built: it is new model-facing text, and it only fits where a change is expected (a plan's task), not a question asked with `-p`. To decide: after how many requests (half the task's limit?), and whether once.
 - The single-prompt run with the note after a summary was stopped at 27 requests, before any summary, so the note is still untested live.
+
+## Closed without a run
+
+Removed on 2026-11-10 with step 6 of `design-going-forward.md`; the full text is in the git history (before that date).
+
+| Entry | Added | Why closed |
+|---|---|---|
+| Speculative decoding for Gemma | 2026-11-01 | One class of model: the small models are no longer tuned for. |
+| A lower step cap for eval runs | 2026-11-01 | A task set can carry its own request limit (`@steps`), and the comparisons with pi that a changed cap would have broken are gone. |
+| Sub-agent answers survive compaction | 2026-11-01 | Sub-agents were cut; a fresh context per task does that job. |
+| Nudge when re-reading lines whose earlier read is gone | 2026-11-01 | A run gets 2 summaries and then stops, saying the work is too big for one run. |
+| MCP in the eval, and language-server tools | 2026-11-01 | MCP was cut. Its one run: no MCP call in 12 trials. |
+| The model card's sampling for the 35B | 2026-11-03 | Applied 2026-11-05 without the comparison; since 2026-11-09 sampling is in the model's profile. |
+| An outline in place of a cleared read | 2026-11-05 | Clearing old results was cut. |
 
 ## Done
 

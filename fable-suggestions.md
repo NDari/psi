@@ -6,6 +6,35 @@ A review of Psi's design, started at `59d8049`. It has two parts: the broad view
 
 **How sure:** every file and line named was read on 2026-11-09. Claims about llama-server or a model's chat template are from memory and marked "to verify". Where a point is a hypothesis, it says so.
 
+# Where each point stands (2026-11-10)
+
+This review led to `design-going-forward.md` (2026-11-09). The text below is as written that day, so it describes features that were cut since (plan mode, sub-agents, extensions, MCP, clearing, the approval and pause cards) and cites sections of the old plan (`docs/history/psi-plan-2026-11-09.md`). This table is the current state; the code facts in it were checked on 2026-11-10.
+
+| Point | Status |
+|---|---|
+| B1. Harness instructions as user messages | **Open.** The failure and no-progress nudges still go on the tool result; the loop note, the note after a summary and the two answer guards are user messages. Not tested alone. |
+| B2. Loop evidence from one odd task | **Answered.** Extensions are cut, and loops on ordinary tasks are on record (the quick set of 2026-11-10, `known-issues.md`). |
+| B3. Context machinery | **Done** in steps 1 and 3: clearing, the chain and merges are gone; one summary at a time, 2 per run. |
+| B4. Parity features | **Done** in step 1: sub-agents, skills, MCP, plan mode and todo are cut. The scout example no longer applies. |
+| B5. Use the server more | Sampling per request is **done** (step 4). Grammars and slot save and restore are **open** ideas, none tried. |
+| B6. Sampled replay | **Done** in step 4: `psi guards`, and `psi replay` with edits and `--count`. `psi why` was not built. |
+| B7. Long real prompts in the eval | **Started** in step 4: the trial set, with one real prompt on one project (cog), also as a plan. |
+| B8. Split the plan | **Done** in step 6: `psi-plan.md` is a short reference, the old plan is in `docs/history/`. |
+| A1. Sampling in the profile | **Done** in step 4. |
+| A2. Loop handling | **Done:** the no-progress stop and the loop note (2026-11-09); since step 3 nothing pauses, a run stops. Cutting the loop out of the context was tried and not built. |
+| A3. The start of the request stays the same | **Closed:** plan mode and extension hooks, the two things that changed it, are cut. |
+| A4. Thinking sent back or not | **Open.** `preserve_thinking` is still in the 35B's justfile recipes and thinking is still not sent back. |
+| A5. `run.rs` around one per-turn value | **Open, smaller.** `run.rs` is 1,134 lines after the cuts; the sub-agent checks are gone. |
+| C1. No idle timeout on the stream | **Open.** `client.rs` sets only a connect timeout. |
+| C2. `branch()` is quadratic | **Open.** `store.rs` still scans for every parent. |
+| C3. `Result<_, String>` in `psi-agent` | **Open.** |
+| C4. The estimate counts thinking | **Open.** |
+| U1. Show what the model is writing | **Done** 2026-11-09. |
+| U2. Stop on loops in the TUI | **Done** 2026-11-09 (a stop now, not a pause). |
+| U3. `/model`, a thinking toggle, the profile from `/props` | **Open.** |
+| U4. Say what a cache break will cost | **Open**, for `/compact` and a resume; `/plan` and `/reload` as named here are gone. |
+| U5. Save and restore the server's slot | **Open** for `/resume`; the sub-agent case is gone. |
+
 # The broad view
 
 The foundations are better than most harnesses': the record, the principle that the harness acts, and the care for the prompt cache. The main risk is no longer the one the plan guards against. Heimdall grew out of control through strictness. Psi is starting to grow through context machinery and parity features, while the problem that most affects daily use is how the model behaves on a long task.
@@ -143,7 +172,7 @@ The review began with these. They still stand, and matter less than the points a
 
 ### U5. Save and restore the server's slot
 
-- For `/resume` and sub-agents, so a session resumed the next day doesn't start with a cold read. `psi-cog-test-issues.md` already names it for sub-agents.
+- For `/resume` and sub-agents, so a session resumed the next day doesn't start with a cold read. `docs/history/cog-trial-issues-2026-11-03.md` already names it for sub-agents.
 - **To verify:** llama-server's slot save and restore API.
 
 ## Order of the narrower suggestions

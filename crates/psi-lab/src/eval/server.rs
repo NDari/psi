@@ -1,6 +1,4 @@
 //! A minimal HTTP GET for llama-server's `/health` and `/props`.
-//!
-// TODO(phase-2): replace with the psi-ai client once it exists.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};

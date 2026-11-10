@@ -1,5 +1,7 @@
 # Living inside Psi: a survey of quality-of-life options
 
+> **History.** A survey from 2026-11-02, when parity with pi and Lua extensions were goals; `design-going-forward.md` dropped both. Built from its shortlist (`psi help commands`, `psi help settings`): Ctrl+G, notifications and tab progress, Ctrl+R and the draft stash, paste collapse, `/copy`, clickable links, shell completion, the status line. Cut or dropped: the Lua batteries, the docs sub-agent, anything for extensions. The rest are ideas, not plans.
+
 As of 2026-11-02. A survey of what other agents and tools do to make daily use better, measured against what Psi has today. Items are options to discuss, not decisions; the shortlist at the end is a recommendation.
 
 ## Contents

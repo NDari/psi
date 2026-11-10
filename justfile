@@ -18,7 +18,7 @@ state := justfile_directory() / ".llm" / port
 # with every request and wins over these (psi help models).
 qwen := "-hf bartowski/Qwen_Qwen3.5-4B-GGUF:Q4_K_M --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0 --presence-penalty 1.5 --repeat-penalty 1.0"
 gemma := "-hf google/gemma-4-12B-it-qat-q4_0-gguf:Q4_0 --temp 1.0 --top-p 0.95 --top-k 64 --min-p 0"
-# A larger model, not yet a reference model: the owner's command on the Mac,
+# The 35B: the owner's command on the Mac,
 # with thinking off since H-09 (as well on the quick set, a third less output).
 # Sampling is the model card's for thinking off (since 2026-11-05; it was the
 # server's default before). -ub 2048 reads prompts about 8% faster up

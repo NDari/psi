@@ -1,8 +1,6 @@
 //! `psi inspect` (psi-plan.md §12.2): a session or trial as a timeline of
 //! steps, with suspicious patterns flagged.
 
-// TODO(phase-7): the `--html` report (§12.2) alongside HTML export.
-
 use std::fmt::Write;
 use std::path::Path;
 

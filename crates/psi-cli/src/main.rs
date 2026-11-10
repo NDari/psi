@@ -38,7 +38,7 @@ struct Cli {
     #[arg(long, value_name = "FILE", add = ArgValueCandidates::new(complete::sessions))]
     session: Option<PathBuf>,
 
-    /// Model requests per run: print runs stop there (default 40); the TUI pauses and asks (default: no limit).
+    /// Model requests per run, where it stops with the reason (default: 40 for a print run or a plan's task, no limit in the TUI's chat).
     #[arg(long, value_name = "N")]
     max_turns: Option<u32>,
 
@@ -227,7 +227,7 @@ struct InspectArgs {
     /// Only guard events.
     #[arg(long)]
     guards: bool,
-    /// Only blocked or asked policy decisions.
+    /// Only refused calls and blocked writes.
     #[arg(long)]
     blocked: bool,
     /// Only step N, in full.

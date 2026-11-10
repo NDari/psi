@@ -1,5 +1,7 @@
 # Issues from the cog trial
 
+> **History.** Notes from two long sessions in cog on 2026-11-03 and 2026-11-04, with the 35B. Most entries are about features cut on 2026-11-09 (extensions, sub-agents, the todo tool, MCP, clearing, approval cards, project trust) or were fixed. The findings about long sessions (wrong claims carried by summaries, checks claimed and not made) are among the reasons for `design-going-forward.md`, which answers them with small tasks and a check the harness runs. One entry is still open and is in `known-issues.md`: `/diff` in a long session.
+
 Problems the owner notices during the long-session trial in `~/projects/cog` (started 2026-11-03), collected as they come up ("add ... to cog") and gone through together later. Each entry: what happened, where it shows, and what might fix it. Fixed entries move to the end with the commit.
 
 ## Next

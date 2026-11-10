@@ -1,10 +1,10 @@
 # Psi: design going forward
 
-Written 2026-11-09 with the owner, to refocus the project. `psi-plan.md` grew into the spec, the changelog and the lab notebook at once, and its goals drifted toward parity with pi. This file says what Psi is for now, what stays, what goes, and in what order. Where it disagrees with `psi-plan.md`, this file wins; the plan stays as history until it is trimmed.
+Written 2026-11-09 with the owner, to refocus the project. `psi-plan.md` grew into the spec, the changelog and the lab notebook at once, and its goals drifted toward parity with pi. This file says what Psi is for now, what stays, what goes, and in what order. Where it disagrees with any other document, this file wins. Since 2026-11-10 `psi-plan.md` is a short reference to what is built, and the plan as it was is `docs/history/psi-plan-2026-11-09.md`.
 
 The tag `realign` (commit `7dff330`) marks the code as it was before this change of direction, to go back to if needed.
 
-Status: the direction is agreed (below); the open questions are at the end.
+Status: the direction is agreed (below), the order of work is carried out (steps 0 to 6, under "Done"), and the open questions at the end are answered except the limits, which are starting values.
 
 ## Agreed on 2026-11-09
 
@@ -193,6 +193,15 @@ Each step ends with `just check` passing and a short note here of what was done.
   - The quick set with the 27B (`~/.psi/evals/2026-11-10-0952-quick-after-step5-qwen27b`): 7 PASS, 3 MODEL-FAIL, 0 HARNESS-FAIL. The three failures ran into the request limit re-running their own checks or probes.
   - Added: a line after a summary telling the model to go on from the summary's next step (in a replay, 10 of 10 samples then ran the reproducer instead of reading on in the doc the kept tail was in, against 0 of 10 without it; not yet seen in a live run), plan trials in the eval runner, and `--json` with `psi run`.
   - Not built: a note for a task that has only read. In replays 18 of 20 samples edited after it, but it is new model-facing text and waits for the owner.
+- **Step 6 (2026-11-10).** Every document in the repository went through; none states a goal, rule or plan against this file. `just check` passes.
+  - `psi-plan.md` is now a short reference (25 KB, from 145 KB): how each part works as built, with the section numbers kept because code comments cite them, and the decisions the code cites. The plan as it stood is `docs/history/psi-plan-2026-11-09.md`.
+  - `AGENTS.md` is rewritten around this file: the rules of the design, which document holds what, model runs only on the owner's go, replay before new model-facing text.
+  - `known-issues.md`: entries reworded for a harness that stops and never asks; the summary entry lowered; today's loops added; the open findings of the 2026-11-05 code review that concern code still here, and `/diff` in a long session, carried in.
+  - `experiments.md`: seven open entries about cut features or answered questions closed in a table; "Done" entries left as dated records.
+  - `fable-suggestions.md`: a table at the top says where each point stands; the text below is as written.
+  - `code-review.md`, `qol-survey.md` and `psi-cog-test-issues.md` moved to `docs/history/` with a note on what each still means.
+  - The built-in help and `docs/` were kept current in steps 1 to 5; two lines of `psi --help` that still spoke of pausing and asking are fixed, four phase TODOs in the code are removed, and `evals/README.md` no longer speaks of reference models or a chain of summaries.
+  - Not done: `README.md` is still one line.
 
 ## Open questions
 
@@ -201,4 +210,4 @@ Each step ends with `just check` passing and a short note here of what was done.
 3. **Who ticks an item.** Answered in step 3: the harness, when the task ended by itself and the check passed; otherwise the item stays open and the report says why.
 4. **Network inside the sandbox.** Answered in step 2: on, with credentials hidden.
 5. **Limits per task.** Starting values since step 3 (the `limits` setting: 40 requests, 200 tool calls, 2 summaries). Still to be set from use.
-6. **Keybindings and the optional grep, find and ls tools.** Small and unused. Cut with the rest unless wanted.
+6. **Keybindings and the optional grep, find and ls tools.** Answered in step 1: cut.

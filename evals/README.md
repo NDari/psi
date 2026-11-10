@@ -29,17 +29,19 @@ The 40 coding tasks were ported from Heimdall. Names start with the kind of
 task: `fix_` (Python bug fixes), `feat_` (Python features), `sh_` (shell
 work), `multi_` (multi-file changes).
 
-## The compaction task
+## The summary task
 
-`long_api_docs` (not in the quick set) is for compaction at a small window
-(psi-plan.md §7.4): documenting 8 modules means reading about 20K tokens,
-so at a 16K window the context is compacted several times. Its rules,
+`long_api_docs` (not in the quick set) is for the summary path at a small
+window (psi-plan.md §7.4): documenting 8 modules means reading about 20K
+tokens, so at a 16K window the context fills more than once. Its rules,
 including a reviewer's name, a ticket and a version for the last line, are
 in `NOTES.md`, which the model reads first: facts that only a summary (or a
-second read) carries to the end. Run it against a server started with
-`just ctx=16384 llm-up qwen35b`, with `--tasks long_api_docs --max-output
-4096`, and read the trial's compaction entries to see whether the facts
-survived each summary. `gen.py` generated the task.
+second read) carries to the end. Run it with `--tasks long_api_docs
+--n-ctx 16384 --max-output 4096` and read the trial's compaction entries
+to see whether the facts survived. A run gets 2 summaries (the `limits`
+setting) and stops when the context fills again, so the task was made for
+the old chain of summaries and may now end at that limit. `gen.py`
+generated the task.
 
 ## Commands
 
@@ -68,7 +70,7 @@ the image.
 restart the server; the run records what `/props` reports (model path,
 build, context window, default sampling) in `run.json`.
 
-The reference models (D-29) start with `just llm-up qwen` or `just llm-up gemma` (`just llm-down` stops it): Qwen3.5 4B Q4_K_M and Gemma 4 12B QAT Q4_0, context 131072, thinking off, seed 0, on port 9931. The exact command goes to `.llm/<port>/cmd`. Two servers can run side by side on different ports, for example `just port=9932 llm-up qwen`, then `just port=9932 eval-run`. `just eval-check` and `just eval-run` wrap the commands above.
+`just llm-up <model>` starts a server on port 9931 with thinking off and seed 0 (`just llm-down` stops it); the models are in the justfile (`qwen27b` and `qwen35b` are the ones in use; `qwen` and `gemma` are the small ones the harness was first built against). The exact command goes to `.llm/<port>/cmd`. Two servers can run side by side on different ports, for example `just port=9932 llm-up qwen`, then `just port=9932 eval-run`. `just eval-check` and `just eval-run` wrap the commands above.
 
 The sampling flags in the justfile are each model card's recommendation
 and the server's defaults. A model profile's `sampling` goes out with
