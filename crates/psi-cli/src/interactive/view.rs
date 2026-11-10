@@ -1,8 +1,7 @@
 //! What the interactive mode draws (psi-plan.md §11.2): tool calls
 //! committed once as a header, a summary, a few output lines and a short
-//! diff; the status line; the approval card; dropdowns.
+//! diff; the status line; cards; dropdowns.
 
-use psi_agent::approval::ApprovalRequest;
 use psi_tui::theme::{self, Token};
 use psi_tui::{Line, Style};
 use serde_json::Value;
@@ -262,9 +261,9 @@ pub struct Status {
     /// The share of the last prompt reused from the server's cache.
     pub cache_pct: Option<u64>,
     pub ttft_ms: Option<u64>,
-    pub mode: String,
     pub network: String,
     pub checkpoints: usize,
+    /// bash can't be isolated, so it is refused.
     pub unisolated: bool,
     pub busy: Option<String>,
     /// The model server's address while it isn't up.
@@ -305,14 +304,13 @@ pub fn status_line(s: &Status, width: usize) -> Line {
     if let Some(t) = s.ttft_ms {
         parts.push(format!("ttft {t}ms"));
     }
-    parts.push(s.mode.clone());
     if s.network == "off" {
         parts.push("net off".into());
     }
     parts.push(format!("{} checkpoints", s.checkpoints));
     l.push(parts.join(" · "), dim());
     if s.unisolated {
-        l.push("  UNISOLATED", theme::style(Token::Error).bold());
+        l.push("  BASH OFF", theme::style(Token::Error).bold());
     }
     l.truncate(width)
 }
@@ -401,15 +399,6 @@ pub fn prompt_progress((total, cache, processed): (u64, u64, u64)) -> String {
     s
 }
 
-/// The approval card's answers; "No" is the safe one.
-pub const APPROVAL_CHOICES: [&str; 4] = [
-    "Yes, once",
-    "Yes, for this session",
-    "No",
-    "No, and tell the model why",
-];
-pub const APPROVAL_SAFE: usize = 2;
-
 /// A card's answers as a list, the selected one marked, and the keys
 /// (cards used to take single letters, which typing could answer).
 pub fn choices(items: &[String], sel: usize, safe: usize, border: Style) -> Vec<Line> {
@@ -432,67 +421,6 @@ pub fn choices(items: &[String], sel: usize, safe: usize, border: Style) -> Vec<
     keys.push("└ ", border);
     keys.push(format!("↑↓ choose · Enter confirm · Esc {esc}"), dim());
     out.push(keys);
-    out
-}
-
-/// The approval card under the input box (§8.7).
-pub fn approval_card(
-    req: &ApprovalRequest,
-    typing: Option<&str>,
-    sel: usize,
-    width: usize,
-) -> Vec<Line> {
-    let (tool, args, reason) = (req.tool.as_str(), &req.args, req.reason.as_str());
-    let (intent, preceding) = (req.intent.as_deref(), req.preceding_text.as_str());
-    let w = width.saturating_sub(4);
-    let border = theme::style(Token::Warning);
-    let mut out = Vec::new();
-    let mut top = Line::default();
-    top.push("┌ ", border);
-    top.push(
-        format!("approve {tool}"),
-        theme::style(Token::Warning).bold(),
-    );
-    out.push(top);
-    let body = |out: &mut Vec<Line>, label: &str, text: &str, style: Style| {
-        for (i, t) in text.lines().take(4).enumerate() {
-            let mut l = Line::default();
-            l.push("│ ", border);
-            if i == 0 && !label.is_empty() {
-                l.push(label, dim());
-            }
-            l.push(cut(t, w.saturating_sub(label.len())), style);
-            out.push(l);
-        }
-    };
-    body(
-        &mut out,
-        "",
-        &call_summary(tool, args),
-        Style::default().bold(),
-    );
-    match intent {
-        Some(i) => body(&mut out, "intent: ", i, Style::default()),
-        None if !preceding.trim().is_empty() => {
-            let last = preceding.trim().lines().last().unwrap_or("");
-            body(&mut out, "model: ", last, dim());
-        }
-        None => {}
-    }
-    body(&mut out, "why: ", reason, Style::default());
-    match typing {
-        Some(t) => {
-            let mut keys = Line::default();
-            keys.push("└ ", border);
-            keys.push("message to the model: ", dim());
-            keys.push(t, Style::default());
-            out.push(keys);
-        }
-        None => {
-            let items: Vec<String> = APPROVAL_CHOICES.iter().map(|s| (*s).to_owned()).collect();
-            out.extend(choices(&items, sel, APPROVAL_SAFE, border));
-        }
-    }
     out
 }
 
@@ -533,13 +461,12 @@ mod tests {
             prompt_tok_s: Some(812.0),
             cache_pct: Some(93),
             ttft_ms: Some(240),
-            mode: "auto".into(),
             ..Status::default()
         };
         let l = status_line(&s, 200);
         assert_eq!(
             text(&l),
-            "qwen · ctx 50% of 64K · 42 tok/s · read 812 tok/s · cache 93% · ttft 240ms · auto · 0 checkpoints"
+            "qwen · ctx 50% of 64K · 42 tok/s · read 812 tok/s · cache 93% · ttft 240ms · 0 checkpoints"
         );
         let ctx = |s: &Status| {
             let l = status_line(s, 200);

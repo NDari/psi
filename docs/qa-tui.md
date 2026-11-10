@@ -22,8 +22,8 @@ yours.
 - [ ] `/copy` and `/copy code` put the last answer or its last code block on the system clipboard, also inside tmux. (auto: the sequence)
 - [ ] Ctrl+click (ghostty) on a read/edit/write path opens the file; on a markdown link opens the URL; also inside tmux with `terminal-features ',*:hyperlinks'`. (auto: the sequences)
 - [ ] Thinking is never shown.
-- [ ] BEL rings when a run ends or an approval appears while the terminal window is unfocused (switch away, then back).
-- [ ] In ghostty inside tmux (`focus-events on`, `allow-passthrough on`): switching to another pane during a run gives a desktop notification when it ends or an approval appears; the tab shows progress while working; the pane title reads `ψ <dir> · working` / `· waiting`, and the old title is back after quitting. (auto: the sequences)
+- [ ] BEL rings when a run ends or a pause card appears while the terminal window is unfocused (switch away, then back).
+- [ ] In ghostty inside tmux (`focus-events on`, `allow-passthrough on`): switching to another pane during a run gives a desktop notification when it ends or a pause card appears; the tab shows progress while working; the pane title reads `ψ <dir> · working` / `· waiting`, and the old title is back after quitting. (auto: the sequences)
 
 ## Input
 
@@ -38,8 +38,9 @@ yours.
 
 - [ ] `/` at the start lists commands; Up/Down put the selection in the box (what the box shows is what Enter runs); Tab accepts; Esc closes. (auto)
 - [ ] `@` lists files fuzzily, .gitignore-aware; Tab inserts the path. (auto)
-- [ ] The approval card appears under the input box and the draft stays; its list starts on "No", ignores keys for a moment, and each answer works with ↑↓ and Enter ("No, and tell the model why" takes a message, Enter); Esc says no; typing letters doesn't answer it. (auto)
-- [ ] A blocked write (try `echo x > /etc/psi-test` in bash via the model) shows the blocked card: rerun once outside, make the folder writable, or leave it (↑↓, Enter; Esc leaves it).
+- [ ] A refused command (ask the model to `git push`) shows `refused: ...` under the call and no card; the run goes on. (auto)
+- [ ] A blocked write (try `echo x > /etc/psi-test` in bash via the model) fails with "Blocked: ..." in the result and no card.
+- [ ] Inside bash, `ls ~/.ssh` is empty and `git push` fails for lack of credentials; `/undo` after the model commits or rewrites history puts the branch back (`git log` shows the old tip).
 - [ ] `/rewind` and `/tree` pickers: Up/Down, Enter, Esc. (auto: rewind)
 - [ ] `/resume` lists this directory's sessions and opens one, replaying its messages.
 
@@ -54,9 +55,9 @@ yours.
 - [ ] Enter while running steers the run; Alt+Enter queues a follow-up for when it ends. Both show as `(steering)` / `(follow-up)` until the agent takes them. (auto: steering)
 - [ ] Esc aborts the request and running tools. (auto)
 - [ ] `!cmd` runs a command as you; its output goes to the model with the next prompt. `!!cmd` doesn't send it. (auto: `!`)
-- [ ] `/undo`, `/diff`, `/stats`, `/mode strict` (the status line shows strict) work. (auto)
-- [ ] The status line shows model, context use, tok/s, time to first token, mode, checkpoints, and `UNISOLATED` in red when bubblewrap doesn't work.
-- [ ] Against llama-server: `ctx N% of 64K` turns yellow from 70% and red from 90%; after an answer, `read N tok/s` and `cache N%` show; on a long prompt the spinner reads `reading the prompt: N% of ... tokens, ... from the cache` before the answer streams. An extension on `model_stats` can add its own segment with `psi.ui.status`.
+- [ ] `/undo`, `/diff`, `/stats` work. (auto)
+- [ ] The status line shows model, context use, tok/s, time to first token, checkpoints, and `BASH OFF` in red when bubblewrap doesn't work.
+- [ ] Against llama-server: `ctx N% of 64K` turns yellow from 70% and red from 90%; after an answer, `read N tok/s` and `cache N%` show; on a long prompt the spinner reads `reading the prompt: N% of ... tokens, ... from the cache` before the answer streams.
 - [ ] After quitting, the terminal is back to normal (cursor shown, no raw mode), and psi prints the session file.
 
 ## Batteries (Phase 6)

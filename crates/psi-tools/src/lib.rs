@@ -1,5 +1,4 @@
-//! Core tools: read, write, edit, bash, and the optional grep, find and ls
-//! (psi-plan.md §6). Results say exactly what happened and what to do next.
+//! Core tools: read, write, edit and bash (psi-plan.md §6). Results say exactly what happened and what to do next.
 
 pub mod bash;
 mod edit;
@@ -45,7 +44,7 @@ impl ToolCtx {
         }
     }
 
-    pub(crate) fn resolve(&self, path: &str) -> PathBuf {
+    pub fn resolve(&self, path: &str) -> PathBuf {
         // The prompt says to keep files for later bash calls in $TMPDIR, and
         // models write that in file-tool paths too: it means the session's
         // TMPDIR, not a folder named `$TMPDIR` (2026-11-03).
@@ -144,7 +143,7 @@ impl Tool {
             return ToolOutput::err("Aborted before it ran.");
         }
         let f: fn(&Map<String, Value>, &ToolCtx) -> ToolOutput = match self {
-            Tool::Bash => return bash::run(args.clone(), ctx, false).await,
+            Tool::Bash => return bash::run(args.clone(), ctx).await,
             Tool::Read => read::run,
             Tool::Write => write::run,
             Tool::Edit => edit::run,

@@ -1,7 +1,9 @@
 //! Shadow-git checkpoints (psi-plan.md §7.2): snapshots of the project's work
 //! tree in a bare repository outside the workspace, so any change the agent
-//! makes, by file tools or bash, can be undone. The project's own `.git` is
-//! never touched or read.
+//! makes, by file tools or bash, can be undone. Each snapshot also records
+//! the project's own branch and tag tips and where HEAD points, so a rewrite
+//! of local history can be undone too. The project's `.git` is read for
+//! those, and written only to put them back on a restore.
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
@@ -9,7 +11,7 @@ use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
@@ -17,6 +19,11 @@ use crate::git::{git_available, host_git};
 
 /// Files larger than this are not captured.
 pub const MAX_FILE_BYTES: u64 = 50 * 1024 * 1024;
+/// Gitignored files are captured too when they are small (a clobbered
+/// `.env` can be undone), unless they lie in a directory that is ignored as
+/// a whole (`target/`, `node_modules/`), or there are too many of them.
+pub const MAX_IGNORED_BYTES: u64 = 1024 * 1024;
+const MAX_IGNORED_FILES: usize = 2000;
 
 /// Stored bytes are the bytes on disk: no line-ending, filter or encoding conversion.
 const ATTRIBUTES: &str = "* -text -filter -ident -working-tree-encoding\n";
@@ -71,8 +78,11 @@ pub struct Checkpoints {
 #[derive(Debug, Clone)]
 pub struct Capture {
     pub commit: String,
-    /// False when the tree equals the head's, so no commit was made.
+    /// False when the tree equals the head's.
     pub changed: bool,
+    /// The project's branch tips or HEAD moved since the head was taken.
+    /// A commit is made when files changed or these moved.
+    pub refs_moved: bool,
     /// Paths not captured, with the reason.
     pub skipped: Vec<(PathBuf, &'static str)>,
     pub elapsed: Duration,
@@ -86,6 +96,8 @@ pub struct Restore {
     pub written: Vec<PathBuf>,
     pub deleted: Vec<PathBuf>,
     pub left_alone: Vec<(PathBuf, &'static str)>,
+    /// The project's refs put back (`refs/heads/main`, `HEAD`).
+    pub refs: Vec<String>,
 }
 
 /// A file that differs between two commits.
@@ -158,11 +170,12 @@ impl Checkpoints {
         self.head_and_tree()
             .ok()
             .flatten()
-            .map(|(commit, _)| commit)
+            .map(|(commit, _, _)| commit)
     }
 
-    /// Snapshots the work tree. When the tree equals the head's, nothing is
-    /// stored and `commit` is the head. A session's first capture always commits.
+    /// Snapshots the work tree and the project's refs. When both equal the
+    /// head's, nothing is stored and `commit` is the head. A session's first
+    /// capture always commits.
     pub fn capture(&self, message: &str) -> Result<Capture> {
         let start = Instant::now();
 
@@ -231,11 +244,54 @@ impl Checkpoints {
             Some(&pathspec),
         )?;
 
-        // 4. Write the tree; store nothing if it is unchanged.
+        // 4. Small ignored files, which `add -A` leaves out. Once added they
+        // are in the index, and step 3 keeps them up to date.
+        let ignored = self.run(
+            "ls-files",
+            [
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "--directory",
+                "-z",
+            ],
+            None,
+        )?;
+        let mut force = Vec::new();
+        let mut count = 0;
+        // A directory ignored as a whole is listed as `dir/` and left out.
+        for raw in ignored
+            .split(|b| *b == 0)
+            .filter(|p| !p.is_empty() && !p.ends_with(b"/"))
+        {
+            let rel = Path::new(OsStr::from_bytes(raw));
+            let small = fs::symlink_metadata(self.root.join(rel))
+                .is_ok_and(|m| m.is_file() && m.len() <= MAX_IGNORED_BYTES);
+            if small && self.nested_ancestor(rel).is_none() {
+                force.extend_from_slice(b":(literal)");
+                force.extend_from_slice(raw);
+                force.push(0);
+                count += 1;
+            }
+        }
+        if count > 0 && count <= MAX_IGNORED_FILES {
+            self.run(
+                "add",
+                ["add", "-f", "--pathspec-from-file=-", "--pathspec-file-nul"],
+                Some(&force),
+            )?;
+        }
+
+        // 5. Write the tree; store nothing if it and the refs are unchanged.
         let tree = text(self.run("write-tree", ["write-tree"], None)?);
+        let refs = self.project_refs();
         let head = self.head_and_tree()?;
-        if let Some((commit, head_tree)) = &head
-            && *head_tree == tree
+        let changed = head.as_ref().is_none_or(|(_, t, _)| *t != tree);
+        let refs_moved = head.as_ref().is_some_and(|(_, _, r)| *r != refs);
+        if let Some((commit, _, _)) = &head
+            && !changed
+            && !refs_moved
         {
             let elapsed = start.elapsed();
             tracing::debug!(
@@ -247,21 +303,27 @@ impl Checkpoints {
             return Ok(Capture {
                 commit: commit.clone(),
                 changed: false,
+                refs_moved: false,
                 skipped,
                 elapsed,
             });
         }
 
-        // 5. Commit it.
+        // 6. Commit it, with the refs in the message body.
+        let message = if refs.is_empty() {
+            message.to_owned()
+        } else {
+            format!("{message}\n\n{refs}")
+        };
         let mut args = vec!["commit-tree", tree.as_str()];
-        if let Some((parent, _)) = &head {
+        if let Some((parent, _, _)) = &head {
             args.extend(["-p", parent.as_str()]);
         }
-        args.extend(["-m", message]);
+        args.extend(["-m", message.as_str()]);
         let commit = text(self.run("commit-tree", args, None)?);
 
-        // 6. Move the session ref, only if no other capture moved it meanwhile.
-        let old = head.as_ref().map_or("", |(c, _)| c.as_str());
+        // 7. Move the session ref, only if no other capture moved it meanwhile.
+        let old = head.as_ref().map_or("", |(c, _, _)| c.as_str());
         self.run(
             "update-ref",
             ["update-ref", self.refname.as_str(), commit.as_str(), old],
@@ -271,22 +333,25 @@ impl Checkpoints {
         let elapsed = start.elapsed();
         tracing::debug!(
             ?elapsed,
-            changed = true,
+            changed,
+            refs_moved,
             skipped = skipped.len(),
             "checkpoint"
         );
         Ok(Capture {
             commit,
-            changed: true,
+            changed,
+            refs_moved,
             skipped,
             elapsed,
         })
     }
 
-    /// Makes the work tree match `commit`. Captures first, so the restore can
-    /// be undone (`before`), and again after. Leaves alone `.git`, nested
-    /// repositories, ignored paths, paths below a symlink and uncaptured files
-    /// in the way.
+    /// Makes the work tree match `commit`, and puts the project's branch
+    /// tips and HEAD back where that commit recorded them. Captures first,
+    /// so the restore can be undone (`before`), and again after. Leaves
+    /// alone nested repositories, uncaptured ignored paths, paths below a
+    /// symlink and uncaptured files in the way.
     pub fn restore(&self, commit: &str) -> Result<Restore> {
         let target = self.resolve(commit)?;
         let before = self.capture(&format!("before restoring {}", short(&target)))?;
@@ -371,6 +436,7 @@ impl Checkpoints {
             written,
             deleted,
             left_alone,
+            refs: self.restore_refs(&target),
         };
 
         self.capture(&format!("restored {}", short(&target)))?;
@@ -378,6 +444,7 @@ impl Checkpoints {
             written = out.written.len(),
             deleted = out.deleted.len(),
             left_alone = out.left_alone.len(),
+            refs = out.refs.len(),
             "restore"
         );
         Ok(out)
@@ -393,6 +460,19 @@ impl Checkpoints {
                 path: c.path,
             })
             .collect())
+    }
+
+    /// Whether two commits recorded different branch tips or HEAD for the
+    /// project (the files may still be the same: a commit moves only refs).
+    pub fn refs_differ(&self, a: &str, b: &str) -> bool {
+        self.recorded_refs(a) != self.recorded_refs(b)
+    }
+
+    /// The project refs `commit` recorded; empty when it recorded none.
+    fn recorded_refs(&self, commit: &str) -> String {
+        self.run("log", ["log", "-1", "--format=%b", commit], None)
+            .map(|b| text(b).trim().to_owned())
+            .unwrap_or_default()
     }
 
     /// A plain unified diff between two commits. Callers cut it to size.
@@ -413,16 +493,98 @@ impl Checkpoints {
         Ok(String::from_utf8_lossy(&out).into_owned())
     }
 
-    /// Whether a path is gitignored and not captured, so checkpoints can't
-    /// recover a write to it. Relative paths are taken from the root; paths
-    /// outside the root return false.
-    pub fn is_ignored(&self, path: &Path) -> bool {
-        let Some(rel) = self.relative(path) else {
-            return false;
+    /// A `git` command on the project's own repository, hardened like the
+    /// rest; `None` when the root is not a repository.
+    fn project_git(&self) -> Option<Command> {
+        fs::symlink_metadata(self.root.join(".git")).ok()?;
+        let mut cmd = host_git();
+        cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .current_dir(&self.root);
+        Some(cmd)
+    }
+
+    /// The output of a project git command, or `None` when it failed.
+    fn project_out(&self, args: &[&str]) -> Option<String> {
+        let mut cmd = self.project_git()?;
+        cmd.args(args);
+        match run_cmd(cmd, "project refs", None) {
+            Ok(out) if out.status.success() => Some(text(out.stdout)),
+            _ => None,
+        }
+    }
+
+    /// The project's branch and tag tips and where HEAD points, one per
+    /// line: `ref <commit> <name>`, then `head <name or commit>`. Empty when
+    /// the root is not a repository.
+    fn project_refs(&self) -> String {
+        let format = "--format=ref %(objectname) %(refname)";
+        let Some(mut lines) =
+            self.project_out(&["for-each-ref", format, "refs/heads", "refs/tags"])
+        else {
+            return String::new();
         };
-        let mut cmd = self.git();
-        cmd.args(["check-ignore", "-q", "--"]).arg(rel);
-        matches!(run_cmd(cmd, "check-ignore", None), Ok(out) if out.status.success())
+        let head = self
+            .project_out(&["symbolic-ref", "-q", "HEAD"])
+            .or_else(|| self.project_out(&["rev-parse", "-q", "--verify", "HEAD"]));
+        if let Some(h) = head {
+            if !lines.is_empty() {
+                lines.push('\n');
+            }
+            lines.push_str(&format!("head {h}"));
+        }
+        lines
+    }
+
+    /// Puts the project's refs back where `commit` recorded them, and
+    /// returns the ones it moved. A branch made since is left alone. When
+    /// HEAD's commit changes, the project's index is reset to it, so the
+    /// restored files show as changes to the old tip and not as its reverse.
+    fn restore_refs(&self, commit: &str) -> Vec<String> {
+        let body = self.recorded_refs(commit);
+        let now = self.project_refs();
+        let tip = |refs: &str, name: &str| {
+            refs.lines()
+                .filter_map(|l| l.strip_prefix("ref ")?.split_once(' '))
+                .find(|(_, n)| *n == name)
+                .map(|(c, _)| c.to_owned())
+        };
+        let head_of = |refs: &str| {
+            refs.lines()
+                .find_map(|l| l.strip_prefix("head "))
+                .map(str::to_owned)
+        };
+        let before = self.project_out(&["rev-parse", "-q", "--verify", "HEAD"]);
+        let mut moved = Vec::new();
+        for (was, name) in body
+            .lines()
+            .filter_map(|l| l.strip_prefix("ref ")?.split_once(' '))
+        {
+            if tip(&now, name).as_deref() == Some(was) {
+                continue;
+            }
+            match self.project_out(&["update-ref", name, was]) {
+                Some(_) => moved.push(name.to_owned()),
+                None => tracing::warn!(name, was, "restore: could not put the ref back"),
+            }
+        }
+        if let Some(was) = head_of(&body)
+            && head_of(&now).as_deref() != Some(was.as_str())
+        {
+            let done = if was.starts_with("refs/") {
+                self.project_out(&["symbolic-ref", "HEAD", &was])
+            } else {
+                self.project_out(&["update-ref", "--no-deref", "HEAD", &was])
+            };
+            match done {
+                Some(_) => moved.push("HEAD".to_owned()),
+                None => tracing::warn!(was, "restore: could not put HEAD back"),
+            }
+        }
+        let after = self.project_out(&["rev-parse", "-q", "--verify", "HEAD"]);
+        if before != after && self.project_out(&["reset", "-q"]).is_none() {
+            tracing::warn!("restore: could not reset the project's index");
+        }
+        moved
     }
 
     /// A `git` command on the shadow repository with this session's index.
@@ -449,23 +611,30 @@ impl Checkpoints {
         ok(run_cmd(cmd, step, input)?, step)
     }
 
-    /// The head commit and its tree, or None before the session's first capture.
-    fn head_and_tree(&self) -> Result<Option<(String, String)>> {
+    /// The head commit, its tree and the project refs it recorded, or None
+    /// before the session's first capture.
+    fn head_and_tree(&self) -> Result<Option<(String, String, String)>> {
         let out = self.run(
             "for-each-ref",
             [
                 "for-each-ref",
-                "--format=%(objectname) %(tree)",
+                "--format=%(objectname) %(tree)%0a%(contents:body)",
                 self.refname.as_str(),
             ],
             None,
         )?;
         let out = text(out);
-        let line = out.lines().next();
-        match line.map(|l| l.split_once(' ')) {
-            None => Ok(None),
-            Some(Some((commit, tree))) => Ok(Some((commit.to_string(), tree.to_string()))),
-            Some(None) => Err(CheckpointError::Parse("for-each-ref")),
+        let (line, body) = out.split_once('\n').unwrap_or((out.as_str(), ""));
+        if line.is_empty() {
+            return Ok(None);
+        }
+        match line.split_once(' ') {
+            Some((commit, tree)) => Ok(Some((
+                commit.to_string(),
+                tree.to_string(),
+                body.trim().to_string(),
+            ))),
+            None => Err(CheckpointError::Parse("for-each-ref")),
         }
     }
 
@@ -559,23 +728,6 @@ impl Checkpoints {
             }
             dir = d.parent();
         }
-    }
-
-    /// `path` relative to the root, or None if it lies outside.
-    fn relative(&self, path: &Path) -> Option<PathBuf> {
-        let abs = self.root.join(path);
-        let lexical = !abs.components().any(|c| c == Component::ParentDir);
-        if lexical && let Ok(rel) = abs.strip_prefix(&self.root) {
-            return (!rel.as_os_str().is_empty()).then(|| rel.to_path_buf());
-        }
-        // Resolve `..` and symlinks through the parent, which must exist.
-        let parent = abs.parent()?.canonicalize().ok()?;
-        let rel = parent
-            .join(abs.file_name()?)
-            .strip_prefix(&self.root)
-            .ok()?
-            .to_path_buf();
-        (!rel.as_os_str().is_empty()).then_some(rel)
     }
 }
 
@@ -961,27 +1113,110 @@ mod tests {
     }
 
     #[test]
-    fn ignored_files_are_not_captured_and_left_alone() {
+    fn small_ignored_files_are_captured() {
         let f = fixture();
-        fs::write(f.root.join(".gitignore"), "*.log\n").unwrap();
+        fs::write(f.root.join(".gitignore"), "*.log\n.env\nbuild/\n").unwrap();
+        fs::write(f.root.join(".env"), "KEY=1\n").unwrap();
         fs::write(f.root.join("out.log"), "log1\n").unwrap();
+        fs::create_dir(f.root.join("build")).unwrap();
+        fs::write(f.root.join("build/out"), "b1\n").unwrap();
+        let big = vec![b'x'; MAX_IGNORED_BYTES as usize + 1];
+        fs::write(f.root.join("big.log"), &big).unwrap();
         let cp = Checkpoints::open(&f.store, &f.root, "s1").unwrap();
         let c1 = cp.capture("c1").unwrap().commit;
-        assert_eq!(files(&cp, &c1), [".gitignore", "a.txt"]);
+        // Not the directory ignored as a whole, and not the big file.
+        assert_eq!(files(&cp, &c1), [".env", ".gitignore", "a.txt", "out.log"]);
 
-        assert!(cp.is_ignored(Path::new("out.log")));
-        assert!(cp.is_ignored(&f.root.join("out.log")));
-        assert!(cp.is_ignored(&f.root.join("never/written.log")));
-        assert!(!cp.is_ignored(Path::new("a.txt")));
-        assert!(!cp.is_ignored(&f.root.join("a.txt")));
-        assert!(!cp.is_ignored(&f.base.join("elsewhere.log")));
-        assert!(!cp.is_ignored(Path::new("../elsewhere.log")));
-
-        fs::write(f.root.join("out.log"), "log2\n").unwrap();
-        fs::write(f.root.join("a.txt"), "two\n").unwrap();
+        // A clobbered .env comes back; one made since goes.
+        fs::write(f.root.join(".env"), "").unwrap();
+        fs::write(f.root.join("new.log"), "n\n").unwrap();
+        fs::write(f.root.join("build/out"), "b2\n").unwrap();
+        assert!(cp.capture("c2").unwrap().changed);
         cp.restore(&c1).unwrap();
-        assert_eq!(read(&f.root.join("a.txt")), "one\n");
-        assert_eq!(read(&f.root.join("out.log")), "log2\n");
+        assert_eq!(read(&f.root.join(".env")), "KEY=1\n");
+        assert!(!f.root.join("new.log").exists());
+        assert_eq!(read(&f.root.join("build/out")), "b2\n");
+        assert_eq!(fs::read(f.root.join("big.log")).unwrap().len(), big.len());
+    }
+
+    #[test]
+    fn branch_tips_and_head_are_put_back() {
+        let f = fixture();
+        let rev = |r: &str| git_in(&f.root, &["rev-parse", r]).trim().to_owned();
+        let first = rev("HEAD");
+        git_in(&f.root, &["branch", "keep"]);
+        git_in(&f.root, &["tag", "v1"]);
+        fs::write(f.root.join("a.txt"), "mine\n").unwrap();
+        let cp = Checkpoints::open(&f.store, &f.root, "s1").unwrap();
+        let c1 = cp.capture("submit").unwrap().commit;
+
+        // A commit moves the tip and changes no file: still a checkpoint.
+        git_in(&f.root, &["commit", "-q", "-am", "model"]);
+        let c2 = cp.capture("tool").unwrap();
+        assert!(!c2.changed && c2.refs_moved);
+        assert_ne!(c2.commit, c1);
+        assert!(cp.changes(&c1, &c2.commit).unwrap().is_empty());
+        assert!(cp.refs_differ(&c1, &c2.commit) && !cp.refs_differ(&c1, &c1));
+        assert!(!cp.capture("tool").unwrap().refs_moved);
+
+        // History rewritten every way: the tip thrown away, branches
+        // deleted and made, the tag gone, HEAD on another branch.
+        git_in(&f.root, &["checkout", "-q", "-b", "other"]);
+        fs::write(f.root.join("b.txt"), "b\n").unwrap();
+        git_in(&f.root, &["add", "b.txt"]);
+        git_in(&f.root, &["commit", "-q", "-m", "more"]);
+        git_in(&f.root, &["branch", "-q", "-D", "keep"]);
+        git_in(&f.root, &["tag", "-d", "v1"]);
+        git_in(&f.root, &["branch", "-q", "-f", "main", "other"]);
+
+        let r = cp.restore(&c1).unwrap();
+        assert_eq!(
+            r.refs,
+            ["refs/heads/keep", "refs/heads/main", "refs/tags/v1", "HEAD"]
+        );
+        assert_eq!(rev("main"), first);
+        assert_eq!(rev("keep"), first);
+        assert_eq!(rev("v1"), first);
+        let head = git_in(&f.root, &["symbolic-ref", "HEAD"]);
+        assert_eq!(head.trim(), "refs/heads/main");
+        // The files are as they were, and git sees them as the user's
+        // uncommitted change to the old tip.
+        assert_eq!(read(&f.root.join("a.txt")), "mine\n");
+        assert!(!f.root.join("b.txt").exists());
+        assert_eq!(git_in(&f.root, &["status", "--porcelain"]), " M a.txt\n");
+        // A branch made since is left alone.
+        assert_ne!(rev("other"), first);
+
+        // Undoing the restore puts the rewritten history back (a branch
+        // the restore brought back stays).
+        cp.restore(&r.before).unwrap();
+        assert_eq!(rev("main"), rev("other"));
+        assert_eq!(
+            git_in(&f.root, &["symbolic-ref", "HEAD"]).trim(),
+            "refs/heads/other"
+        );
+    }
+
+    #[test]
+    fn a_detached_head_is_put_back() {
+        let f = fixture();
+        let rev = |r: &str| git_in(&f.root, &["rev-parse", r]).trim().to_owned();
+        let first = rev("HEAD");
+        git_in(&f.root, &["checkout", "-q", "--detach"]);
+        let cp = Checkpoints::open(&f.store, &f.root, "s1").unwrap();
+        let c1 = cp.capture("submit").unwrap().commit;
+        git_in(&f.root, &["checkout", "-q", "main"]);
+        git_in(&f.root, &["commit", "-q", "--allow-empty", "-m", "x"]);
+        assert_eq!(cp.restore(&c1).unwrap().refs, ["refs/heads/main", "HEAD"]);
+        assert_eq!(rev("HEAD"), first);
+        assert!(
+            host_git()
+                .args(["symbolic-ref", "-q", "HEAD"])
+                .current_dir(&f.root)
+                .output()
+                .is_ok_and(|o| !o.status.success()),
+            "HEAD is detached again"
+        );
     }
 
     #[test]
@@ -1060,7 +1295,6 @@ mod tests {
         let c1 = cp.capture("c1").unwrap().commit;
         fs::write(f.root.join("a.txt"), "two\n").unwrap();
         cp.capture("c2").unwrap();
-        cp.is_ignored(Path::new("a.txt"));
         cp.diff(&c1, "HEAD").ok();
         cp.restore(&c1).unwrap();
 
@@ -1136,7 +1370,6 @@ mod tests {
         let c1 = cp.capture("c1").unwrap().commit;
         fs::write(f.root.join("a.txt"), "three\n").unwrap();
         cp.capture("c2").unwrap();
-        cp.is_ignored(Path::new("a.txt"));
         cp.restore(&c1).unwrap();
         assert_eq!(read(&f.root.join("a.txt")), "two\n");
         let fired: Vec<_> = fs::read_dir(&marks).unwrap().collect();

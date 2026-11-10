@@ -329,10 +329,10 @@ fn copy_dir(src: &Path, dst: &Path) {
     }
 }
 
-/// Headless runs never prompt (D-18): an always-ask command is denied and
-/// reported, `--allow` permits a named entry, and an unknown name is an error.
+/// A command on the refuse list is not run and the model is told; the
+/// user's settings can drop an entry.
 #[test]
-fn print_mode_denies_always_ask_unless_allowed() {
+fn print_mode_refuses_listed_commands() {
     let cmd = json!({"command": "cargo publish --dry-run"});
     let replies = || {
         vec![
@@ -359,9 +359,11 @@ fn print_mode_denies_always_ask_unless_allowed() {
         EntryBody::ToolResult { content, .. } => Some(psi_session::text_of(content)),
         _ => None,
     });
-    assert!(result.unwrap().starts_with(
-        "Not run: `cargo publish` is on the always-ask list, and this run can't ask the user."
-    ));
+    assert!(
+        result
+            .unwrap()
+            .starts_with("Not run: psi refuses `cargo publish`, and the command contains it.")
+    );
     // The session records how safety was set up, and the submit checkpoint.
     let info = entries.iter().find_map(|en| match &en.body {
         EntryBody::Custom { custom_type, data } if custom_type == "session_info" => {
@@ -369,36 +371,34 @@ fn print_mode_denies_always_ask_unless_allowed() {
         }
         _ => None,
     });
-    assert_eq!(info.unwrap()["safety"]["mode"], "auto");
+    assert_eq!(info.unwrap()["safety"]["checkpoints"], true);
     assert!(entries.iter().any(
         |en| matches!(&en.body, EntryBody::Checkpoint { trigger: Some(t), .. } if t == "submit")
     ));
 
     let server = ReplayServer::start(replies()).unwrap();
     let e = env_for(&server);
-    let out = psi(
-        &e,
-        &[
-            "-p",
-            "publish",
-            "--allow",
-            "cargo-publish",
-            "--isolation",
-            "off",
-        ],
-    );
+    std::fs::write(
+        e.home.join(".psi/settings.jsonc"),
+        r#"{ "refuse_remove": ["cargo publish"] }"#,
+    )
+    .unwrap();
+    let out = psi(&e, &["-p", "publish", "--isolation", "off"]);
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-
-    let out = psi(&e, &["-p", "x", "--allow", "rm-rf"]);
-    assert!(!out.status.success());
-    let err = String::from_utf8_lossy(&out.stderr);
+    let entries = read_entries(
+        std::fs::File::open(&sessions(&e)[0])
+            .map(std::io::BufReader::new)
+            .unwrap(),
+    )
+    .unwrap();
     assert!(
-        err.contains("--allow rm-rf: no always-ask entry by that name"),
-        "{err}"
+        !entries
+            .iter()
+            .any(|en| matches!(en.body, EntryBody::PolicyDecision { .. }))
     );
 }
 
@@ -679,12 +679,12 @@ fn inspect_reads_real_sessions() {
             String::from_utf8(out.stderr).unwrap(),
         )
     };
-    // --blocked: the denied push, and nothing else.
+    // --blocked: the refused push, and nothing else.
     let (out, _) = inspect(&["--blocked", "--json"], &session);
     let v: Value = serde_json::from_str(&out).unwrap();
     let events = v["events"].as_array().unwrap();
     assert_eq!(events.len(), 1, "{v}");
-    assert!(events[0].to_string().contains("always-ask"), "{v}");
+    assert!(events[0].to_string().contains("psi refuses"), "{v}");
     // --step: one step, in full; --failures: the failed command's step.
     let (out, _) = inspect(&["--step", "2"], &session);
     assert!(

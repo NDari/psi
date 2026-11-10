@@ -42,14 +42,6 @@ struct Cli {
     #[arg(long, value_name = "N")]
     max_turns: Option<u32>,
 
-    /// Safety mode; overrides the settings files (D-11).
-    #[arg(long, value_enum)]
-    mode: Option<Mode>,
-
-    /// Allow an always-ask entry without asking, like git-push (headless runs deny the rest).
-    #[arg(long, value_name = "ENTRY")]
-    allow: Vec<String>,
-
     /// Run bash inside the sandbox (bubblewrap on Linux, Seatbelt on macOS), or directly when something else is the boundary.
     #[arg(long, value_enum)]
     isolation: Option<IsolationArg>,
@@ -58,27 +50,8 @@ struct Cli {
     #[arg(long, value_enum)]
     network: Option<OnOff>,
 
-    /// Trust this project's .psi settings without asking (headless runs skip them otherwise).
-    #[arg(long)]
-    trust_project: bool,
-
     #[command(subcommand)]
     command: Option<Command>,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum Mode {
-    Auto,
-    Strict,
-}
-
-impl Mode {
-    fn as_str(self) -> &'static str {
-        match self {
-            Mode::Auto => "auto",
-            Mode::Strict => "strict",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -264,12 +237,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 bail!("psi -p got an empty prompt; give it one, or \"-\" to read it from stdin");
             }
             let interactive = cli.print.is_none();
-            let trusted = project_trusted(home.as_deref(), &cwd, interactive, cli.trust_project)?;
-            let mut paths = SettingsPaths::discover(home.as_deref(), &cwd);
-            if !trusted {
-                paths.project = None;
-            }
-            let settings = config::load(&paths, flags_layer(&cli))?;
+            let paths = SettingsPaths::discover(home.as_deref(), &cwd);
+            let (settings, notes) = config::load(&paths, flags_layer(&cli))?;
             tracing::debug!(%settings, "settings loaded");
             let args = run_mode::RunArgs {
                 prompt: cli.print.unwrap_or_default(),
@@ -279,9 +248,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 session: cli.session,
                 max_turns: cli.max_turns,
                 settings,
-                allow: cli.allow,
-                mode_flag: cli.mode.is_some(),
-                project_trusted: trusted,
+                notes,
             };
             if interactive {
                 if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
@@ -294,44 +261,6 @@ fn run(cli: Cli) -> Result<ExitCode> {
             runtime()?.block_on(run_mode::run(args))
         }
     }
-}
-
-/// Whether this project's own .psi may load (§9.3): trusted before with the
-/// same files, or the user says yes now. Headless runs don't ask.
-fn project_trusted(home: Option<&Path>, cwd: &Path, interactive: bool, flag: bool) -> Result<bool> {
-    let Some(print) = psi_cli::trust::snapshot(cwd) else {
-        return Ok(true);
-    };
-    let Some(home) = home else { return Ok(false) };
-    if psi_cli::trust::is_trusted(home, cwd, &print) {
-        return Ok(true);
-    }
-    let what = psi_cli::trust::describe(cwd);
-    if flag {
-        psi_cli::trust::trust(home, cwd, &print)?;
-        return Ok(true);
-    }
-    if !interactive || !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        eprintln!(
-            "psi: {what}; not loading them until you trust them (run psi here once, or pass --trust-project)"
-        );
-        return Ok(false);
-    }
-    eprintln!("psi: {what}.");
-    for c in psi_cli::trust::changes(home, cwd, &print) {
-        eprintln!("  {c}");
-    }
-    eprint!("Load it? [y/N] ");
-    let mut answer = String::new();
-    std::io::stdin()
-        .read_line(&mut answer)
-        .context("reading the answer")?;
-    if matches!(answer.trim(), "y" | "Y" | "yes") {
-        psi_cli::trust::trust(home, cwd, &print)?;
-        return Ok(true);
-    }
-    eprintln!("psi: not loading {}", cwd.join(".psi").display());
-    Ok(false)
 }
 
 fn help_command(topic: Option<&str>) -> Result<ExitCode> {
@@ -410,9 +339,6 @@ fn replay_server_command(args: ReplayServerArgs) -> Result<ExitCode> {
 
 fn flags_layer(cli: &Cli) -> Value {
     let mut m = Map::new();
-    if let Some(mode) = cli.mode {
-        m.insert("mode".into(), mode.as_str().into());
-    }
     if let Some(i) = cli.isolation {
         let v = match i {
             IsolationArg::On => "on",

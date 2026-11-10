@@ -155,12 +155,23 @@ Each step ends with `just check` passing and a short note here of what was done.
   - Changed behavior: when a summary fails or can't make room, old results are no longer cleared as a fallback; the request goes out and the overflow path drops old turns. Sessions recorded with cleared results, plans or todos still open.
   - Model-facing text changed in one place: the step-budget refusal says "summarized" where it said "cleared". No eval was run.
   - Left for later: `psi-ai`'s schema support for nested and untyped parameters (it served MCP and extension tools); `Tool`'s side-by-side reads now cover `read` only.
+- **Step 2 (2026-11-09).** Nothing asks before a call any more; `just check` passes.
+  - Refuse instead of ask: the ask list is the refuse list (`rules/refuse.jsonc`, settings `refuse` and `refuse_remove`), and a listed command is not run, with what to do instead. The list lost the git rewrites (`git reset --hard`, `clean`, `checkout`, `restore`, `stash`, `branch -D`), which checkpoints now undo; it keeps `git push`, `git stash drop` and `clear`, publishing, `kubectl`, `sudo`, nested psi runs and removing `.git`. A command the parser can't read runs, and bash names the syntax error.
+  - File tools: `write` and `edit` are refused outside the workspace and the session's TMPDIR, and run everywhere inside it (gitignored files and the project's `.psi` included). `read` refuses credential files. When bash can't be isolated, bash calls are refused (it used to ask each time).
+  - Credentials are hidden in both sandboxes: `~/.ssh`, `~/.gnupg`, git credentials, the `gh` token, cloud and registry keys and the runtime directory with the agents' sockets (`psi-safety/src/secrets.rs`). bash also loses token and key variables and gets an empty git credential helper. Checked on Linux with the real directories: all empty inside, and a fetch over SSH and over HTTPS fails. **The macOS side is written and not run** (see `known-issues.md`).
+  - Checkpoints record the project's branch and tag tips and HEAD with each snapshot; `/undo` and `/rewind` put them back and reset the index when HEAD's commit changes. A commit that changes no file is a checkpoint too.
+  - Gitignored files (open question 1): checkpoints capture them when small (1 MB each, 2,000 at most), except inside a directory ignored as a whole. This is the suggestion, with those limits.
+  - Network (open question 4): on, as it was; a project's file can't change it.
+  - Cut with it: the approval card, the blocked-write card (rerun outside, add a directory), session grants, `--allow`, `--mode`, `/mode` and strict mode, project trust (`trust.rs`, `--trust-project`, the startup question). A project's `.psi/settings.jsonc` loads as it is, minus `isolation`, `network`, `cache_dirs` and `refuse_remove`, which only the user's file may set; psi says what it dropped.
+  - Kept: the pause card (a guard or a budget asks whether to go on; headless runs stop). It goes with step 3's bounded runs.
+  - Model-facing text changed: the system prompt's line on approvals now says such actions are refused, and the refusal texts are new. No eval was run.
+  - Decided on the way, for the owner to confirm: a failed checkpoint is recorded and the run goes on; with no git, checkpoints are off with a warning and nothing else changes (it used to switch to strict mode).
 
 ## Open questions
 
-1. **Gitignored files.** Checkpoints skip them, so a clobbered `.env` can't be undone. Suggested: checkpoint small ignored files too, outside the usual heavy directories (`target`, `node_modules`, `.venv`).
+1. **Gitignored files.** Answered in step 2: small ignored files are checkpointed, except inside a directory ignored as a whole.
 2. **Planning.** With no plan mode, planning is an ordinary conversation that ends in the plan file. Is a read-only switch still wanted for it, or is undo enough?
 3. **Who ticks an item.** Suggested: the harness, when the task ended by itself and the check passed; otherwise the item stays open and the report says why.
-4. **Network inside the sandbox.** Suggested: on, since builds fetch dependencies, with credentials hidden.
+4. **Network inside the sandbox.** Answered in step 2: on, with credentials hidden.
 5. **Limits per task.** How many requests and summaries before a task stops. To be set from use, not guessed.
 6. **Keybindings and the optional grep, find and ls tools.** Small and unused. Cut with the rest unless wanted.

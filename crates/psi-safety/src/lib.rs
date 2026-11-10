@@ -1,14 +1,13 @@
-//! Always-ask detection, modes, the isolation backend and host-git flags (psi-plan.md §8).
-//!
-//! Three cheap mechanisms (D-30): undo (checkpoints), a boundary
-//! (isolation) and a gate (the always-ask list).
+//! Safety (design-going-forward.md, goal 1): undo (checkpoints), a boundary
+//! (isolation, with credentials hidden inside it) and a short refuse list.
 
-pub mod always_ask;
 pub mod blocked;
 pub mod checkpoint;
 pub mod git;
 pub mod isolation;
 pub mod last_command;
 pub mod policy;
+pub mod refuse;
+pub mod secrets;
 
 pub use isolation::{Isolation, Sandbox, SandboxConfig};

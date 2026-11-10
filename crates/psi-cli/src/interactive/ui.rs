@@ -7,10 +7,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use psi_agent::approval::{Approval, ApprovalRequest, BlockedChoice, BlockedRequest};
 use psi_agent::recovery::Change;
 use psi_agent::{AgentEvent, Queues, RunOutcome, Stop};
-use psi_safety::policy::Mode;
 use psi_session::{Entry, EntryBody, Role, text_of};
 use psi_tui::term::{Activity, Term, title_for};
 use psi_tui::theme::{self, Token};
@@ -25,18 +23,15 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use super::complete::Completer;
-use super::paste::{Pastes, strip_invisible};
+use super::paste::Pastes;
 use super::view::{
-    self, CallState, Status, approval_card, call_block, call_header, dim, git_diff_lines, list,
-    status_line,
+    self, CallState, Status, call_block, call_header, dim, git_diff_lines, list, status_line,
 };
 use super::worker::Cmd;
 
 /// What reaches the UI thread.
 pub enum UiMsg {
     Agent(AgentEvent),
-    Approve(ApprovalRequest, oneshot::Sender<Approval>),
-    Blocked(BlockedRequest, oneshot::Sender<BlockedChoice>),
     Pause(String, oneshot::Sender<bool>),
     RunDone(RunOutcome),
     /// The model server is up (the TUI started without one).
@@ -53,6 +48,8 @@ pub enum UiMsg {
         what: String,
         written: usize,
         deleted: usize,
+        /// Branch tips, tags and HEAD put back in the project's repository.
+        refs: usize,
         left_alone: Vec<String>,
     },
     Moved(String),
@@ -97,12 +94,11 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "/compact",
         "summarize the earlier conversation now: /compact [what to keep]",
     ),
-    ("/stats", "tokens, timing, guards and asks this session"),
+    ("/stats", "tokens, timing, guards and refusals this session"),
     (
         "/copy",
         "copy the last answer to the clipboard; /copy code: its last code block",
     ),
-    ("/mode", "auto or strict: /mode strict"),
     (
         "/label",
         "mark this point for a later review, also while the model works: /label <text>",
@@ -156,12 +152,6 @@ struct Ask {
 
 /// How long a new card ignores keys.
 const ASK_SETTLE: Duration = Duration::from_millis(400);
-
-struct Card {
-    req: ApprovalRequest,
-    tx: oneshot::Sender<Approval>,
-    typing: Option<String>,
-}
 
 enum Picker {
     /// Pick an entry; `files` restores files too (/rewind).
@@ -228,9 +218,7 @@ pub struct App<W: Write> {
     running: Option<Running>,
     /// The process group of a `!cmd` still running.
     user_bash: Option<u32>,
-    card: Option<Card>,
     ask: Ask,
-    blocked: Option<(BlockedRequest, oneshot::Sender<BlockedChoice>)>,
     pause: Option<(String, oneshot::Sender<bool>)>,
     picker: Option<Picker>,
     pending_entries: Option<&'static str>,
@@ -301,12 +289,10 @@ impl<W: Write> App<W> {
             cancel: p.cancel,
             running: None,
             user_bash: None,
-            card: None,
             ask: Ask {
                 sel: 0,
                 shown: Instant::now(),
             },
-            blocked: None,
             pause: None,
             picker: None,
             pending_entries: None,
@@ -361,8 +347,7 @@ impl<W: Write> App<W> {
     }
 
     fn activity(&self) -> Activity {
-        let waiting = self.card.is_some() || self.blocked.is_some() || self.pause.is_some();
-        if waiting {
+        if self.pause.is_some() {
             Activity::Waiting
         } else if self.running.is_some() {
             Activity::Working
@@ -474,20 +459,14 @@ impl<W: Write> App<W> {
         match ev {
             Event::Key(k) if k.kind != KeyEventKind::Release => self.on_key(k),
             Event::Paste(s) => {
-                if let Some(c) = &mut self.card
-                    && let Some(t) = &mut c.typing
-                {
-                    t.push_str(&strip_invisible(&s).0.replace('\n', " "));
-                } else {
-                    let (text, removed) = self.pastes.take(&s);
-                    if removed > 0 {
-                        self.info(&format!(
-                            "  removed {removed} invisible characters from the paste"
-                        ));
-                    }
-                    self.editor.insert_str(&text);
-                    self.refresh_completion();
+                let (text, removed) = self.pastes.take(&s);
+                if removed > 0 {
+                    self.info(&format!(
+                        "  removed {removed} invisible characters from the paste"
+                    ));
                 }
+                self.editor.insert_str(&text);
+                self.refresh_completion();
             }
             Event::Resize(w, h) => self.r.resize(w, h),
             Event::FocusGained => self.focused = true,
@@ -497,34 +476,6 @@ impl<W: Write> App<W> {
     }
 
     fn on_key(&mut self, k: KeyEvent) {
-        // Cards in the order they are drawn: the one on screen takes the keys.
-        if self.card.is_some() {
-            return self.card_key(k);
-        }
-        if self.blocked.is_some() {
-            if let Some(i) = self.ask_key(&k)
-                && let Some((req, tx)) = self.blocked.take()
-            {
-                let c = match i {
-                    0 => BlockedChoice::RerunOutside,
-                    1 => BlockedChoice::AddDir,
-                    _ => BlockedChoice::No,
-                };
-                let _ = tx.send(c);
-                let what = match c {
-                    BlockedChoice::RerunOutside => {
-                        "rerunning it once outside the sandbox".to_owned()
-                    }
-                    BlockedChoice::AddDir => {
-                        format!("{} is writable for this session", req.dir.display())
-                    }
-                    BlockedChoice::No => "left blocked".to_owned(),
-                };
-                self.info(&format!("  {what}"));
-                self.reset_ask();
-            }
-            return;
-        }
         if self.pause.is_some() {
             if let Some(i) = self.ask_key(&k)
                 && let Some((_, tx)) = self.pause.take()
@@ -741,76 +692,10 @@ impl<W: Write> App<W> {
         self.drop_sel = 0;
     }
 
-    fn card_key(&mut self, k: KeyEvent) {
-        let Some(card) = &mut self.card else { return };
-        if let Some(t) = &mut card.typing {
-            match k.code {
-                KeyCode::Enter => {
-                    let msg = std::mem::take(t);
-                    if let Some(c) = self.card.take() {
-                        let _ = c.tx.send(Approval::DenyWith(msg.clone()));
-                        self.info(&format!("  denied: {msg}"));
-                    }
-                }
-                KeyCode::Esc => card.typing = None,
-                KeyCode::Backspace => {
-                    t.pop();
-                }
-                KeyCode::Char(ch) => t.push(ch),
-                _ => {}
-            }
-            return;
-        }
-        let answer = match self.ask_key(&k) {
-            Some(0) => Some(Approval::Once),
-            Some(1) => Some(Approval::Session),
-            Some(3) => {
-                if let Some(card) = &mut self.card {
-                    card.typing = Some(String::new());
-                }
-                None
-            }
-            Some(_) => Some(Approval::Deny),
-            None => None,
-        };
-        if let Some(a) = answer
-            && let Some(c) = self.card.take()
-        {
-            let what = match &a {
-                Approval::Once => "allowed once",
-                Approval::Session => "allowed for this session",
-                _ => "denied",
-            };
-            let _ = c.tx.send(a);
-            self.info(&format!("  {what}"));
-            self.reset_ask();
-        }
-    }
-
-    /// The answers of the card on screen and its safe one, in the order
-    /// cards are drawn; None when no card takes a choice.
+    /// The answers of the card on screen and its safe one; None when no
+    /// card is up.
     fn card_choices(&self) -> Option<(Vec<String>, usize)> {
         let own = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
-        if let Some(c) = &self.card {
-            return c
-                .typing
-                .is_none()
-                .then(|| (own(&view::APPROVAL_CHOICES), view::APPROVAL_SAFE));
-        }
-        if let Some((req, _)) = &self.blocked {
-            let add = format!(
-                "Make {} writable for this session and rerun",
-                req.dir.display()
-            );
-            return Some((
-                vec![
-                    "Rerun it once outside the sandbox".into(),
-                    add,
-                    "No, leave it blocked".into(),
-                ],
-                2,
-            ));
-        }
         if self.pause.is_some() {
             return Some((own(&["Continue", "Stop the run"]), 1));
         }
@@ -1165,7 +1050,7 @@ impl<W: Write> App<W> {
         let busy = self.running.is_some();
         let needs_idle = matches!(
             name,
-            "undo" | "rewind" | "tree" | "new" | "resume" | "mode" | "compact"
+            "undo" | "rewind" | "tree" | "new" | "resume" | "compact"
         );
         if busy && needs_idle {
             return self.error(&format!("/{name} waits until the run ends (Esc aborts it)"));
@@ -1213,23 +1098,6 @@ impl<W: Write> App<W> {
                     _ => "inspect",
                 });
                 self.send(Cmd::Entries);
-            }
-            "mode" => {
-                let m = match arg {
-                    "" => {
-                        if self.status.mode == "auto" {
-                            Mode::Strict
-                        } else {
-                            Mode::Auto
-                        }
-                    }
-                    a => match Mode::parse(a) {
-                        Some(m) => m,
-                        None => return self.error("/mode auto or /mode strict"),
-                    },
-                };
-                self.status.mode = m.as_str().into();
-                self.send(Cmd::Mode(m));
             }
             "show" => {
                 let n: usize = match arg.trim_start_matches('#').parse() {
@@ -1306,22 +1174,6 @@ impl<W: Write> App<W> {
     fn on_msg(&mut self, m: UiMsg) {
         match m {
             UiMsg::Agent(ev) => self.on_agent(ev),
-            UiMsg::Approve(req, tx) => {
-                self.flush_text();
-                self.card = Some(Card {
-                    req,
-                    tx,
-                    typing: None,
-                });
-                self.reset_ask();
-                self.bell("an approval is waiting");
-            }
-            UiMsg::Blocked(req, tx) => {
-                self.flush_text();
-                self.blocked = Some((req, tx));
-                self.reset_ask();
-                self.bell("a blocked command is waiting for your choice");
-            }
             UiMsg::Pause(reason, tx) => {
                 self.flush_text();
                 self.pause = Some((reason, tx));
@@ -1385,9 +1237,13 @@ impl<W: Write> App<W> {
                 what,
                 written,
                 deleted,
+                refs,
                 left_alone,
             } => {
                 let mut s = format!("  {what}: {written} files written, {deleted} deleted");
+                if refs > 0 {
+                    s.push_str(&format!(", {refs} git refs put back"));
+                }
                 if !left_alone.is_empty() {
                     s.push_str(&format!("; left alone: {}", left_alone.join(", ")));
                 }
@@ -1812,7 +1668,7 @@ impl<W: Write> App<W> {
             }
             EntryBody::PolicyDecision {
                 decision, reason, ..
-            } if decision == "refused" || decision == "granted" => {
+            } if decision == "refused" => {
                 self.commit(vec![Line::styled(format!("  {decision}: {reason}"), dim())]);
             }
             _ => {}
@@ -1842,7 +1698,7 @@ impl<W: Write> App<W> {
             // Under unfinished answer text too while a call is written:
             // the text stands still then, and the call can take minutes.
             let quiet = pending.is_empty() || r.generating.is_some();
-            if r.tools.is_empty() && quiet && self.card.is_none() {
+            if r.tools.is_empty() && quiet {
                 let spin = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
                 let i = (r.started.elapsed().as_millis() / 80) as usize % spin.len();
                 let text = view::spinner_text(
@@ -1874,27 +1730,7 @@ impl<W: Write> App<W> {
         live.extend(rows);
         live.push(border);
         let mut cursor = Some((top + cr, cc));
-        if let Some(c) = &self.card {
-            live.extend(approval_card(&c.req, c.typing.as_deref(), self.ask.sel, w));
-            cursor = None;
-        } else if let Some((req, _)) = &self.blocked {
-            let y = theme::style(Token::Warning);
-            live.push(Line::styled(
-                format!(
-                    "┌ blocked: bash tried to write {}, outside the workspace",
-                    req.path.display()
-                ),
-                y,
-            ));
-            live.push(Line::styled(
-                format!("│ {}", view::cut(&req.command, w.saturating_sub(4))),
-                Style::default().bold(),
-            ));
-            if let Some((items, safe)) = self.card_choices() {
-                live.extend(view::choices(&items, self.ask.sel, safe, y));
-            }
-            cursor = None;
-        } else if let Some((reason, _)) = &self.pause {
+        if let Some((reason, _)) = &self.pause {
             let y = theme::style(Token::Warning);
             live.push(Line::styled(format!("┌ paused: {reason}"), y));
             if let Some((items, safe)) = self.card_choices() {
@@ -1968,10 +1804,10 @@ impl<W: Write> App<W> {
     }
 }
 
-/// /stats: tokens, timing, guards and asks on the branch.
+/// /stats: tokens, timing, guards and refusals on the branch.
 fn stats(branch: &[&Entry]) -> Vec<String> {
     let (mut input, mut output, mut cached, mut steps) = (0, 0, 0, 0);
-    let (mut guards, mut asks, mut denied, mut blocked, mut calls, mut errors) = (0, 0, 0, 0, 0, 0);
+    let (mut guards, mut refused, mut blocked, mut calls, mut errors) = (0, 0, 0, 0, 0);
     let mut ttft = Vec::new();
     for e in branch {
         match &e.body {
@@ -1994,14 +1830,11 @@ fn stats(branch: &[&Entry]) -> Vec<String> {
                 }
             }
             EntryBody::GuardEvent { .. } => guards += 1,
+            // "denied" and the rest: sessions from when calls asked.
             EntryBody::PolicyDecision { decision, .. } => match decision.as_str() {
-                "denied" => {
-                    asks += 1;
-                    denied += 1
-                }
+                "refused" | "denied" => refused += 1,
                 "blocked" | "rerun_outside" | "dir_added" => blocked += 1,
-                "refused" | "granted" => {}
-                _ => asks += 1,
+                _ => {}
             },
             EntryBody::Custom { custom_type, data } if custom_type == "timing" => {
                 if let Some(t) = data["first_token_ms"].as_u64() {
@@ -2027,7 +1860,7 @@ fn stats(branch: &[&Entry]) -> Vec<String> {
             mean(&ttft),
             ttft.len()
         ),
-        format!("asks {asks} ({denied} denied), blocked writes {blocked}, guard events {guards}"),
+        format!("refused calls {refused}, blocked writes {blocked}, guard events {guards}"),
     ]
 }
 

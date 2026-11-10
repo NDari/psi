@@ -29,8 +29,8 @@ pub(crate) fn run(args: &Map<String, Value>, ctx: &ToolCtx) -> ToolOutput {
     let shown = str_arg(args, "path");
     let content = str_arg(args, "text");
     let path = ctx.resolve(shown);
-    // The policy (psi-safety) refuses .psi and asks for gitignored paths
-    // before this runs (D-27).
+    // The policy (psi-safety) refuses paths outside the workspace before
+    // this runs.
     if path.is_dir() {
         return ToolOutput::err(format!("{shown} is a directory; give a file path."));
     }

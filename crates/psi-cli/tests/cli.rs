@@ -35,29 +35,19 @@ fn layers_load_and_flag_overrides() {
     std::fs::create_dir(home.path().join(".psi")).unwrap();
     std::fs::write(
         home.path().join(".psi/settings.jsonc"),
-        "{ \"mode\": \"strict\" }",
+        "{ \"network\": \"on\", \"notify\": \"off\" }",
     )
     .unwrap();
     std::fs::create_dir(project.path().join(".psi")).unwrap();
+    // A project's file loads without a trust step, minus what would
+    // loosen safety.
     std::fs::write(
         project.path().join(".psi/settings.jsonc"),
-        "{ \"network\": \"off\" }",
+        "{ \"isolation\": \"off\", \"post_edit_check\": \"make check\" }",
     )
     .unwrap();
-    // An untrusted project's .psi is skipped, and the run says so (§9.3).
     let out = psi()
-        .args(["--mode", "auto", "-p", "x", "--model", "none"])
-        .env("HOME", home.path())
-        .current_dir(project.path())
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(
-        stderr.contains("not loading them until you trust them"),
-        "{stderr}"
-    );
-    let out = psi()
-        .args(["--mode", "auto", "--trust-project"])
+        .args(["--network", "off"])
         .env("HOME", home.path())
         .env("PSI_LOG", "debug")
         .current_dir(project.path())
@@ -70,8 +60,13 @@ fn layers_load_and_flag_overrides() {
         stderr.contains("the interactive mode needs a terminal"),
         "{stderr}"
     );
-    assert!(stderr.contains(r#""mode":"auto""#), "{stderr}");
+    assert!(stderr.contains(r#""isolation":"on""#), "{stderr}");
     assert!(stderr.contains(r#""network":"off""#), "{stderr}");
+    assert!(stderr.contains(r#""notify":"off""#), "{stderr}");
+    assert!(
+        stderr.contains(r#""post_edit_check":"make check""#),
+        "{stderr}"
+    );
 }
 
 const SESSION: &str = r#"{"id":"00000001","parent_id":null,"ts":1,"type":"custom","custom_type":"session_info","data":{"cwd":"/work/project"}}

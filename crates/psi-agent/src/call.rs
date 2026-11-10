@@ -1,41 +1,15 @@
 //! What the policy says about a tool call.
 
-use std::sync::Arc;
-
-use psi_safety::checkpoint::Checkpoints;
-use psi_safety::policy::{Decision, FileFacts, Policy};
+use psi_safety::policy::{Decision, Policy};
 use psi_tools::{Tool, ToolCtx};
 use serde_json::{Map, Value};
 
-/// What the policy says about a call that may change something (§8.1).
-pub async fn decide(
-    policy: &Policy,
-    tool: &Tool,
-    args: &Map<String, Value>,
-    ctx: &ToolCtx,
-    checkpoints: Option<Arc<Checkpoints>>,
-    capture_failing: bool,
-) -> Decision {
+/// Whether a call runs or is refused (`psi_safety::policy`).
+pub fn decide(policy: &Policy, tool: &Tool, args: &Map<String, Value>, ctx: &ToolCtx) -> Decision {
+    let shown = args.get("path").and_then(Value::as_str).unwrap_or("");
     match tool {
         Tool::Bash => policy.bash(args.get("command").and_then(Value::as_str).unwrap_or("")),
-        t @ (Tool::Write | Tool::Edit) => {
-            let path = t.target(args, ctx).unwrap_or_default();
-            let ignored = match checkpoints {
-                Some(cp) => {
-                    let p = path.clone();
-                    tokio::task::spawn_blocking(move || cp.is_ignored(&p))
-                        .await
-                        .unwrap_or(false)
-                }
-                None => false,
-            };
-            let facts = FileFacts {
-                ignored,
-                capture_failing,
-            };
-            let shown = args.get("path").and_then(Value::as_str).unwrap_or("");
-            policy.file_write(t.name(), &path, shown, facts)
-        }
-        _ => Decision::Allow,
+        Tool::Read => policy.file_read(&ctx.resolve(shown), shown),
+        Tool::Write | Tool::Edit => policy.file_write(&ctx.resolve(shown), shown),
     }
 }

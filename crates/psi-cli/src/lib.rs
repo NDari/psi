@@ -3,4 +3,3 @@
 pub mod config;
 pub mod help;
 pub mod safety;
-pub mod trust;

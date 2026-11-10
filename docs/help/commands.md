@@ -5,11 +5,11 @@ Slash commands and keys in the interactive mode.
 - /rewind: go back to an earlier prompt, conversation and files.
 - /tree: move to another point in the conversation (files stay).
 - /diff: the session's file changes, by source. /show <n>: tool call n in full.
-- /stats: tokens, timing, guards and asks. /inspect: the session as a timeline.
+- /stats: tokens, timing, guards and refusals. /inspect: the session as a timeline.
 - /help, /inspect, /diff and /show open in $PAGER (less if unset).
 - /copy: the last answer to the clipboard; /copy code: its last code block (OSC 52;
   in tmux, set -g allow-passthrough on).
-- /mode auto|strict, /label <text>, /new, /resume, /fork, /quit.
+- /label <text>, /new, /resume, /fork, /quit.
 
 Keys: Enter sends (while a run is going, it steers it), Alt+Enter queues a follow-up,
 Shift+Enter (or Ctrl+J, which works in any terminal) is a new line, Esc aborts, Ctrl+C clears (twice quits), Ctrl+D quits,

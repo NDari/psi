@@ -3,7 +3,7 @@
 
 use tree_sitter::Parser;
 
-use crate::always_ask::{Inner, basename, collect, error_line, options, runs};
+use crate::refuse::{Inner, basename, collect, error_line, options, runs};
 
 /// Programs that run another command; that command is checked instead.
 const WRAPPERS: &[&str] = &["timeout", "nice", "time", "env", "command", "xargs"];

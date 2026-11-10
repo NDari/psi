@@ -1,38 +1,36 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)] // Test code.
 //! Esc at every stage of a run (unhappy paths, batch 2): while the answer
 //! streams, while a tool runs, while summarizing,
-//! during a retry's pause, while an approval waits.
+//! during a retry's pause, while a pause card waits.
 //! Each run must stop promptly with `Stop::Aborted`, leave a session that
 //! opens, and the next run must work as if nothing happened.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use futures_util::future::BoxFuture;
-use psi_agent::approval::{Approval, ApprovalRequest, Approver, BlockedChoice, BlockedRequest};
+use psi_agent::approval::Approver;
 use psi_agent::{Agent, AgentConfig, AgentEvent, Budgets, RunOutcome, Safety, Stop};
 use psi_ai::Client;
 use psi_ai::replay::{ReplayServer, Reply, ScriptedReply};
-use psi_safety::always_ask::Rules;
-use psi_safety::policy::{Mode, Policy};
+use psi_safety::policy::Policy;
+use psi_safety::refuse::Rules;
 use psi_session::{EntryBody, SessionFile, StopReason, text_of};
 use psi_tools::{ToolCtx, core_tools};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
 /// Waits for an answer that never comes (a user who hasn't decided).
-struct Undecided;
+#[derive(Default)]
+struct Undecided {
+    asked: Arc<AtomicBool>,
+}
 
 impl Approver for Undecided {
-    fn approve(&self, _: ApprovalRequest) -> BoxFuture<'static, Approval> {
-        Box::pin(futures_util::future::pending())
-    }
-    fn blocked(&self, _: BlockedRequest) -> BoxFuture<'static, BlockedChoice> {
-        Box::pin(futures_util::future::pending())
-    }
     fn pause(&self, _: String) -> BoxFuture<'static, bool> {
+        self.asked.store(true, Ordering::SeqCst);
         Box::pin(futures_util::future::pending())
     }
     fn interactive(&self) -> bool {
@@ -83,7 +81,6 @@ impl Fx {
     fn safety(&self, approver: Arc<dyn Approver>) -> Safety {
         Safety {
             policy: Policy::new(
-                Mode::Auto,
                 Rules::shipped(),
                 &self.cwd,
                 Some(&self.home),
@@ -91,7 +88,6 @@ impl Fx {
             ),
             checkpoints: None,
             approver,
-            grants: HashSet::new(),
             info: Value::Null,
         }
     }
@@ -321,23 +317,23 @@ async fn esc_during_a_retrys_pause() {
 }
 
 #[tokio::test]
-async fn esc_while_an_approval_waits() {
-    let fx = Fx::new(vec![
-        call("bash", json!({"command": "git push"})),
-        text("ok"),
-    ]);
+async fn esc_while_a_pause_waits() {
+    // The same call fails five times: the guard pauses and asks.
+    let fail = || call("bash", json!({"command": "false"}));
+    let fx = Fx::new(vec![fail(), fail(), fail(), fail(), fail(), text("ok")]);
+    let undecided = Undecided::default();
+    let asked = undecided.asked.clone();
     let a = fx
         .agent(32_768, 20_000)
-        .with_safety(fx.safety(Arc::new(Undecided)));
-    let (out, after, mut a) = esc_on(a, "go", |e| matches!(e, AgentEvent::ToolStart { .. })).await;
+        .with_safety(fx.safety(Arc::new(undecided)));
+    let (out, after, mut a) = esc_after(
+        a,
+        "go",
+        |e| matches!(e, AgentEvent::ToolStart { .. }),
+        move || asked.load(Ordering::SeqCst),
+    )
+    .await;
     stopped(&out, after, &a);
-    let r = results(&a);
-    assert_eq!(
-        r[0],
-        (
-            "Not run: the user stopped the run before answering whether to run it.".into(),
-            true
-        )
-    );
+    assert_eq!(results(&a).len(), 5);
     assert_eq!(a.run("again").await.stop, Stop::Done);
 }

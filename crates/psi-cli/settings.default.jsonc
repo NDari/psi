@@ -1,9 +1,8 @@
 // Built-in settings: the first layer (psi-plan.md §3.4).
 // User (~/.psi/settings.jsonc) and project (<project>/.psi/settings.jsonc)
-// layers override these; command-line flags override everything.
+// layers override these; command-line flags override everything. A project
+// file can't set network, isolation, cache_dirs or refuse_remove.
 {
-  // "auto" asks only for irreversible actions; "strict" asks before every change (D-11).
-  "mode": "auto",
   // "on" or "off"; "off" cuts bash off from the network (D-08).
   "network": "on",
   // "on" runs bash inside the sandbox: bubblewrap on Linux, Seatbelt on
@@ -12,11 +11,12 @@
   "isolation": "on",
   // Writable inside the sandbox when they exist; ~ is the home directory.
   "cache_dirs": ["~/.cache", "~/.cargo/registry", "~/.cargo/git", "~/.npm", "~/go/pkg/mod", "~/Library/Caches"],
-  // Entries added to the shipped always-ask list (rules/always-ask.jsonc). Every
-  // layer appends; for example ["terraform destroy", "make deploy"].
-  "always_ask": [],
-  // Shipped entries to drop, by name; every layer appends, e.g. ["git clean"].
-  "always_ask_remove": [],
+  // Entries added to the shipped refuse list (rules/refuse.jsonc): bash
+  // commands that are never run. Every layer appends; for example
+  // ["terraform destroy", "make deploy"].
+  "refuse": [],
+  // Shipped entries to drop, by name, e.g. ["kubectl"].
+  "refuse_remove": [],
   // The project's check, run once after each turn whose write or edit calls
   // changed files; the model sees a short result (D-36). A command, or
   // {"command": "cargo check -q", "timeout": 120}. null is off.

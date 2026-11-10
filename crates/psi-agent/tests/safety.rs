@@ -1,35 +1,31 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)] // Test code.
-//! Safety through the real agent loop (psi-plan.md §8, Phase 3): what asks,
-//! what is refused, blocked writes, checkpoints with /undo and /rewind, and
-//! guards. The model is the replay server; the approver is scripted.
+//! Safety through the real agent loop (design-going-forward.md, goal 1):
+//! what is refused, blocked writes, hidden credentials, checkpoints with
+//! /undo and /rewind, and guards. The model is the replay server; pauses
+//! are answered by a script.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use futures_util::future::BoxFuture;
-use psi_agent::approval::{
-    Approval, ApprovalRequest, Approver, BlockedChoice, BlockedRequest, Headless,
-};
+use psi_agent::approval::{Approver, Headless};
 use psi_agent::recovery::{rewind, session_changes, undo};
 use psi_agent::{Agent, AgentConfig, Budgets, RunOutcome, Safety, Stop};
 use psi_ai::Client;
 use psi_ai::replay::{ReplayServer, Reply, ScriptedReply};
-use psi_safety::always_ask::Rules;
 use psi_safety::checkpoint::Checkpoints;
 use psi_safety::isolation::{Isolation, SandboxConfig, choose};
-use psi_safety::policy::{Mode, Policy};
+use psi_safety::policy::Policy;
+use psi_safety::refuse::Rules;
 use psi_session::{EntryBody, SessionFile};
 use psi_tools::{ToolCtx, core_tools};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-/// Answers in order; records what it was asked.
+/// Answers pauses in order; records what it was asked.
 #[derive(Default)]
 struct Scripted {
-    approvals: Mutex<VecDeque<Approval>>,
-    blocked: Mutex<VecDeque<BlockedChoice>>,
-    asked: Mutex<Vec<ApprovalRequest>>,
     pauses: Mutex<Vec<String>>,
     /// Answers to pauses, in order: true goes on (default: stop).
     go_on: Mutex<VecDeque<bool>>,
@@ -38,29 +34,10 @@ struct Scripted {
 }
 
 impl Approver for Scripted {
-    fn approve(&self, req: ApprovalRequest) -> BoxFuture<'static, Approval> {
-        if let Some(q) = self.label_queue.lock().unwrap().as_ref() {
-            q.lock().unwrap().push_back("typed while asked".into());
-        }
-        self.asked.lock().unwrap().push(req);
-        let a = self
-            .approvals
-            .lock()
-            .unwrap()
-            .pop_front()
-            .unwrap_or(Approval::Deny);
-        Box::pin(async move { a })
-    }
-    fn blocked(&self, _: BlockedRequest) -> BoxFuture<'static, BlockedChoice> {
-        let c = self
-            .blocked
-            .lock()
-            .unwrap()
-            .pop_front()
-            .unwrap_or(BlockedChoice::No);
-        Box::pin(async move { c })
-    }
     fn pause(&self, reason: String) -> BoxFuture<'static, bool> {
+        if let Some(q) = self.label_queue.lock().unwrap().as_ref() {
+            q.lock().unwrap().push_back("typed while paused".into());
+        }
         self.pauses.lock().unwrap().push(reason);
         let go = self.go_on.lock().unwrap().pop_front().unwrap_or(false);
         Box::pin(async move { go })
@@ -103,16 +80,9 @@ impl Fx {
 
     fn safety(&self, approver: Arc<dyn Approver>, cp: Option<Arc<Checkpoints>>) -> Safety {
         Safety {
-            policy: Policy::new(
-                Mode::Auto,
-                Rules::shipped(),
-                &self.root,
-                Some(&self.home),
-                &self.tmpdir,
-            ),
+            policy: Policy::new(Rules::shipped(), &self.root, Some(&self.home), &self.tmpdir),
             checkpoints: cp,
             approver,
-            grants: HashSet::new(),
             info: Value::Null,
         }
     }
@@ -143,6 +113,7 @@ impl Fx {
                 cache_dirs: vec![],
                 tmpdir: self.tmpdir.clone(),
                 network: true,
+                hidden: psi_safety::secrets::hidden_paths(&self.home, None),
             };
             let Isolation::On(sb) = choose(true, cfg, Some(&self.home)) else {
                 panic!("the sandbox must work for the local check");
@@ -168,6 +139,24 @@ impl Fx {
 
     fn read(&self, p: &str) -> Option<String> {
         std::fs::read_to_string(self.root.join(p)).ok()
+    }
+
+    /// Runs git in the project, as the user would.
+    fn git(&self, args: &[&str]) -> String {
+        let out = psi_safety::git::host_git()
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(["-c", "init.defaultBranch=main"])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .current_dir(&self.root)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
     }
 }
 
@@ -203,58 +192,53 @@ fn decisions(a: &Agent) -> Vec<String> {
         .collect()
 }
 
+/// Nothing asks: a listed command is refused the same way with a person
+/// at the keyboard and without one, and the model is told what to do.
 #[tokio::test]
-async fn headless_denies_always_ask_and_allow_grants() {
+async fn listed_commands_are_refused_and_nothing_asks() {
     let fx = Fx::new();
     let push = json!({"command": "make build && git push origin main"});
-    let server = ReplayServer::start(vec![call("bash", push.clone()), text("ok")]).unwrap();
-    let mut a = fx.agent(
-        &server,
-        fx.session(),
-        fx.safety(Arc::new(Headless), None),
-        false,
-    );
-    a.run("ship it").await;
-    let r = results(&a);
-    assert_eq!(
-        r[0],
-        (
-            "Not run: `git push` is on the always-ask list, and this run can't ask the user. Do without it, or say in your answer what you needed.".into(),
-            true
-        )
-    );
-    assert_eq!(decisions(&a), ["denied"]);
-
-    // `--allow git-push` grants it up front.
-    let server = ReplayServer::start(vec![call("bash", push), text("ok")]).unwrap();
-    let mut safety = fx.safety(Arc::new(Headless), None);
-    safety.grants.insert("git push".into());
-    let mut a = fx.agent(&server, fx.session(), safety, false);
-    a.run("ship it").await;
-    assert!(
-        !results(&a)[0].0.starts_with("Not run"),
-        "{:?}",
-        results(&a)
-    );
-    assert_eq!(decisions(&a), ["granted"]);
+    for approver in [
+        Arc::new(Headless) as Arc<dyn Approver>,
+        Arc::new(Scripted::default()),
+    ] {
+        let server = ReplayServer::start(vec![call("bash", push.clone()), text("ok")]).unwrap();
+        let mut a = fx.agent(&server, fx.session(), fx.safety(approver, None), false);
+        assert_eq!(a.run("ship it").await.stop, Stop::Done);
+        assert_eq!(
+            results(&a)[0],
+            (
+                "Not run: psi refuses `git push`, and the command contains it. Leave it to the user: do the rest without it, and say in your answer that it still has to be done.".into(),
+                true
+            )
+        );
+        assert_eq!(decisions(&a), ["refused"]);
+    }
 }
 
-/// A `/label` typed while the run waits (here on an approval card) marks
-/// the entry that was latest then and is written before the next entry;
-/// the model never sees it. In the cog trial
-/// (2026-11-05) the owner's label had to wait for the end of the turn.
+/// A `/label` typed while the run waits (here on a pause card) marks the
+/// entry that was latest then and is written before the next entry; the
+/// model never sees it. In the cog trial (2026-11-05) the owner's label
+/// had to wait for the end of the turn.
 #[tokio::test]
 async fn a_label_typed_during_a_run_marks_the_latest_entry() {
     let fx = Fx::new();
     let server = ReplayServer::start(vec![
-        call("bash", json!({"command": "git push"})),
+        call("bash", json!({"command": "true"})),
+        call("bash", json!({"command": "true"})),
         text("ok"),
     ])
     .unwrap();
     let ap = Arc::new(Scripted::default());
-    let mut a = fx.agent(&server, fx.session(), fx.safety(ap.clone(), None), false);
+    ap.go_on.lock().unwrap().push_back(true);
+    let budgets = Budgets {
+        max_turns: 1,
+        ..Budgets::default()
+    };
+    let safety = fx.safety(ap.clone(), None);
+    let mut a = fx.agent_with(&server, fx.session(), safety, false, budgets);
     *ap.label_queue.lock().unwrap() = Some(a.queues().labels.clone());
-    a.run("ship it").await;
+    a.run("go").await;
     let entries = a.session().entries();
     let at = entries
         .iter()
@@ -263,38 +247,22 @@ async fn a_label_typed_during_a_run_marks_the_latest_entry() {
     let EntryBody::Label { target_id, label } = &entries[at].body else {
         unreachable!()
     };
-    assert_eq!(label.as_deref(), Some("typed while asked"));
-    // The latest entry when it was typed: after the call, before its result.
+    assert_eq!(label.as_deref(), Some("typed while paused"));
+    // The latest entry when it was typed: the first call's result.
     assert_eq!(target_id, &entries[at - 1].id);
-    let before = &entries[..at];
-    assert!(before.iter().any(|e| matches!(
-        e.body,
-        EntryBody::Message {
-            role: psi_session::Role::Assistant,
-            ..
-        }
-    )));
-    assert!(
-        !before
-            .iter()
-            .any(|e| matches!(e.body, EntryBody::ToolResult { .. }))
-    );
-    assert!(matches!(
-        entries[at + 1].body,
-        EntryBody::PolicyDecision { .. }
-    ));
+    assert!(matches!(entries[at - 1].body, EntryBody::ToolResult { .. }));
     // Not part of what the model is sent.
     let last = server.chat_requests().last().cloned().unwrap();
-    assert!(!last.to_string().contains("typed while asked"));
+    assert!(!last.to_string().contains("typed while paused"));
 }
 
 /// Qwen3.8 27B, `sh_precommit` (code eval 2026-11-05, step 18): a quoting
-/// slip. Headless, the denial says to fix it and run it again, which the
-/// model did; it used to say not to retry.
+/// slip. It runs, and bash names the error: a refusal could only guess,
+/// and the parser also rejects some valid bash.
 #[tokio::test]
-async fn headless_unparseable_says_fix_and_run_again() {
+async fn a_command_that_does_not_parse_runs_and_bash_names_the_error() {
     let fx = Fx::new();
-    let cmd = json!({"command": "cd /tmp/hooktest\nt=$(printf '\\t')\necho '--- content of staged b.py:'\ngit cat-file -p :'we'\"$t\"dir/b.py'; echo \"<<<end\"\necho '--- diff output via git diff --cached for b.py:'\ngit diff --cached -- 'we'\"$t\"dir/b.py' | cat -A\necho '--- diff with -U0:'\ngit diff --cached -U0 -- 'we'\"$t\"dir/b.py' | cat -A"});
+    let cmd = json!({"command": "t=$(printf '\\t')\necho '--- content of staged b.py:'\ngit cat-file -p :'we'\"$t\"dir/b.py'; echo \"<<<end\"\necho '--- diff output via git diff --cached for b.py:'\ngit diff --cached -- 'we'\"$t\"dir/b.py' | cat -A\necho '--- diff with -U0:'\ngit diff --cached -U0 -- 'we'\"$t\"dir/b.py' | cat -A"});
     let server = ReplayServer::start(vec![call("bash", cmd), text("ok")]).unwrap();
     let mut a = fx.agent(
         &server,
@@ -304,65 +272,38 @@ async fn headless_unparseable_says_fix_and_run_again() {
     );
     a.run("test the hook").await;
     let r = results(&a);
-    assert_eq!(
-        r[0],
-        (
-            "Not run: bash could not parse it near line 8, and bash would run the lines before the error. Fix the command, or write it another way, and run it again.".into(),
-            true
-        )
+    assert!(r[0].1, "{r:?}");
+    assert!(
+        r[0].0.contains("unexpected EOF while looking for matching"),
+        "{r:?}"
     );
-    assert_eq!(decisions(&a), ["denied"]);
+    assert!(decisions(&a).is_empty());
 }
 
 #[tokio::test]
-async fn approvals_once_session_and_deny_with_a_message() {
+async fn file_tools_stay_inside_the_workspace() {
     let fx = Fx::new();
+    std::fs::write(fx.root.join(".gitignore"), "*.log\n.env\n").unwrap();
+    std::fs::write(fx.root.join(".env"), "KEY=1\n").unwrap();
+    let outside = fx.root.parent().unwrap().join("outside.txt");
+    let user_settings = fx.home.join(".psi/settings.jsonc");
     let server = ReplayServer::start(vec![
         call(
-            "bash",
-            json!({"command": "git push", "intent": "publish the fix"}),
+            "write",
+            json!({"path": outside.to_str().unwrap(), "text": "x"}),
         ),
-        call("bash", json!({"command": "git -C . push --tags"})),
-        call("bash", json!({"command": "kubectl apply -f x"})),
-        text("ok"),
-    ])
-    .unwrap();
-    let ap = Arc::new(Scripted::default());
-    ap.approvals.lock().unwrap().extend([
-        Approval::Session,
-        Approval::DenyWith("not on a Friday".into()),
-    ]);
-    let mut a = fx.agent(&server, fx.session(), fx.safety(ap.clone(), None), false);
-    a.run("go").await;
-    let asked = ap.asked.lock().unwrap();
-    // The session grant covers the second push: two asks, not three.
-    assert_eq!(asked.len(), 2);
-    assert_eq!(asked[0].intent.as_deref(), Some("publish the fix"));
-    assert_eq!(asked[0].keys, ["git push"]);
-    assert_eq!(asked[1].keys, ["kubectl"]);
-    assert_eq!(decisions(&a), ["approved_session", "granted", "denied"]);
-    assert_eq!(
-        results(&a)[2],
-        ("The user denied this call: not on a Friday".into(), true)
-    );
-}
-
-#[tokio::test]
-async fn file_tools_ask_for_psi_config_and_unrecoverable_paths() {
-    let fx = Fx::new();
-    std::fs::write(fx.root.join(".gitignore"), "*.log\n").unwrap();
-    let outside = fx.root.parent().unwrap().join("outside.txt");
-    let server = ReplayServer::start(vec![
+        call(
+            "write",
+            json!({"path": user_settings.to_str().unwrap(), "text": "{}"}),
+        ),
+        // Inside: the project's own settings (they can't loosen safety),
+        // and gitignored files, which checkpoints capture when small.
         call(
             "write",
             json!({"path": ".psi/settings.jsonc", "text": "{}"}),
         ),
         call("write", json!({"path": "debug.log", "text": "x"})),
-        call(
-            "write",
-            json!({"path": outside.to_str().unwrap(), "text": "x"}),
-        ),
-        call("write", json!({"path": "src/ok.py", "text": "x"})),
+        call("bash", json!({"command": "echo > .env"})),
         text("ok"),
     ])
     .unwrap();
@@ -371,26 +312,67 @@ async fn file_tools_ask_for_psi_config_and_unrecoverable_paths() {
     let mut a = fx.agent(
         &server,
         session,
-        fx.safety(Arc::new(Headless), Some(cp)),
+        fx.safety(Arc::new(Headless), Some(cp.clone())),
         false,
     );
     a.run("go").await;
     let r = results(&a);
-    assert!(r[0].0.contains("psi's own configuration"), "{r:?}");
+    let want = format!(
+        "Not written: {} is outside the workspace ({}), and psi only changes files inside it. If the task needs it, say so in your answer.",
+        outside.display(),
+        fx.root.canonicalize().unwrap().display()
+    );
+    assert_eq!(r[0], (want, true));
     assert!(
-        r[1].0.starts_with("Not run: debug.log is gitignored"),
+        r[1].1 && r[1].0.contains("is outside the workspace"),
         "{r:?}"
     );
-    assert!(
-        r[2].0
-            .contains("is outside the workspace, so checkpoints can't undo it"),
-        "{r:?}"
+    assert!(!r[2].1 && !r[3].1 && !r[4].1, "{r:?}");
+    assert_eq!(decisions(&a), ["refused", "refused"]);
+    assert!(!outside.exists() && !user_settings.exists());
+    assert_eq!(fx.read(".env").as_deref(), Some("\n"));
+    // /undo brings the clobbered .env back and takes the new files away.
+    undo(a.session_mut(), &cp).unwrap().unwrap();
+    assert_eq!(fx.read(".env").as_deref(), Some("KEY=1\n"));
+    assert_eq!(fx.read("debug.log"), None);
+    assert_eq!(fx.read(".psi/settings.jsonc"), None);
+}
+
+/// Credentials are out of reach both ways: read refuses them, and bash
+/// inside the boundary finds the directory empty.
+#[tokio::test]
+async fn credentials_cannot_be_read() {
+    let fx = Fx::new();
+    std::fs::create_dir_all(fx.home.join(".ssh")).unwrap();
+    std::fs::write(fx.home.join(".ssh/id_ed25519"), "secret-key\n").unwrap();
+    std::fs::write(fx.home.join(".git-credentials"), "secret-token\n").unwrap();
+    let key = fx.home.join(".ssh/id_ed25519");
+    let token = fx.home.join(".git-credentials");
+    let server = ReplayServer::start(vec![
+        call("read", json!({"path": key.to_str().unwrap()})),
+        call(
+            "bash",
+            json!({"command": format!("cat {} {}", key.display(), token.display())}),
+        ),
+        text("ok"),
+    ])
+    .unwrap();
+    let safety = fx.safety(Arc::new(Headless), None);
+    let mut a = fx.agent(&server, fx.session(), safety, true);
+    a.run("go").await;
+    let r = results(&a);
+    assert_eq!(
+        r[0],
+        (
+            format!(
+                "Not read: {} holds credentials, which psi keeps out of reach. Do without it.",
+                key.display()
+            ),
+            true
+        )
     );
-    assert_eq!(r[3], ("Created src/ok.py (1 line).".into(), false));
-    // Headless, every ask is denied, with the reason.
-    assert_eq!(decisions(&a), ["denied", "denied", "denied"]);
-    assert!(!fx.root.join(".psi/settings.jsonc").exists());
-    assert!(!fx.root.join("debug.log").exists() && !outside.exists());
+    assert!(r[1].1 && !r[1].0.contains("secret"), "{r:?}");
+    assert_eq!(decisions(&a), ["refused"]);
 }
 
 #[tokio::test]
@@ -482,57 +464,7 @@ async fn a_budget_pauses_in_the_tui_and_going_on_gives_as_much_again() {
 }
 
 #[tokio::test]
-async fn an_approved_write_into_psi_config_goes_through() {
-    // The user approves each file, and a later edit of it asks again.
-    let fx = Fx::new();
-    let server = ReplayServer::start(vec![
-        call(
-            "write",
-            json!({"path": ".psi/settings.jsonc", "text": "{}\n"}),
-        ),
-        call(
-            "edit",
-            json!({"path": ".psi/settings.jsonc", "old_text": "{}", "new_text": "{ \"a\": 1 }"}),
-        ),
-        text("ok"),
-    ])
-    .unwrap();
-    let approver = Arc::new(Scripted::default());
-    approver
-        .approvals
-        .lock()
-        .unwrap()
-        .extend([Approval::Once, Approval::Deny]);
-    let a = fx.agent(
-        &server,
-        fx.session(),
-        fx.safety(approver.clone(), None),
-        false,
-    );
-    // The CLI records an approved write as trusted; here, the paths it gets.
-    let written = Arc::new(Mutex::new(Vec::new()));
-    let w = written.clone();
-    let mut a = a.with_config_write(Arc::new(move |p: &std::path::Path| {
-        w.lock().unwrap().push(p.to_path_buf());
-    }));
-    a.run("go").await;
-    let file = fx.root.join(".psi/settings.jsonc");
-    assert_eq!(std::fs::read_to_string(&file).unwrap(), "{}\n");
-    // Only the write that went through, not the denied edit.
-    assert_eq!(*written.lock().unwrap(), std::slice::from_ref(&file));
-    let r = results(&a);
-    assert!(!r[0].1 && r[1].1, "{r:?}");
-    let asked = approver.asked.lock().unwrap();
-    assert_eq!(asked.len(), 2);
-    assert!(
-        asked[0].reason.contains("psi's own configuration"),
-        "{:?}",
-        asked[0].reason
-    );
-}
-
-#[tokio::test]
-async fn a_symlink_and_dotdot_cannot_reach_psi_config() {
+async fn a_symlink_and_dotdot_cannot_get_out_of_the_workspace() {
     // Bash in the sandbox may create a symlink to anywhere; a write through
     // it with `..` lands where the OS resolves it (2026-11-01 audit).
     let fx = Fx::new();
@@ -557,7 +489,7 @@ async fn a_symlink_and_dotdot_cannot_reach_psi_config() {
     let r = results(&a);
     assert!(!r[0].1, "{r:?}");
     assert!(
-        r[1].1 && r[1].0.contains("psi's own configuration"),
+        r[1].1 && r[1].0.contains("is outside the workspace"),
         "{r:?}"
     );
     assert_eq!(
@@ -567,43 +499,7 @@ async fn a_symlink_and_dotdot_cannot_reach_psi_config() {
 }
 
 #[tokio::test]
-async fn session_grants_end_with_the_session_but_allow_flags_stay() {
-    // --allow git push at the start; `s` on a git stash drop card. A new session
-    // keeps the first and asks for git stash drop again.
-    let fx = Fx::new();
-    let server = ReplayServer::start(vec![
-        call("bash", json!({"command": "git stash drop"})),
-        call("bash", json!({"command": "git push --dry-run"})),
-        text("one"),
-        call("bash", json!({"command": "git stash drop"})),
-        call("bash", json!({"command": "git push --dry-run"})),
-        text("two"),
-    ])
-    .unwrap();
-    let approver = Arc::new(Scripted::default());
-    approver
-        .approvals
-        .lock()
-        .unwrap()
-        .extend([Approval::Session, Approval::Deny]);
-    let mut safety = fx.safety(approver.clone(), None);
-    safety.grants.insert("git push".into());
-    let mut a = fx.agent(&server, fx.session(), safety, false);
-    a.run("go").await;
-    a.set_session(fx.session(), None);
-    a.run("again").await;
-    let asked: Vec<String> = approver
-        .asked
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|r| r.args["command"].as_str().unwrap().to_owned())
-        .collect();
-    assert_eq!(asked, ["git stash drop", "git stash drop"]);
-}
-
-#[tokio::test]
-async fn a_failing_checkpoint_makes_writes_ask() {
+async fn a_failing_checkpoint_is_recorded_and_the_run_goes_on() {
     let fx = Fx::new();
     let server = ReplayServer::start(vec![
         call("write", json!({"path": "a.txt", "text": "x"})),
@@ -618,74 +514,118 @@ async fn a_failing_checkpoint_makes_writes_ask() {
         fx.safety(Arc::new(Headless), Some(cp.clone())),
         false,
     );
-    // The shadow repository disappears: the submit capture fails.
+    // The shadow repository disappears: the captures fail.
     std::fs::remove_dir_all(cp.git_dir()).unwrap();
-    a.run("go").await;
-    let r = results(&a);
-    assert!(r[0].0.contains("checkpoints are failing"), "{r:?}");
-    assert!(!fx.root.join("a.txt").exists());
+    assert_eq!(a.run("go").await.stop, Stop::Done);
+    assert_eq!(fx.read("a.txt").as_deref(), Some("x"));
+    let events = guard_events(&a);
+    assert!(
+        events.iter().any(|(g, m)| g == "checkpoint_failed"
+            && m.starts_with(
+                "the checkpoint failed, so changes since the last one can't be undone"
+            )),
+        "{events:?}"
+    );
 }
 
 #[tokio::test]
-async fn blocked_writes_offer_a_rerun() {
+async fn a_blocked_write_says_so() {
     let fx = Fx::new();
     let outside = fx.root.parent().unwrap().join("outside");
     std::fs::create_dir_all(&outside).unwrap();
     let cmd = json!({"command": format!("echo hi > {}/f", outside.display())});
+    // The same with a person at the keyboard: nothing offers a rerun.
+    for approver in [
+        Arc::new(Headless) as Arc<dyn Approver>,
+        Arc::new(Scripted::default()),
+    ] {
+        let server = ReplayServer::start(vec![call("bash", cmd.clone()), text("ok")]).unwrap();
+        let mut a = fx.agent(&server, fx.session(), fx.safety(approver, None), true);
+        a.run("go").await;
+        let r = results(&a);
+        let want = format!(
+            "Blocked: writing {}/f is outside the workspace. Explain to the user what you needed instead of trying variants.",
+            outside.canonicalize().unwrap().display()
+        );
+        assert!(r[0].1 && r[0].0.ends_with(&want), "{r:?}");
+        assert_eq!(decisions(&a), ["blocked"]);
+        assert!(!outside.join("f").exists());
+    }
+}
 
-    // Headless: the call stays failed, with one next step.
-    let server = ReplayServer::start(vec![call("bash", cmd.clone()), text("ok")]).unwrap();
-    let mut a = fx.agent(
-        &server,
-        fx.session(),
-        fx.safety(Arc::new(Headless), None),
-        true,
-    );
-    a.run("go").await;
-    let r = results(&a);
-    let want = format!(
-        "Blocked: writing {}/f is outside the workspace. Explain to the user what you needed instead of trying variants.",
-        outside.canonicalize().unwrap().display()
-    );
-    assert!(r[0].1 && r[0].0.ends_with(&want), "{r:?}");
-    assert_eq!(decisions(&a), ["blocked"]);
-    assert!(!outside.join("f").exists());
-
-    // The user reruns it once outside the boundary.
-    let server = ReplayServer::start(vec![call("bash", cmd.clone()), text("ok")]).unwrap();
-    let ap = Arc::new(Scripted::default());
-    ap.blocked
-        .lock()
-        .unwrap()
-        .push_back(BlockedChoice::RerunOutside);
-    let mut a = fx.agent(&server, fx.session(), fx.safety(ap, None), true);
-    a.run("go").await;
-    assert_eq!(
-        results(&a)[0],
-        (
-            "[the user approved running it outside the sandbox]\n(no output)".into(),
-            false
-        )
-    );
-    assert_eq!(std::fs::read_to_string(outside.join("f")).unwrap(), "hi\n");
-    std::fs::remove_file(outside.join("f")).unwrap();
-
-    // Or adds the directory for the session.
+/// The model may commit, branch and rewrite history: /undo puts the files
+/// and the branch tips back (design-going-forward.md, goal 1).
+#[tokio::test]
+async fn undo_puts_back_the_branch_tips_after_a_rewrite() {
+    let fx = Fx::new();
+    fx.git(&["init", "-q"]);
+    std::fs::write(fx.root.join("a.txt"), "one\n").unwrap();
+    fx.git(&["add", "a.txt"]);
+    fx.git(&["commit", "-q", "-m", "first"]);
+    std::fs::write(fx.root.join("a.txt"), "two\n").unwrap();
+    fx.git(&["commit", "-q", "-am", "second"]);
+    let second = fx.git(&["rev-parse", "HEAD"]);
+    // The user's own uncommitted work.
+    std::fs::write(fx.root.join("a.txt"), "mine\n").unwrap();
+    let rewrite = "git -c user.name=m -c user.email=m@m commit -qam wip \
+        && git reset -q --hard HEAD~2 && git checkout -q -b scratch && git branch -D main";
     let server = ReplayServer::start(vec![
-        call("bash", cmd.clone()),
-        call("bash", cmd),
-        text("ok"),
+        call("bash", json!({"command": rewrite})),
+        text("done"),
     ])
     .unwrap();
-    let ap = Arc::new(Scripted::default());
-    ap.blocked.lock().unwrap().push_back(BlockedChoice::AddDir);
-    let mut a = fx.agent(&server, fx.session(), fx.safety(ap, None), true);
-    a.run("go").await;
+    let session = fx.session();
+    let cp = fx.checkpoints(&session);
+    let mut a = fx.agent(
+        &server,
+        session,
+        fx.safety(Arc::new(Headless), Some(cp.clone())),
+        false,
+    );
+    assert_eq!(a.run("tidy up").await.stop, Stop::Done);
     let r = results(&a);
-    assert!(r[0].0.starts_with("[the user made ") && !r[0].1, "{r:?}");
-    // The second call runs inside, now that the directory is writable.
-    assert_eq!(r[1], ("(no output)".into(), false));
-    assert_eq!(decisions(&a), ["dir_added"]);
+    assert!(!r[0].1, "{r:?}");
+    assert_eq!(fx.read("a.txt").as_deref(), Some("one\n"));
+    assert_eq!(fx.git(&["branch", "--list", "main"]), "");
+
+    undo(a.session_mut(), &cp).unwrap().unwrap();
+    assert_eq!(fx.git(&["rev-parse", "main"]), second);
+    assert_eq!(fx.git(&["symbolic-ref", "HEAD"]), "refs/heads/main");
+    assert_eq!(fx.read("a.txt").as_deref(), Some("mine\n"));
+    assert_eq!(fx.git(&["status", "--porcelain"]), "M a.txt");
+}
+
+/// A commit changes no file, only the branch tip: /undo still finds it.
+#[tokio::test]
+async fn undo_takes_back_a_commit_that_changed_no_file() {
+    let fx = Fx::new();
+    fx.git(&["init", "-q"]);
+    std::fs::write(fx.root.join("a.txt"), "one\n").unwrap();
+    fx.git(&["add", "a.txt"]);
+    fx.git(&["commit", "-q", "-m", "first"]);
+    let first = fx.git(&["rev-parse", "HEAD"]);
+    std::fs::write(fx.root.join("a.txt"), "mine\n").unwrap();
+    let commit = "git -c user.name=m -c user.email=m@m commit -qam wip";
+    let server = ReplayServer::start(vec![
+        call("bash", json!({"command": commit})),
+        text("committed"),
+    ])
+    .unwrap();
+    let session = fx.session();
+    let cp = fx.checkpoints(&session);
+    let mut a = fx.agent(
+        &server,
+        session,
+        fx.safety(Arc::new(Headless), Some(cp.clone())),
+        false,
+    );
+    assert_eq!(a.run("commit it").await.stop, Stop::Done);
+    assert_ne!(fx.git(&["rev-parse", "HEAD"]), first);
+    let r = undo(a.session_mut(), &cp).unwrap().unwrap();
+    assert_eq!(r.refs, ["refs/heads/main"]);
+    assert_eq!(fx.git(&["rev-parse", "HEAD"]), first);
+    assert_eq!(fx.git(&["status", "--porcelain"]), "M a.txt");
+    assert!(undo(a.session_mut(), &cp).unwrap().is_none());
 }
 
 #[tokio::test]

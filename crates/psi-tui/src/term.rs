@@ -19,7 +19,7 @@ pub enum NotifyKind {
 pub enum Activity {
     Idle,
     Working,
-    /// An approval, a question or a dialog waits for the user.
+    /// A pause card or a dialog waits for the user.
     Waiting,
 }
 

@@ -1,28 +1,30 @@
-//! Always-ask detection (psi-plan.md §8.3, D-21): finds always-ask commands
-//! anywhere inside a bash command, so the harness can ask before running it.
-//! It doesn't decide that anything is safe; the boundary and checkpoints do that.
+//! The refuse list (design-going-forward.md, "Refuse, never ask"): finds
+//! listed commands anywhere inside a bash command, so the harness can refuse
+//! it with what to do instead. The list is short and a courtesy: it turns a
+//! command that would fail or can't be undone into a clear answer. What
+//! keeps the user safe is the boundary, hidden credentials and checkpoints.
 
 use serde::Deserialize;
 use tree_sitter::{Node, Parser};
 
 /// The shipped list. Repoint this path if the module moves.
-const SHIPPED: &str = include_str!("../../../rules/always-ask.jsonc");
+const SHIPPED: &str = include_str!("../../../rules/refuse.jsonc");
 
 /// How many `sh -c` / `eval` scripts deep the classifier looks.
 const MAX_DEPTH: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RuleError {
-    #[error("always-ask entry is empty")]
+    #[error("refuse entry is empty")]
     Empty,
-    #[error("always-ask rules: {0}")]
+    #[error("refuse rules: {0}")]
     File(String),
 }
 
-/// One always-ask entry, e.g. "git push": a program and words that must all appear after it, in any order.
+/// One entry, e.g. "git push": a program and words that must all appear after it, in any order.
 /// For git, a first word that isn't an option must be the subcommand, so `git commit -m clean`
 /// isn't `git clean`.
-/// A word written `!list` must not appear: "git stash !list" asks for `git stash` but not `git stash list`.
+/// A word written `!list` must not appear: "git stash !list" refuses `git stash` but not `git stash list`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rule {
     pub id: String,
@@ -88,7 +90,7 @@ fn word_matches(want: &str, got: &str) -> bool {
     }
 }
 
-/// The always-ask list.
+/// The refuse list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rules {
     rules: Vec<Rule>,
@@ -99,7 +101,7 @@ pub struct Rules {
 /// The built-in entry: removing or moving the repository's `.git` in any
 /// shape (`rm -rf .git`, `./.git/`, an absolute or quoted path, a path
 /// inside it, a dot-glob like `.*`, `find ... -delete`, `mv .git`).
-/// Checkpoints leave `.git` alone, so nothing could undo it; Gemma 12B
+/// Checkpoints record branch tips, not objects, so nothing could undo it; Gemma 12B
 /// rebuilt a task's repository with `rm -rf .git` again and again
 /// (2026-10-31). Exact-word rules can't express it.
 pub const GIT_DIR_RULE: &str = "rm .git";
@@ -160,19 +162,19 @@ fn removes_git_dir(argv: &[Word]) -> bool {
 
 #[derive(Deserialize)]
 struct RulesFile {
-    always_ask: Vec<String>,
+    refuse: Vec<String>,
 }
 
 impl Rules {
-    /// The shipped list (rules/always-ask.jsonc, embedded with include_str!).
+    /// The shipped list (rules/refuse.jsonc, embedded with include_str!).
     pub fn shipped() -> Self {
         // Invariant: the embedded file is fixed at build time and the
         // `shipped_list` test parses it.
         #[allow(clippy::expect_used)]
-        Self::from_jsonc(SHIPPED).expect("the shipped always-ask list parses")
+        Self::from_jsonc(SHIPPED).expect("the shipped refuse list parses")
     }
 
-    /// Parse a rules file: `{ "always_ask": ["git push", ...] }`, comments allowed.
+    /// Parse a rules file: `{ "refuse": ["git push", ...] }`, comments allowed.
     pub fn from_jsonc(text: &str) -> Result<Self, RuleError> {
         let file: RulesFile = jsonc_parser::parse_to_serde_value(text, &Default::default())
             .map_err(|e| RuleError::File(e.to_string()))?;
@@ -180,7 +182,7 @@ impl Rules {
             rules: Vec::new(),
             git_dir: true,
         };
-        for entry in &file.always_ask {
+        for entry in &file.refuse {
             rules.push(Self::parse_entry(entry)?);
         }
         Ok(rules)
@@ -200,7 +202,7 @@ impl Rules {
         })
     }
 
-    /// Layers (psi-plan.md §8.3): `add` appends entries (dedupe by id), `remove` drops
+    /// Layers: `add` appends entries (dedupe by id), `remove` drops
     /// shipped entries by id. Error on an unparseable entry.
     pub fn layered(add: &[String], remove: &[String]) -> Result<Self, RuleError> {
         let mut rules = Self::shipped();
@@ -246,15 +248,16 @@ impl Rules {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
-    /// No always-ask entry found.
+    /// No entry found.
     Clear,
     /// The matched rule ids, deduplicated, in first-match order.
-    Ask(Vec<String>),
-    /// The command doesn't parse; bash runs lines before a syntax error, so this asks.
+    Refuse(Vec<String>),
+    /// The command doesn't parse, so nothing was looked for. It runs: bash
+    /// gives the real syntax error, and tree-sitter rejects some valid bash.
     Unparseable(String),
 }
 
-/// Find always-ask entries anywhere in `command`.
+/// Find listed entries anywhere in `command`.
 pub fn classify(command: &str, rules: &Rules) -> Verdict {
     let mut parser = Parser::new();
     if parser
@@ -271,7 +274,7 @@ pub fn classify(command: &str, rules: &Rules) -> Verdict {
     match scan.script(command, 0, None) {
         Err(why) => Verdict::Unparseable(why),
         Ok(()) if scan.hits.is_empty() => Verdict::Clear,
-        Ok(()) => Verdict::Ask(scan.hits),
+        Ok(()) => Verdict::Refuse(scan.hits),
     }
 }
 
@@ -666,7 +669,22 @@ mod tests {
     use super::*;
 
     fn ask(ids: &[&str]) -> Verdict {
-        Verdict::Ask(ids.iter().map(|s| s.to_string()).collect())
+        Verdict::Refuse(ids.iter().map(|s| s.to_string()).collect())
+    }
+
+    /// The shipped list plus the git entries it had while rewrites asked
+    /// (checkpoints record branch tips now): they exercise the matcher.
+    fn old() -> Rules {
+        let add = [
+            "git reset --hard",
+            "git clean",
+            "git branch -D",
+            "git branch --delete --force",
+            "git stash !list !show !pop !apply !drop !clear !branch",
+            "git checkout",
+            "git restore",
+        ];
+        Rules::layered(&add.map(String::from), &[]).unwrap()
     }
 
     /// Run a table and report every mismatch at once.
@@ -694,15 +712,8 @@ mod tests {
             ids,
             [
                 "git push",
-                "git reset --hard",
-                "git clean",
-                "git branch -D",
-                "git branch --delete --force",
                 "git stash drop",
                 "git stash clear",
-                "git stash",
-                "git checkout",
-                "git restore",
                 "npm publish",
                 "cargo publish",
                 "docker push",
@@ -720,11 +731,8 @@ mod tests {
     }
 
     #[test]
-    fn git_commands_that_set_aside_or_discard_work_ask() {
-        // A sub-agent stashed and checked out files in the owner's tree to
-        // compare old and new behavior, and left two stashes behind with
-        // its parent's changes in them (cog trial, 2026-11-04).
-        let rules = Rules::shipped();
+    fn stash_entries_leave_the_harmless_forms_alone() {
+        let rules = old();
         for (cmd, want) in [
             ("git stash", ask(&["git stash"])),
             ("git stash push -m wip", ask(&["git stash"])),
@@ -753,7 +761,7 @@ mod tests {
     }
 
     #[test]
-    fn hidden_entries_ask() {
+    fn hidden_entries_are_found() {
         let push = || ask(&["git push"]);
         let cases = [
             // Structure.
@@ -877,7 +885,7 @@ mod tests {
                 ask(&["kubectl", "git push"]),
             ),
         ];
-        check(&cases, &Rules::shipped());
+        check(&cases, &old());
     }
 
     #[test]
@@ -920,7 +928,7 @@ mod tests {
     }
 
     #[test]
-    fn known_false_positives_ask() {
+    fn known_false_positives_are_refused() {
         let cases = [
             // A short-flag cluster with an attached value can contain the letter.
             ("psi -mllama-pro", ask(&["psi -p"])),
@@ -955,7 +963,7 @@ mod tests {
             // Other programs still match anywhere.
             ("npm --registry r publish", ask(&["npm publish"])),
         ];
-        check(&cases, &Rules::shipped());
+        check(&cases, &old());
         // A user entry whose first word is an option matches anywhere.
         let rules = Rules::layered(&["git --force".into()], &[]).unwrap();
         assert_eq!(
@@ -980,7 +988,7 @@ mod tests {
     }
 
     #[test]
-    fn unparseable_asks() {
+    fn unparseable_says_where() {
         let rules = Rules::shipped();
         for cmd in [
             "echo \"unterminated",
@@ -1012,9 +1020,9 @@ mod tests {
     }
 
     #[test]
-    fn known_misparses_ask() {
-        // Valid bash that tree-sitter-bash 0.25 rejects, so it asks. Relax with
-        // fixtures if these turn up often in practice.
+    fn known_misparses() {
+        // Valid bash that tree-sitter-bash 0.25 rejects: why a command that
+        // doesn't parse runs instead of being refused.
         let rules = Rules::shipped();
         for cmd in [
             "cat <<EOF; echo after\nhi\nEOF",
@@ -1088,12 +1096,13 @@ mod tests {
     #[test]
     fn layers_add_remove_and_dedupe() {
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-        let rules = Rules::layered(&s(&["git  rebase ", "git push"]), &s(&["git-clean"])).unwrap();
+        let rules =
+            Rules::layered(&s(&["git  rebase ", "git push"]), &s(&["cargo-publish"])).unwrap();
         assert_eq!(rules.ids().filter(|id| *id == "git push").count(), 1);
         assert!(rules.ids().any(|id| id == "git rebase"));
-        assert!(!rules.ids().any(|id| id == "git clean"));
+        assert!(!rules.ids().any(|id| id == "cargo publish"));
         assert_eq!(classify("git rebase -i main", &rules), ask(&["git rebase"]));
-        assert_eq!(classify("git clean -fdx", &rules), Verdict::Clear);
+        assert_eq!(classify("cargo publish", &rules), Verdict::Clear);
         assert_eq!(Rules::layered(&[], &[]).unwrap(), Rules::shipped());
 
         assert_eq!(Rules::layered(&s(&[""]), &[]), Err(RuleError::Empty));
@@ -1103,7 +1112,7 @@ mod tests {
         assert_eq!(rule.id, "/usr/bin/git branch -D");
         assert_eq!(rule.program, "git");
         assert!(matches!(
-            Rules::from_jsonc("{ \"always_ask\": 3 }"),
+            Rules::from_jsonc("{ \"refuse\": 3 }"),
             Err(RuleError::File(_))
         ));
     }
@@ -1131,7 +1140,7 @@ mod tests {
     }
 
     #[test]
-    fn removing_git_asks_in_every_shape() {
+    fn removing_git_is_found_in_every_shape() {
         let rules = Rules::shipped();
         for c in [
             "rm -rf .git",

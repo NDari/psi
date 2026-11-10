@@ -4,27 +4,17 @@ Problems we know about and have chosen not to fix yet, with how much they matter
 
 ## Open
 
-### Bash can write what the file tools guard (added 2026-11-03; the first item's high-priority part, `/reload`, fixed 2026-11-04)
+### What "nothing the owner can't recover from" doesn't cover yet (added 2026-11-09, with step 2 of `design-going-forward.md`)
 
-The file tools ask before changing Psi's configuration or files checkpoints can't undo, but bash only goes through the sandbox and the always-ask list. A heredoc is the easy way (the cog trial on 2026-11-03 wrote an extension with `cat > .psi/extensions/cog_run/init.lua << 'EOF'` after `write` was refused), but `cp`, `sed` or a script do the same.
-- **The project's `.psi/` through `/reload` (high).** The sandbox lets bash write the whole workspace, `.psi/` included, so a model can change settings and extensions without asking, and an extension's Lua runs inside Psi, outside the sandbox. At startup this is covered: trust is a fingerprint of `.psi/`'s settings, MCP servers, extensions, skills, prompts, themes and agents (`crates/psi-cli/src/trust.rs`), so a change asks again before anything loads. `/reload` doesn't check it (`Worker::reload` in `crates/psi-cli/src/interactive/worker.rs` reloads whatever is there), and a project with no `.psi/` at startup counts as having nothing to trust, so a `.psi/extensions/` created during the session loads on `/reload` without a question. Options:
-  1. **`/reload` checks the fingerprint (done 2026-11-03).** If `.psi/` changed since it was trusted, show the same question as at startup (as a card, listing the changed files) before loading; no answer, no load. Small, covers every way `.psi/` can change (bash, approved file-tool writes, a `git checkout`, the user's editor), and makes §9.3's "again whenever they change on disk" true mid-session.
-  2. **Read-only `<root>/.psi` in the sandbox**, as `~/.psi/` already is: a read-only bind after the workspace bind in bubblewrap, a `file-write*` deny in Seatbelt. Then the file tools, which ask, are the only way in. Closes bash's way entirely, but a missing `.psi/` can't be bound read-only (bubblewrap needs the path), so a project without one stays open unless Psi creates the folder or hides the path; and it does nothing about other changes on disk.
-  3. **The plan's checkpoint-diff re-trust (§13):** after a turn, a checkpoint diff that touches `.psi/` holds settings and extensions until the user approves again. The fuller form of option 1, waiting in §13.
-  4. **A warning only:** when a turn's checkpoint shows `.psi/` changed, say so on screen. Cheapest, and leaves the decision to the user at `/reload`.
-
-  Options 1 and 2 together would close it: 2 stops the model's quiet way in, 1 catches everything else. Option 1 is built: `/reload` shows a card (y load it, n don't reload) when the project's `.psi` doesn't match what was trusted, including one created mid-session; the card names what `.psi` holds, not the changed files. Option 2 is still open.
-- **Always-ask commands in a file (accepted, §8.3).** The classifier reads the command text (with `sh -c`, `eval`, wrappers and substitutions), not files: a script written first and run after (`bash push.sh`, `make deploy`, `npm run x`, `python x.py`) runs what is inside without asking. The plan accepts this ("dynamic forms run; the boundary contains them"). Worth knowing which credentials the sandbox can reach, since that decides what a hidden `git push` can do.
-- **Gitignored files (medium).** write and edit ask before changing one, since checkpoints skip it; bash doesn't, so a clobbered `.env` can't be undone.
-- **Read before overwrite (low).** The file tools refuse to replace a file the model hasn't read; bash doesn't check. Checkpoints still undo it.
-
-### Plan mode's read-only check is a parser, not a boundary (added 2026-11-05, low priority)
-
-In plan mode (and for read-only sub-agents) bash runs in the normal sandbox, which can write the workspace; only `read_only::check` keeps it from writing. The 2026-11-05 review's bypasses are fixed (options after operands, `rg --pre`, `fd -x/-X`, `awk -i/-l`, `bat --pager`, git words that expand, sed and awk scripts that expand). Still open, by choice:
-- **An option inside a variable for a tool other than git:** `x=-i; sed 's/a/b/' $x f` passes, since a word that expands is taken for an operand. Refusing every such word would also refuse `sed -n 1p "$f"` in a loop, which models write.
-- **Holes nobody has found yet.** Checkpoints undo a write to a tracked file.
-
-**The fuller fix:** run plan-mode bash in a read-only sandbox (a read-only bind of the workspace in bubblewrap, a `file-write*` deny in Seatbelt). It needs a plan edit (§8 and the plan-mode section) and does nothing when isolation is off. Worth it if a model is seen getting past the check.
+- **The Seatbelt side is not run yet (high, before the Mac build is used).** Hiding credentials on macOS is written (a `file-read*` and `file-write*` deny for each hidden path in the profile) and has a test (`seatbelt_blocks_writes_outside`), but neither was run on a Mac. A profile that doesn't compile turns bash off there, loudly.
+- **The macOS keychain (high on the Mac).** A token kept in the login keychain is not hidden by a file deny for certain (`Library/Keychains` is on the list; the keychain is also reached through `securityd`). Git is covered another way: bash gets an empty `credential.helper`, so git asks no helper. Other tools that read the keychain (`gh` with keychain storage, `security find-generic-password`) are not. Needs a `mach-lookup` deny tried on the Mac.
+- **The SSH agent socket on macOS (medium).** `SSH_AUTH_SOCK` is removed from bash's environment, but launchd's socket is under `/private/tmp`, which Seatbelt leaves readable and writable, so a command that looks for it can use the agent. On Linux the socket is under the runtime directory, which is hidden. Needs a `network-outbound` deny on the socket's path, tried on the Mac.
+- **Gitignored files in a directory ignored as a whole (low).** Checkpoints capture ignored files up to 1 MB each (2,000 at most), but not inside a directory that is itself ignored (`target/`, `node_modules/`, also a `secrets/` folder), and not larger ones. A clobbered file there can't be undone.
+- **Git objects (low).** Checkpoints record branch and tag tips and HEAD, not the commits. `/undo` after a rewrite relies on the old commits still being in `.git`, which holds unless something prunes them (`git gc --prune=now`, `git reflog expire`). Removing `.git` and dropping a stash are refused; a stash's contents are not recorded.
+- **A branch made during a run stays after `/undo` (low).** Only refs a checkpoint recorded are put back; nothing is deleted.
+- **A failed checkpoint doesn't stop the run (low).** It is recorded as a guard event and the run goes on, so changes after it can't be undone until a capture works again. File writes used to ask in that state.
+- **The refuse list reads the command, not files (accepted).** A script written first and run after (`bash push.sh`, `make deploy`) runs what is inside. The list is a courtesy; hidden credentials are what stop a push.
+- **Read before overwrite (low, from 2026-11-03).** The file tools refuse to replace a file the model hasn't read; bash doesn't check. Checkpoints still undo it.
 
 ### Failure guards miss failures that aren't in a row (added 2026-11-05, medium priority, to implement; the `no_progress` pause built 2026-11-09)
 

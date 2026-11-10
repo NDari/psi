@@ -31,7 +31,7 @@ pub const COMPACTIONS_PAUSE: u32 = 12;
 pub enum GuardAction {
     /// Add this line to the call's result.
     Nudge { guard: &'static str, text: String },
-    /// Stop and ask the user whether to go on (headless runs stop).
+    /// Stop and ask whether to go on (headless runs stop).
     Pause { guard: &'static str, reason: String },
 }
 

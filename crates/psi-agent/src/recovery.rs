@@ -32,9 +32,10 @@ pub fn points(branch: &[&Entry]) -> Vec<Point> {
         .collect()
 }
 
-/// /undo: restores the files to the last prompt submit whose files differ
-/// from now, so repeating it steps further back. The restore is itself
-/// checkpointed, so it can be undone. `None` when there's nothing to undo.
+/// /undo: restores the files and the project's branch tips to the last
+/// prompt submit where either differs from now, so repeating it steps
+/// further back. The restore is itself checkpointed, so it can be undone.
+/// `None` when there's nothing to undo.
 pub fn undo(session: &mut SessionFile, cp: &Checkpoints) -> Result<Option<Restore>, String> {
     let now = cp.capture("before undo").map_err(|e| e.to_string())?.commit;
     let submits: Vec<Point> = points(&session.branch())
@@ -45,7 +46,8 @@ pub fn undo(session: &mut SessionFile, cp: &Checkpoints) -> Result<Option<Restor
         let differs = !cp
             .changes(&p.commit, &now)
             .map_err(|e| e.to_string())?
-            .is_empty();
+            .is_empty()
+            || cp.refs_differ(&p.commit, &now);
         if differs {
             let r = restore(session, cp, &p.commit, "undo")?;
             return Ok(Some(r));

@@ -1,19 +1,18 @@
-//! Turns the settings into the session's safety (psi-plan.md §8): the
-//! mode, the always-ask rules, checkpoints and the bash boundary.
+//! Turns the settings into the session's safety (design-going-forward.md,
+//! goal 1): the refuse list, checkpoints and the bash boundary.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use psi_agent::Safety;
 use psi_agent::approval::{Approver, Headless};
 use psi_safety::Sandbox;
-use psi_safety::always_ask::Rules;
 use psi_safety::checkpoint::Checkpoints;
 use psi_safety::git::{git_available, git_dirs_outside, project_root};
 use psi_safety::isolation::{Isolation, SandboxConfig, choose, default_cache_dirs};
-use psi_safety::policy::{Mode, Policy};
+use psi_safety::policy::Policy;
+use psi_safety::refuse::Rules;
 use serde_json::{Value, json};
 
 pub struct SetupPaths<'a> {
@@ -49,44 +48,21 @@ fn expand_home(p: &str, home: Option<&Path>) -> PathBuf {
     }
 }
 
-/// Headless runs: nothing prompts (D-18).
-pub fn setup(
-    settings: &Value,
-    allow: &[String],
-    mode_flag: bool,
-    paths: &SetupPaths,
-) -> Result<SafetySetup> {
-    setup_with(settings, allow, mode_flag, paths, Arc::new(Headless))
+/// Headless runs: a pause stops (D-18).
+pub fn setup(settings: &Value, paths: &SetupPaths) -> Result<SafetySetup> {
+    setup_with(settings, paths, Arc::new(Headless))
 }
 
 pub fn setup_with(
     settings: &Value,
-    allow: &[String],
-    mode_flag: bool,
     paths: &SetupPaths,
     approver: Arc<dyn Approver>,
 ) -> Result<SafetySetup> {
     let mut warnings = Vec::new();
-    let mode_s = settings["mode"].as_str().unwrap_or("auto");
-    let Some(mut mode) = Mode::parse(mode_s) else {
-        bail!("mode is \"auto\" or \"strict\", not \"{mode_s}\"");
-    };
     let rules = Rules::layered(
-        &strings(&settings["always_ask"]),
-        &strings(&settings["always_ask_remove"]),
+        &strings(&settings["refuse"]),
+        &strings(&settings["refuse_remove"]),
     )?;
-    let mut grants = HashSet::new();
-    for a in allow {
-        let ids: Vec<&str> = rules.ids().filter(|id| Rules::names(id, a)).collect();
-        if ids.is_empty() {
-            let all: Vec<&str> = rules.ids().collect();
-            bail!(
-                "--allow {a}: no always-ask entry by that name (entries: {})",
-                all.join(", ")
-            );
-        }
-        grants.extend(ids.into_iter().map(str::to_owned));
-    }
 
     let root = project_root(paths.cwd);
     let checkpoints = if !git_available() {
@@ -108,10 +84,6 @@ pub fn setup_with(
             }
         }
     };
-    if checkpoints.is_none() && mode == Mode::Auto && !mode_flag {
-        mode = Mode::Strict;
-        warnings.push("the mode is strict: every change asks (--mode auto overrides)".into());
-    }
 
     let network = settings["network"].as_str() != Some("off");
     let isolate = settings["isolation"].as_str() != Some("off");
@@ -122,19 +94,27 @@ pub fn setup_with(
             .collect(),
         None => paths.home.map(default_cache_dirs).unwrap_or_default(),
     };
+    // Credentials, and the runtime directory where the agents holding them
+    // listen: out of bash's reach inside the boundary.
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+    let hidden = paths
+        .home
+        .map(|h| psi_safety::secrets::hidden_paths(h, runtime.as_deref()))
+        .unwrap_or_default();
     let cfg = SandboxConfig {
         root: root.clone(),
         git_dirs: git_dirs_outside(&root),
         cache_dirs,
         tmpdir: paths.tmpdir.to_owned(),
         network,
+        hidden,
     };
     let isolation = choose(isolate, cfg, paths.home);
-    let mut policy = Policy::new(mode, rules, &root, paths.home, paths.tmpdir);
+    let mut policy = Policy::new(rules, &root, paths.home, paths.tmpdir);
     match &isolation {
         Isolation::Unavailable(why) => {
             warnings.push(format!(
-                "bash is not isolated ({why}); every bash call asks"
+                "bash can't be isolated ({why}), so bash calls are refused"
             ));
             policy.unisolated = Some(why.clone());
         }
@@ -151,7 +131,6 @@ pub fn setup_with(
         Isolation::Unavailable(_) => "unavailable",
     };
     let info = json!({
-        "mode": mode.as_str(),
         "isolation": isolation_name,
         "network": if network { "on" } else { "off" },
         "checkpoints": checkpoints.is_some(),
@@ -163,7 +142,6 @@ pub fn setup_with(
             policy,
             checkpoints,
             approver,
-            grants,
             info,
         },
         warnings,

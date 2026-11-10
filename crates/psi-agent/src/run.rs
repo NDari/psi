@@ -1,7 +1,7 @@
 //! One run: turns until the model answers without tool calls, a budget is
 //! reached, or the run is aborted.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -10,19 +10,17 @@ use futures_util::future::join_all;
 use psi_ai::{
     AiError, ChatRequest, Client, Delta, FinishReason, RawToolCall, Response, ToolSchema, fix_call,
 };
-use psi_safety::always_ask::Rules;
-use psi_safety::blocked::{blocked_message, dir_to_add};
+use psi_safety::blocked::blocked_message;
 use psi_safety::checkpoint::Checkpoints;
-use psi_safety::policy::{Decision, Mode, Policy};
+use psi_safety::policy::{Decision, Policy};
+use psi_safety::refuse::Rules;
 use psi_session::{Block, Entry, EntryBody, Role, SessionFile, StopReason, Usage};
 use psi_tools::{Tool, ToolCtx, ToolOutput};
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
-use crate::approval::{
-    Approval, ApprovalRequest, Approver, BlockedChoice, BlockedRequest, Headless,
-};
+use crate::approval::{Approver, Headless};
 use crate::call::decide;
 use crate::compact::CompactionSettings;
 use crate::events::AgentEvent;
@@ -130,26 +128,23 @@ pub struct RunOutcome {
     pub tool_calls: u32,
 }
 
-/// What asks and what can be undone (psi-plan.md §8).
+/// What is refused and what can be undone (design-going-forward.md, goal 1).
 pub struct Safety {
     pub policy: Policy,
     /// `None` when checkpoints are off (no git).
     pub checkpoints: Option<Arc<Checkpoints>>,
     pub approver: Arc<dyn Approver>,
-    /// Keys granted for the session: `--allow` entries, and `s` answers.
-    pub grants: HashSet<String>,
-    /// Mode, isolation and checkpoint state, recorded in `session_info`.
+    /// Isolation and checkpoint state, recorded in `session_info`.
     pub info: Value,
 }
 
 impl Safety {
-    /// Auto mode with the shipped list, no checkpoints, nobody to ask.
+    /// The shipped refuse list, no checkpoints, nobody at the keyboard.
     pub fn headless(root: &Path, home: Option<&Path>, tmpdir: &Path) -> Self {
         Self {
-            policy: Policy::new(Mode::Auto, Rules::shipped(), root, home, tmpdir),
+            policy: Policy::new(Rules::shipped(), root, home, tmpdir),
             checkpoints: None,
             approver: Arc::new(Headless),
-            grants: HashSet::new(),
             info: Value::Null,
         }
     }
@@ -164,8 +159,6 @@ pub struct Agent {
     queues: Queues,
     events: Option<UnboundedSender<AgentEvent>>,
     safety: Safety,
-    /// The last checkpoint capture failed: file writes ask (§7.2).
-    capture_failing: bool,
     /// A checkpoint in this turn found changed files.
     turn_changed: bool,
     /// The token that aborts the current run; a new one per run after an abort.
@@ -183,20 +176,11 @@ pub struct Agent {
     compact_failed_at: Option<u64>,
     /// `Compacting` was sent and its `Compacted` not yet.
     compacting: bool,
-    /// Called with each file in a `.psi` folder that a write or edit
-    /// changed (the user approved it: those writes always ask).
-    on_config_write: Option<ConfigWriteHook>,
-    /// The grants given at the start (`--allow`); `s` answers come on top
-    /// and last until the session changes.
-    base_grants: HashSet<String>,
 }
 
 /// A call after the shape-fix pipeline: the tool and its arguments, or the
 /// refusal sent back instead.
 type Planned = Result<(Tool, serde_json::Map<String, Value>), String>;
-
-/// See [`Agent::with_config_write`].
-pub type ConfigWriteHook = Arc<dyn Fn(&Path) + Send + Sync>;
 
 /// A call's identity for the guards: the tool and its arguments, without
 /// the free-text intent.
@@ -227,7 +211,6 @@ impl Agent {
             queues: Queues::default(),
             events: None,
             safety,
-            capture_failing: false,
             turn_changed: false,
             abort: Arc::new(Mutex::new(CancellationToken::new())),
             post_edit: None,
@@ -236,8 +219,6 @@ impl Agent {
             last_request: None,
             compact_failed_at: None,
             compacting: false,
-            on_config_write: None,
-            base_grants: HashSet::new(),
         }
         .with_abort_token()
     }
@@ -284,11 +265,6 @@ impl Agent {
     pub fn set_session(&mut self, session: SessionFile, checkpoints: Option<Arc<Checkpoints>>) {
         self.session = session;
         self.safety.checkpoints = checkpoints;
-        // "Allow for this session" means this session: /new, /resume and
-        // /fork drop the `s` answers (always-ask entries) and keep only
-        // what --allow granted at the start.
-        self.safety.grants = self.base_grants.clone();
-        self.capture_failing = false;
         if let Ok(mut f) = self.ctx.files.lock() {
             *f = psi_tools::FileTracker::default();
         }
@@ -339,14 +315,6 @@ impl Agent {
             })
     }
 
-    /// What to do when a write or edit changed a file in a `.psi` folder:
-    /// the CLI records it as trusted, so a change the user approved doesn't
-    /// ask again at the next start (§9.3).
-    pub fn with_config_write(mut self, hook: ConfigWriteHook) -> Self {
-        self.on_config_write = Some(hook);
-        self
-    }
-
     /// The project's check command, run after turns that edited files.
     pub fn with_post_edit_check(mut self, check: Option<PostEditCheck>) -> Self {
         self.post_edit = check;
@@ -354,7 +322,6 @@ impl Agent {
     }
 
     pub fn with_safety(mut self, safety: Safety) -> Self {
-        self.base_grants = safety.grants.clone();
         self.safety = safety;
         self
     }
@@ -933,16 +900,7 @@ impl Agent {
         for (_, p) in &planned {
             side_by_side.push(match p {
                 Ok((c, args)) if c.read_only() => {
-                    decide(
-                        &self.safety.policy,
-                        c,
-                        args,
-                        &self.ctx,
-                        None,
-                        self.capture_failing,
-                    )
-                    .await
-                        == Decision::Allow
+                    decide(&self.safety.policy, c, args, &self.ctx) == Decision::Allow
                 }
                 _ => false,
             });
@@ -969,7 +927,7 @@ impl Agent {
             if let (call, Ok((c, args))) = &planned[i]
                 && !side_by_side[i]
             {
-                outputs[i] = Some(self.run_one(&call.id, c, args, &resp.text).await?);
+                outputs[i] = Some(self.run_one(&call.id, c, args).await?);
                 i = j;
                 continue;
             }
@@ -1045,19 +1003,6 @@ impl Agent {
             })?;
         }
         self.post_edit_check(&planned, &mut outputs).await?;
-        if let Some(hook) = &self.on_config_write {
-            for ((_, p), o) in planned.iter().zip(&outputs) {
-                if let Ok((Tool::Write | Tool::Edit, args)) = p
-                    && !o.is_error
-                {
-                    let path = Path::new(args.get("path").and_then(Value::as_str).unwrap_or(""));
-                    if path.components().any(|c| c.as_os_str() == ".psi") {
-                        hook(&self.ctx.cwd.join(path));
-                    }
-                }
-            }
-        }
-
         for ((call, p), o) in planned.iter().zip(outputs) {
             let name = match p {
                 Ok((c, _)) => c.name().to_owned(),
@@ -1101,7 +1046,7 @@ impl Agent {
             return Ok(());
         };
         let started = Instant::now();
-        let out = psi_tools::bash::run(args, &self.ctx, false).await;
+        let out = psi_tools::bash::run(args, &self.ctx).await;
         self.record(EntryBody::Custom {
             custom_type: "post_edit_check".into(),
             data: json!({"tool_call_id": planned[i].0.id, "command": check.command,
@@ -1113,160 +1058,32 @@ impl Agent {
         Ok(())
     }
 
-    /// One call that may change something, or a read-only one the policy
-    /// asks about: the policy decides whether it runs, asks or is refused;
-    /// a blocked bash write offers the user a rerun (D-23); a checkpoint
-    /// follows.
+    /// One call that may change something, or a read the policy refuses:
+    /// the policy decides whether it runs; a bash write the boundary
+    /// blocked says so (D-23); a checkpoint follows.
     async fn run_one(
         &mut self,
         id: &str,
         callable: &Tool,
         args: &serde_json::Map<String, Value>,
-        preceding: &str,
     ) -> Result<ToolOutput, String> {
-        let decision = decide(
-            &self.safety.policy,
-            callable,
-            args,
-            &self.ctx,
-            self.safety.checkpoints.clone(),
-            self.capture_failing,
-        )
-        .await;
-        match decision {
-            Decision::Allow => {}
-            Decision::Refuse(msg) => {
-                self.policy(id, "refused", &msg)?;
-                return Ok(ToolOutput::err(msg));
-            }
-            Decision::Ask { reason, keys } => {
-                if keys.iter().all(|k| self.safety.grants.contains(k)) {
-                    self.policy(id, "granted", &reason)?;
-                } else {
-                    let req = ApprovalRequest {
-                        tool_call_id: id.into(),
-                        tool: callable.name().into(),
-                        args: Value::Object(args.clone()),
-                        intent: args
-                            .get("intent")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned),
-                        preceding_text: preceding.into(),
-                        reason: reason.clone(),
-                        keys: keys.clone(),
-                    };
-                    let answer = tokio::select! {
-                        a = self.safety.approver.approve(req) => a,
-                        () = self.ctx.cancel.cancelled() => {
-                            // Esc while the card was up: stopped, not denied,
-                            // so the model isn't told the user said no.
-                            self.policy(id, "aborted", &reason)?;
-                            return Ok(ToolOutput::err(
-                                "Not run: the user stopped the run before answering whether to run it.",
-                            ));
-                        }
-                    };
-                    match answer {
-                        Approval::Once => self.policy(id, "approved", &reason)?,
-                        Approval::Session => {
-                            self.safety.grants.extend(keys);
-                            self.policy(id, "approved_session", &reason)?;
-                        }
-                        Approval::Deny | Approval::DenyWith(_) => {
-                            self.policy(id, "denied", &reason)?;
-                            return Ok(ToolOutput::err(self.denial(&reason, &keys, answer)));
-                        }
-                    }
-                }
-            }
+        if let Decision::Refuse(msg) = decide(&self.safety.policy, callable, args, &self.ctx) {
+            self.policy(id, "refused", &msg)?;
+            return Ok(ToolOutput::err(msg));
         }
-
         let mut out = callable.run(args, &self.ctx).await;
         if matches!(callable, Tool::Bash)
             && out.is_error
             && let Some(sb) = self.ctx.sandbox.clone()
             && let Some(path) = sb.blocked(&out.text)
         {
-            let dir = dir_to_add(&path);
-            let req = BlockedRequest {
-                tool_call_id: id.into(),
-                command: args
-                    .get("command")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .into(),
-                path: path.clone(),
-                dir: dir.clone(),
-            };
-            let choice = tokio::select! {
-                c = self.safety.approver.blocked(req) => c,
-                () = self.ctx.cancel.cancelled() => BlockedChoice::No,
-            };
-            let shown = path.display().to_string();
-            match choice {
-                BlockedChoice::RerunOutside => {
-                    self.policy(id, "rerun_outside", &shown)?;
-                    let again = psi_tools::bash::run(args.clone(), &self.ctx, true).await;
-                    out = ToolOutput {
-                        text: format!(
-                            "[the user approved running it outside the sandbox]\n{}",
-                            again.text
-                        ),
-                        is_error: again.is_error,
-                    };
-                }
-                BlockedChoice::AddDir => match sb.add_dir(&dir, self.cfg.home.as_deref()) {
-                    Ok(()) => {
-                        self.policy(id, "dir_added", &dir.display().to_string())?;
-                        let again = callable.run(args, &self.ctx).await;
-                        out = ToolOutput {
-                            text: format!(
-                                "[the user made {} writable for this session; it ran again]\n{}",
-                                dir.display(),
-                                again.text
-                            ),
-                            is_error: again.is_error,
-                        };
-                    }
-                    Err(e) => {
-                        self.policy(id, "blocked", &e)?;
-                        out.text.push_str(&format!("\n{}", blocked_message(&path)));
-                    }
-                },
-                BlockedChoice::No => {
-                    self.policy(id, "blocked", &shown)?;
-                    out.text.push_str(&format!("\n{}", blocked_message(&path)));
-                }
-            }
+            self.policy(id, "blocked", &path.display().to_string())?;
+            out.text.push_str(&format!("\n{}", blocked_message(&path)));
         }
         if self.capture("tool", Some(id)).await? {
             self.turn_changed = true;
         }
         Ok(out)
-    }
-
-    /// The model's message for a denied call. Without a user, it says what
-    /// to do next: a command bash can't parse can be fixed and run again;
-    /// anything else has to wait for the user. Telling the model not to work
-    /// around a denial is kept for the user's own no; the classifier catches
-    /// rewrites that still contain the command either way.
-    fn denial(&self, reason: &str, keys: &[String], answer: Approval) -> String {
-        if let Approval::DenyWith(m) = answer {
-            return format!("The user denied this call: {m}");
-        }
-        if self.safety.approver.interactive() {
-            format!(
-                "The user denied this call ({reason}). Don't retry it in another form; ask the user if you need it."
-            )
-        } else if keys.iter().all(|k| k.starts_with("unparseable:")) {
-            format!(
-                "Not run: {reason}. Fix the command, or write it another way, and run it again."
-            )
-        } else {
-            format!(
-                "Not run: {reason}, and this run can't ask the user. Do without it, or say in your answer what you needed."
-            )
-        }
     }
 
     fn policy(&mut self, id: &str, decision: &str, reason: &str) -> Result<(), String> {
@@ -1280,8 +1097,9 @@ impl Agent {
     }
 
     /// Snapshots the workspace (§7.2). A submit is always recorded, so
-    /// /undo can find it; a tool step only when files changed. Returns
-    /// whether they did. A failed capture makes file writes ask.
+    /// /undo can find it; a tool step only when files changed or the
+    /// project's branch tips moved. Returns whether files changed. A failed
+    /// capture is recorded and the run goes on.
     async fn capture(&mut self, trigger: &str, call: Option<&str>) -> Result<bool, String> {
         let Some(cp) = self.safety.checkpoints.clone() else {
             return Ok(false);
@@ -1296,13 +1114,12 @@ impl Agent {
             .and_then(|r| r.map_err(|e| e.to_string()));
         match res {
             Ok(c) => {
-                self.capture_failing = false;
                 tracing::debug!(
                     ms = c.elapsed.as_millis() as u64,
                     changed = c.changed,
                     "checkpoint"
                 );
-                if c.changed || trigger == "submit" {
+                if c.changed || c.refs_moved || trigger == "submit" {
                     self.record(EntryBody::Checkpoint {
                         commit: c.commit,
                         trigger: Some(trigger.into()),
@@ -1312,11 +1129,10 @@ impl Agent {
                 Ok(c.changed)
             }
             Err(e) => {
-                self.capture_failing = true;
                 self.record(EntryBody::GuardEvent {
                     guard: "checkpoint_failed".into(),
                     message: format!(
-                        "the checkpoint failed, so file writes ask until one works: {e}"
+                        "the checkpoint failed, so changes since the last one can't be undone: {e}"
                     ),
                     tool_call_id: call.map(str::to_owned),
                 })?;

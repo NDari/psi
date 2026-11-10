@@ -33,12 +33,8 @@ pub struct RunArgs {
     pub max_turns: Option<u32>,
     /// The merged settings layers.
     pub settings: Value,
-    /// `--allow` entries.
-    pub allow: Vec<String>,
-    /// The mode was given on the command line.
-    pub mode_flag: bool,
-    /// The project's own .psi may load (§9.3).
-    pub project_trusted: bool,
+    /// What loading the settings dropped, said once at startup.
+    pub notes: Vec<String>,
 }
 
 /// Exit codes: 0 done, 1 failed, 3 a budget stopped the run, 130 aborted.
@@ -147,8 +143,6 @@ pub async fn prepare(args: &RunArgs, approver: Arc<dyn Approver>) -> Result<Prep
         warnings,
     } = setup_with(
         &args.settings,
-        &args.allow,
-        args.mode_flag,
         &SetupPaths {
             cwd: &cwd,
             home: home.as_deref(),
@@ -158,6 +152,7 @@ pub async fn prepare(args: &RunArgs, approver: Arc<dyn Approver>) -> Result<Prep
         approver,
     )?;
     let mut warnings = warnings;
+    warnings.extend(args.notes.iter().cloned());
     warnings.extend(unreadable);
     let tools = core_tools();
     let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
@@ -194,23 +189,11 @@ pub async fn prepare(args: &RunArgs, approver: Arc<dyn Approver>) -> Result<Prep
         .map_err(anyhow::Error::msg)?;
     let compaction = psi_agent::CompactionSettings::from_setting(&args.settings["compaction"])
         .map_err(anyhow::Error::msg)?;
-    let mut agent = Agent::new(client, session, cfg, ctx)
+    let agent = Agent::new(client, session, cfg, ctx)
         .with_safety(safety)
         .with_post_edit_check(post_edit)
         .with_server(server)
         .with_compaction(compaction);
-    // A write to the project's .psi that the user approved keeps its trust
-    // (§9.3): the next start asks only about other changes.
-    if args.project_trusted
-        && let Some(h) = home.clone()
-    {
-        let project = cwd.clone();
-        agent = agent.with_config_write(Arc::new(move |file: &std::path::Path| {
-            if let Err(e) = psi_cli::trust::trust_file(&h, &project, file) {
-                tracing::warn!("could not record trust for {}: {e:#}", file.display());
-            }
-        }));
-    }
     Ok(Prepared {
         agent,
         profile,

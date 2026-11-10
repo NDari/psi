@@ -353,37 +353,23 @@ fn a_prompt_streams_an_answer_and_tool_calls_commit_once() {
     assert!(out.contains("session: "), "{out}");
 }
 
+/// Nothing asks: a command on the refuse list is not run, the screen says
+/// why, and the run goes on.
 #[test]
-fn the_approval_card_sits_under_the_input_and_keeps_the_draft() {
+fn a_refused_command_shows_why_and_no_card() {
     let (mut t, _s) = Tui::start(
         vec![
-            call(
-                "bash",
-                json!({"command": "cargo publish --dry-run", "intent": "check the package"}),
-            ),
+            call("bash", json!({"command": "cargo publish --dry-run"})),
             text("done"),
         ],
         |_| {},
     );
     t.wait_for("› ", SLOW);
     t.typ("publish it\r");
-    t.wait_for("approve bash", SLOW);
-    let screen = t.contents();
-    let input = screen.find("› ").unwrap();
-    let card = screen.find("approve bash").unwrap();
-    assert!(card > input, "the card is under the input box:\n{screen}");
-    assert!(screen.contains("intent: check the package"), "{screen}");
-    assert!(screen.contains("is on the always-ask list"), "{screen}");
-    // The answers are a list that starts on No. Typing doesn't answer it
-    // (a keystroke meant for the prompt stopped a sub-agent in the cog
-    // trial), nor does an Enter that comes as it appears.
-    assert!(screen.contains("▸ No"), "{screen}");
-    t.typ("yes\r");
-    std::thread::sleep(Duration::from_millis(600));
-    assert!(t.contents().contains("approve bash"), "{}", t.contents());
-    t.answer_safe();
-    t.wait_for("denied", SLOW);
+    t.wait_for("refused: Not run: psi refuses `cargo publish`", SLOW);
     t.wait_for("done", SLOW);
+    let all = t.all();
+    assert!(!all.contains("approve") && !all.contains("▸ No"), "{all}");
     t.quit();
 }
 
@@ -573,7 +559,7 @@ fn steering_left_after_esc_goes_back_in_the_box() {
 }
 
 #[test]
-fn undo_diff_show_stats_and_mode() {
+fn undo_diff_show_and_stats() {
     let (mut t, _s) = Tui::start(
         vec![
             call("write", json!({"path": "notes.md", "text": "one\ntwo\n"})),
@@ -602,8 +588,6 @@ fn undo_diff_show_stats_and_mode() {
     t.wait_for("undo: 0 files written, 1 deleted", SLOW);
     assert!(!t.project.join("notes.md").exists());
     assert!(t.project.join("README.md").exists());
-    t.typ("/mode strict\r");
-    t.wait_for("· strict ·", SLOW);
     // @ completion: the list shows matches; Tab puts one in the box.
     t.typ("look at @READ");
     t.wait_for("@README.md", SLOW);
@@ -942,78 +926,24 @@ fn print_run_with(tmp: &std::path::Path, prompt: &str, replies: Vec<Reply>) {
     );
 }
 
-fn strict_project(p: &std::path::Path) {
-    std::fs::create_dir_all(p.join(".psi")).unwrap();
-    std::fs::write(p.join(".psi/settings.jsonc"), r#"{"mode": "strict"}"#).unwrap();
-}
-
+/// A project's settings load without a trust step, and can't loosen
+/// safety: the keys only the user may set are dropped, with a note.
 #[test]
-fn trusting_a_project_loads_its_settings() {
-    let (mut t, _s) = Tui::start(vec![], strict_project);
-    t.wait_for("Load it? [y/N]", SLOW);
-    t.typ("y\r");
-    t.wait_for("· strict ·", SLOW);
-    let home = t.project.parent().unwrap().join("home");
-    assert!(home.join(".psi/trust.json").exists());
-    t.quit();
-}
-
-#[test]
-fn not_trusting_a_project_leaves_its_settings_out() {
-    let (mut t, _s) = Tui::start(vec![], strict_project);
-    t.wait_for("Load it? [y/N]", SLOW);
-    t.typ("n\r");
-    // (Its "not loading" line goes out before the screen starts.)
-    t.wait_for("· auto ·", SLOW);
+fn a_projects_settings_load_without_a_trust_prompt() {
+    let (t, _s) = Tui::start(vec![], |p| {
+        std::fs::create_dir_all(p.join(".psi")).unwrap();
+        std::fs::write(p.join(".psi/settings.jsonc"), r#"{"network": "off"}"#).unwrap();
+    });
+    t.wait_for("› ", SLOW);
+    let all = t.all();
+    assert!(!all.contains("Load it?"), "{all}");
+    assert!(
+        all.contains("sets \"network\", which only ~/.psi/settings.jsonc may set; ignored"),
+        "{all}"
+    );
+    assert!(!t.contents().contains("net off"), "{}", t.contents());
     let home = t.project.parent().unwrap().join("home");
     assert!(!home.join(".psi/trust.json").exists());
-    t.quit();
-}
-
-#[test]
-fn the_approval_card_allows_once_for_the_session_or_denies_with_a_reason() {
-    let push = || call("bash", json!({"command": "git push --dry-run"}));
-    let (mut t, s) = Tui::start(
-        vec![
-            push(),
-            text("one"),
-            push(),
-            push(),
-            text("two"),
-            push(),
-            text("three"),
-        ],
-        |_| {},
-    );
-    t.wait_for("› ", SLOW);
-    // Yes, once: this call only.
-    t.typ("first\r");
-    t.wait_for("approve bash", SLOW);
-    t.answer(-2); // Yes, once
-    t.wait_for("allowed once", SLOW);
-    t.wait_for("one", SLOW);
-    // Yes, for this session; the next push runs without a card.
-    // (The card is drawn in place and goes when answered.)
-    t.typ("second\r");
-    t.wait_screen("approve bash", SLOW);
-    t.answer(-1); // Yes, for this session
-    t.wait_for("allowed for this session", SLOW);
-    t.wait_for("two", SLOW);
-    let all = t.all();
-    assert_eq!(all.matches("● bash  git push").count(), 3, "{all}");
-    assert_eq!(all.matches("  allowed ").count(), 2, "{all}");
-    // A new session (grants don't carry), then denied with a reason the
-    // model reads.
-    t.typ("/new\r");
-    t.wait_for("new session", SLOW);
-    t.typ("third\r");
-    t.wait_screen("approve bash", SLOW);
-    t.answer(1); // No, and tell the model why
-    t.typ("use the staging remote\r");
-    t.wait_for("denied: use the staging remote", SLOW);
-    t.wait_for("three", SLOW);
-    let last = s.chat_requests().last().unwrap()["messages"].to_string();
-    assert!(last.contains("use the staging remote"), "{last}");
     t.quit();
 }
 

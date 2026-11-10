@@ -18,4 +18,4 @@ pub use compact::{CompactionSettings, SummaryForm};
 pub use events::AgentEvent;
 pub use messages::build_messages;
 pub use post_edit::PostEditCheck;
-pub use run::{Agent, AgentConfig, Budgets, ConfigWriteHook, Queues, RunOutcome, Safety, Stop};
+pub use run::{Agent, AgentConfig, Budgets, Queues, RunOutcome, Safety, Stop};

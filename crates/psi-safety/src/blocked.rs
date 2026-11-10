@@ -1,5 +1,5 @@
 //! Spotting a write the boundary blocked (psi-plan.md §8.5, D-23), so the
-//! harness can offer the user a rerun instead of the model trying variants.
+//! harness can say so instead of the model trying variants.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -23,19 +23,7 @@ pub fn blocked_path_with(output: &str, writable: &[PathBuf], marker: &str) -> Op
         .find(|p| !writable.iter().any(|w| p.starts_with(w)))
 }
 
-/// The directory to offer adding for `path`: its nearest existing parent.
-pub fn dir_to_add(path: &Path) -> PathBuf {
-    let mut d = path.parent().unwrap_or(Path::new("/"));
-    while !d.is_dir() {
-        match d.parent() {
-            Some(p) => d = p,
-            None => break,
-        }
-    }
-    d.to_owned()
-}
-
-/// What the model is told when the user can't or won't rerun it.
+/// What the model is told.
 pub fn blocked_message(path: &Path) -> String {
     format!(
         "Blocked: writing {} is outside the workspace. Explain to the user what you needed instead of trying variants.",
@@ -230,7 +218,6 @@ mod tests {
         );
         let got = blocked_path(&line, std::slice::from_ref(&ws)).unwrap();
         assert_eq!(got, real.canonicalize().unwrap().join("f"));
-        assert_eq!(dir_to_add(&got), real.canonicalize().unwrap());
     }
 
     #[test]

@@ -37,9 +37,9 @@ How to work:
 ",
         tools_line(tools),
         if facts.checkpoints {
-            "- Your changes inside the workspace are checkpointed and can be undone, so act confidently there. Some actions (like git push or publishing) always need the user's approval.\n"
+            "- Your changes inside the workspace are checkpointed and can be undone, so act confidently there. Some actions (like git push, publishing or writing outside the workspace) are refused: leave them to the user and say so in your answer.\n"
         } else {
-            "- Some actions (like git push or publishing) always need the user's approval.\n"
+            "- Some actions (like git push, publishing or writing outside the workspace) are refused: leave them to the user and say so in your answer.\n"
         },
     );
     for (path, text) in context {

@@ -251,7 +251,6 @@ pub fn run(args: RunArgs) -> Result<ExitCode> {
         model: profile.id.clone(),
         n_ctx,
         offline: offline.then(|| profile.base_url.clone()),
-        mode: info["mode"].as_str().unwrap_or("auto").into(),
         network: info["network"].as_str().unwrap_or("on").into(),
         unisolated: info["isolation"] == "unavailable",
         ..Status::default()

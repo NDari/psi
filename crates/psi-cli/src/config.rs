@@ -2,7 +2,11 @@
 //!
 //! Layers, lowest first: built-in, user, project, command-line flags. A later
 //! layer overrides scalars and arrays, and merges objects key by key. Rule
-//! lists (`always_ask`, `always_ask_remove`) append instead (§8.3).
+//! lists (`refuse`, `refuse_remove`) append instead.
+//!
+//! A project's file loads without a trust step, because it can't loosen
+//! safety: the keys in [`USER_ONLY`] are dropped from it
+//! (design-going-forward.md).
 
 use std::path::{Path, PathBuf};
 
@@ -25,7 +29,6 @@ impl SettingsPaths {
     pub fn discover(home: Option<&Path>, project: &Path) -> Self {
         Self {
             user: home.map(|h| h.join(".psi").join("settings.jsonc")),
-            // The caller drops this layer until the project is trusted (§9.3).
             project: Some(project.join(".psi").join("settings.jsonc")),
         }
     }
@@ -63,7 +66,12 @@ pub fn parse_jsonc(text: &str, origin: &str) -> Result<Value> {
 }
 
 /// Top-level lists that every layer appends to.
-const APPEND_KEYS: &[&str] = &["always_ask", "always_ask_remove"];
+const APPEND_KEYS: &[&str] = &["refuse", "refuse_remove"];
+
+/// Keys only the user's own file and the command line may set: the
+/// boundary, the network, what bash may write outside the workspace, and
+/// dropping a refuse entry.
+pub const USER_ONLY: &[&str] = &["isolation", "network", "cache_dirs", "refuse_remove"];
 
 /// Merges `over` into `base`: objects merge by key, rule lists append,
 /// everything else replaces.
@@ -101,17 +109,35 @@ fn merge_value(base: &mut Value, over: Value) {
     }
 }
 
-/// Loads all layers and returns the merged settings object.
-pub fn load(paths: &SettingsPaths, flags: Value) -> Result<Value> {
+/// Loads all layers. Returns the merged settings object, and a note for
+/// each key the project's file set that only the user may set.
+pub fn load(paths: &SettingsPaths, flags: Value) -> Result<(Value, Vec<String>)> {
     let mut settings = parse_jsonc(BUILTIN_SETTINGS, "built-in settings")?;
-    for path in [&paths.user, &paths.project].into_iter().flatten() {
-        if let Some(layer) = read_layer(path)? {
-            tracing::debug!(path = %path.display(), "loaded settings layer");
-            merge(&mut settings, layer);
+    let mut notes = Vec::new();
+    if let Some(path) = &paths.user
+        && let Some(layer) = read_layer(path)?
+    {
+        tracing::debug!(path = %path.display(), "loaded settings layer");
+        merge(&mut settings, layer);
+    }
+    if let Some(path) = &paths.project
+        && let Some(mut layer) = read_layer(path)?
+    {
+        tracing::debug!(path = %path.display(), "loaded settings layer");
+        if let Value::Object(o) = &mut layer {
+            for key in USER_ONLY {
+                if o.remove(*key).is_some() {
+                    notes.push(format!(
+                        "{} sets \"{key}\", which only ~/.psi/settings.jsonc may set; ignored",
+                        path.display()
+                    ));
+                }
+            }
         }
+        merge(&mut settings, layer);
     }
     merge(&mut settings, flags);
-    Ok(settings)
+    Ok((settings, notes))
 }
 
 fn read_layer(path: &Path) -> Result<Option<Value>> {
@@ -137,7 +163,7 @@ mod tests {
     #[test]
     fn builtin_parses_to_object() {
         let v = parse_jsonc(BUILTIN_SETTINGS, "built-in").unwrap();
-        assert_eq!(v["mode"], "auto");
+        assert_eq!(v["isolation"], "on");
         assert_eq!(v["network"], "on");
     }
 
@@ -175,14 +201,14 @@ mod tests {
 
     #[test]
     fn rule_lists_append_across_layers() {
-        let mut base = json!({"always_ask": ["a"], "always_ask_remove": [], "cache_dirs": ["x"]});
+        let mut base = json!({"refuse": ["a"], "refuse_remove": [], "cache_dirs": ["x"]});
         merge(
             &mut base,
-            json!({"always_ask": ["b"], "always_ask_remove": ["git clean"], "cache_dirs": ["y"]}),
+            json!({"refuse": ["b"], "refuse_remove": ["git push"], "cache_dirs": ["y"]}),
         );
         assert_eq!(
             base,
-            json!({"always_ask": ["a", "b"], "always_ask_remove": ["git clean"], "cache_dirs": ["y"]})
+            json!({"refuse": ["a", "b"], "refuse_remove": ["git push"], "cache_dirs": ["y"]})
         );
     }
 
@@ -198,20 +224,54 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let user = dir.path().join("user.jsonc");
         let project = dir.path().join("project.jsonc");
-        std::fs::write(&user, "{ \"mode\": \"strict\", \"u\": 1, }").unwrap();
-        std::fs::write(
-            &project,
-            "// only a comment\n{ \"network\": \"off\", \"u\": 2 }",
-        )
-        .unwrap();
+        std::fs::write(&user, "{ \"notify\": \"off\", \"u\": 1, \"p\": 1 }").unwrap();
+        std::fs::write(&project, "// only a comment\n{ \"p\": 2, \"u\": 2 }").unwrap();
         let paths = SettingsPaths {
             user: Some(user),
             project: Some(project),
         };
-        let v = load(&paths, json!({"mode": "auto"})).unwrap();
-        assert_eq!(v["mode"], "auto");
-        assert_eq!(v["network"], "off");
+        let (v, notes) = load(&paths, json!({"notify": "bell"})).unwrap();
+        assert_eq!(v["notify"], "bell");
+        assert_eq!(v["p"], 2);
         assert_eq!(v["u"], 2);
+        assert!(notes.is_empty());
+    }
+
+    /// No trust step: a project's file can add to safety, not take away.
+    #[test]
+    fn a_project_file_cannot_loosen_safety() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.jsonc");
+        let project = dir.path().join("project.jsonc");
+        std::fs::write(
+            &user,
+            r#"{ "network": "off", "refuse_remove": ["kubectl"] }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &project,
+            r#"{ "isolation": "off", "network": "on", "cache_dirs": ["/"],
+                 "refuse_remove": ["git push"], "refuse": ["make deploy"],
+                 "post_edit_check": "cargo check -q" }"#,
+        )
+        .unwrap();
+        let paths = SettingsPaths {
+            user: Some(user),
+            project: Some(project.clone()),
+        };
+        let (v, notes) = load(&paths, json!({})).unwrap();
+        assert_eq!(v["isolation"], "on");
+        assert_eq!(v["network"], "off");
+        assert_eq!(v["refuse_remove"], json!(["kubectl"]));
+        assert_ne!(v["cache_dirs"], json!(["/"]));
+        // What tightens or only configures still loads.
+        assert_eq!(v["refuse"], json!(["make deploy"]));
+        assert_eq!(v["post_edit_check"], "cargo check -q");
+        assert_eq!(notes.len(), 4, "{notes:?}");
+        assert!(
+            notes[0].starts_with(&format!("{} sets \"isolation\"", project.display())),
+            "{notes:?}"
+        );
     }
 
     #[test]
@@ -223,7 +283,7 @@ mod tests {
             user: Some(dir.path().join("missing.jsonc")),
             project: Some(empty),
         };
-        let v = load(&paths, json!({})).unwrap();
+        let (v, _) = load(&paths, json!({})).unwrap();
         assert_eq!(v, parse_jsonc(BUILTIN_SETTINGS, "b").unwrap());
     }
 

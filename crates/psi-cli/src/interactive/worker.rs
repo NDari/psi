@@ -7,7 +7,6 @@ use std::sync::Arc;
 use psi_agent::recovery;
 use psi_agent::{Agent, AgentEvent, RunOutcome};
 use psi_safety::checkpoint::Checkpoints;
-use psi_safety::policy::Mode;
 use psi_session::{Entry, EntryBody, Role, SessionFile, text_of};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
@@ -32,7 +31,6 @@ pub enum Cmd {
         files: bool,
     },
     Diff,
-    Mode(Mode),
     Label {
         id: String,
         label: Option<String>,
@@ -84,10 +82,6 @@ impl Worker {
                 Cmd::Undo => self.undo(),
                 Cmd::Goto { id, files } => self.goto(&id, files),
                 Cmd::Diff => self.diff(),
-                Cmd::Mode(m) => {
-                    self.agent.safety_mut().policy.mode = m;
-                    UiMsg::Info(format!("mode: {}", m.as_str()))
-                }
                 Cmd::Label { id, label } => {
                     match self.agent.session_mut().append(EntryBody::Label {
                         target_id: id,
@@ -149,13 +143,16 @@ impl Worker {
                 what: "undo".into(),
                 written: r.written.len(),
                 deleted: r.deleted.len(),
+                refs: r.refs.len(),
                 left_alone: r
                     .left_alone
                     .iter()
                     .map(|(p, why)| format!("{} ({why})", p.display()))
                     .collect(),
             },
-            Ok(None) => UiMsg::Info("nothing to undo: the files match every earlier prompt".into()),
+            Ok(None) => UiMsg::Info(
+                "nothing to undo: the files and branch tips match every earlier prompt".into(),
+            ),
             Err(e) => UiMsg::Error(format!("undo failed: {e}")),
         }
     }
@@ -176,6 +173,7 @@ impl Worker {
                 what: "rewind".into(),
                 written: r.written.len(),
                 deleted: r.deleted.len(),
+                refs: r.refs.len(),
                 left_alone: r
                     .left_alone
                     .iter()

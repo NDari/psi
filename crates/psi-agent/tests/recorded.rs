@@ -7,10 +7,13 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
-use psi_agent::{Agent, AgentConfig, Budgets, RunOutcome, Stop};
+use psi_agent::recovery::undo;
+use psi_agent::{Agent, AgentConfig, Budgets, RunOutcome, Safety, Stop};
 use psi_ai::Client;
 use psi_ai::replay::{ReplayServer, Reply, ScriptedReply};
+use psi_safety::checkpoint::Checkpoints;
 use psi_session::{EntryBody, SessionFile, text_of};
 use psi_tools::{ToolCtx, core_tools};
 use serde_json::Value;
@@ -50,8 +53,18 @@ impl Fx {
         Self { cwd, _tmp: tmp }
     }
 
-    /// A headless agent (asks are denied) on `replies`.
+    /// A headless agent on `replies`.
     async fn run(&self, replies: Vec<Reply>, prompt: &str) -> (RunOutcome, Agent, ReplayServer) {
+        self.run_with(replies, prompt, None).await
+    }
+
+    /// The same, with checkpoints when given.
+    async fn run_with(
+        &self,
+        replies: Vec<Reply>,
+        prompt: &str,
+        checkpoints: Option<Arc<Checkpoints>>,
+    ) -> (RunOutcome, Agent, ReplayServer) {
         let server = ReplayServer::start(replies).unwrap();
         let session = SessionFile::create(&self.cwd.join("../../sessions"), &self.cwd).unwrap();
         let cfg = AgentConfig {
@@ -65,7 +78,11 @@ impl Fx {
             home: None,
         };
         let ctx = ToolCtx::new(&self.cwd, &self.cwd.join("../../tmp"), 20_000);
-        let mut a = Agent::new(Client::new(&server.base_url()), session, cfg, ctx);
+        let tmp = self.cwd.join("../../tmp");
+        let mut safety = Safety::headless(&self.cwd, None, &tmp);
+        safety.checkpoints = checkpoints;
+        let mut a =
+            Agent::new(Client::new(&server.base_url()), session, cfg, ctx).with_safety(safety);
         let out = a.run(prompt).await;
         (out, a, server)
     }
@@ -116,41 +133,39 @@ fn results(a: &Agent) -> Vec<(String, bool)> {
         .collect()
 }
 
-/// Qwen 3.5 4B, `sh_changelog` (2026-11-01, steps 15-22): blocked from
-/// `git reset --hard`, it tried again in other forms (with another target,
-/// inside `||`, then `git clean`). Every form is still caught, nothing it
-/// tried to destroy is gone, and each denial says to do without it.
+/// Qwen 3.5 4B, `sh_changelog` (2026-11-01, steps 15-22): it threw the
+/// work tree away with `git reset --hard`, in several forms, then
+/// `git clean` and `git checkout`. These asked once and were denied; now
+/// they run, since nothing asks, and /undo puts the files and the branch
+/// tip back.
 #[tokio::test]
-async fn qwen_retrying_blocked_commands_in_other_forms() {
+async fn qwen_discarding_the_work_tree_can_be_undone() {
     let fx = Fx::new();
     fx.repo();
     let head = fx.git(&["rev-parse", "HEAD"]);
+    // The user's uncommitted work, which the commands throw away.
+    std::fs::write(fx.cwd.join("README.md"), "# demo\nmine\n").unwrap();
+    std::fs::write(fx.cwd.join("notes.txt"), "mine\n").unwrap();
     let mut replies = recorded("qwen-blocked-retries");
     replies.push(text("done"));
-    let (out, a, _s) = fx.run(replies, "Write changelog.sh").await;
+    let store = fx.cwd.join("../../checkpoints");
+    let cp = Arc::new(Checkpoints::open(&store, &fx.cwd, "s").unwrap());
+    let (out, mut a, _s) = fx
+        .run_with(replies, "Write changelog.sh", Some(cp.clone()))
+        .await;
     assert_eq!(out.stop, Stop::Done, "{:?}", out.stop);
     let r = results(&a);
-    let denied: Vec<&String> = r
-        .iter()
-        .filter(|(t, e)| *e && t.contains("is on the always-ask list"))
-        .map(|(t, _)| t)
-        .collect();
-    // Five since `git checkout` asks too (2026-11-04): its plain
-    // `git checkout` retry used to run.
-    assert_eq!(denied.len(), 5, "{r:#?}");
-    assert!(
-        denied
-            .iter()
-            .all(|t| t.contains("Do without it, or say in your answer what you needed."))
-    );
-    assert!(denied.iter().any(|t| t.contains("`git clean`")));
-    assert!(
-        denied
-            .iter()
-            .any(|t| t.starts_with("Not run: `git checkout` is"))
-    );
+    assert!(!r.iter().any(|(t, _)| t.starts_with("Not run")), "{r:#?}");
+    // The user's change is gone and HEAD is detached.
+    let read = |f: &str| std::fs::read_to_string(fx.cwd.join(f)).unwrap();
+    assert_eq!(read("README.md"), "# demo\n", "{r:#?}");
+    assert_eq!(fx.git(&["symbolic-ref", "-q", "HEAD"]), "");
+
+    undo(a.session_mut(), &cp).unwrap().unwrap();
     assert_eq!(fx.git(&["rev-parse", "HEAD"]), head);
-    assert!(fx.cwd.join("README.md").exists());
+    assert!(fx.git(&["symbolic-ref", "HEAD"]).starts_with("refs/heads/"));
+    assert_eq!(read("README.md"), "# demo\nmine\n");
+    assert_eq!(read("notes.txt"), "mine\n");
 }
 
 /// Qwen 3.5 4B, `feat_logstats_jsonl` (2026-10-31, step 1): a path that
@@ -206,8 +221,8 @@ async fn gemma_repeating_a_failing_command() {
 }
 
 /// Gemma 4 12B, `sh_changelog` (2026-10-31, steps 9 and 31): `rm -rf .git`
-/// to start the repository over, which checkpoints can't undo. Both now
-/// ask (headless: denied), and the history is still there.
+/// to start the repository over, which checkpoints can't undo. Both are
+/// refused, and the history is still there.
 #[tokio::test]
 async fn gemma_removing_the_repository() {
     let fx = Fx::new();
@@ -221,7 +236,7 @@ async fn gemma_removing_the_repository() {
     assert_eq!(r.len(), 2, "{r:#?}");
     assert!(
         r.iter()
-            .all(|(t, e)| *e && t.contains("`rm .git` is on the always-ask list")),
+            .all(|(t, e)| *e && t.starts_with("Not run: psi refuses `rm .git`")),
         "{r:#?}"
     );
     assert_eq!(fx.git(&["rev-parse", "HEAD"]), head);

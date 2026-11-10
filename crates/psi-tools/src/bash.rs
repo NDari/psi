@@ -58,9 +58,8 @@ enum End {
     Aborted,
 }
 
-/// Runs a bash call; `outside` skips the sandbox (a rerun the user
-/// approved, §8.5).
-pub async fn run(args: Map<String, Value>, ctx: &ToolCtx, outside: bool) -> ToolOutput {
+/// Runs a bash call, inside the boundary when there is one.
+pub async fn run(args: Map<String, Value>, ctx: &ToolCtx) -> ToolOutput {
     let command = str_arg(&args, "command").to_owned();
     if command.trim().is_empty() {
         return ToolOutput::err("command is empty.");
@@ -69,7 +68,7 @@ pub async fn run(args: Map<String, Value>, ctx: &ToolCtx, outside: bool) -> Tool
         .unwrap_or(DEFAULT_TIMEOUT_S)
         .clamp(1, MAX_TIMEOUT_S) as u64;
     let argv = vec!["bash".to_owned(), "-c".to_owned(), command.clone()];
-    let out = exec(&argv, None, timeout, ctx, outside).await;
+    let out = exec(&argv, None, timeout, ctx).await;
     quiet_answer(&command, out)
 }
 
@@ -108,13 +107,7 @@ fn quiet_answer(command: &str, out: ToolOutput) -> ToolOutput {
     }
 }
 
-async fn exec(
-    argv: &[String],
-    input: Option<Vec<u8>>,
-    timeout: u64,
-    ctx: &ToolCtx,
-    outside: bool,
-) -> ToolOutput {
+async fn exec(argv: &[String], input: Option<Vec<u8>>, timeout: u64, ctx: &ToolCtx) -> ToolOutput {
     if let Err(e) = std::fs::create_dir_all(&ctx.tmpdir) {
         return ToolOutput::err(format!(
             "Cannot create TMPDIR {}: {e}",
@@ -129,7 +122,7 @@ async fn exec(
         Ok(w) => w,
         Err(e) => return ToolOutput::err(format!("Cannot start bash: {e}")),
     };
-    let mut cmd = command(argv, &ctx.cwd, ctx, outside);
+    let mut cmd = command(argv, &ctx.cwd, ctx);
     let stdin = if input.is_some() {
         Stdio::piped()
     } else {
@@ -227,11 +220,10 @@ async fn exec(
     ToolOutput { text, is_error }
 }
 
-/// `argv` in `cwd`, inside the boundary unless `outside`, in its own
-/// process group, with bash's environment.
-fn command(argv: &[String], cwd: &Path, ctx: &ToolCtx, outside: bool) -> tokio::process::Command {
-    let sandbox = ctx.sandbox.as_ref().filter(|_| !outside);
-    let mut cmd = match sandbox {
+/// `argv` in `cwd`, inside the boundary, in its own process group, with
+/// bash's environment: no credentials (`psi_safety::secrets`).
+fn command(argv: &[String], cwd: &Path, ctx: &ToolCtx) -> tokio::process::Command {
+    let mut cmd = match &ctx.sandbox {
         Some(sb) => {
             let (program, args) = sb.command(cwd);
             let mut c = tokio::process::Command::new(program);
@@ -247,10 +239,11 @@ fn command(argv: &[String], cwd: &Path, ctx: &ToolCtx, outside: bool) -> tokio::
     cmd.current_dir(cwd).process_group(0).kill_on_drop(true);
     for (k, _) in std::env::vars_os() {
         let k = k.to_string_lossy();
-        if hidden_var(&k) {
+        if psi_safety::secrets::hidden_var(&k) {
             cmd.env_remove(k.as_ref());
         }
     }
+    cmd.envs(psi_safety::secrets::GIT_NO_HELPER);
     // So nothing waits for input, and error messages can be parsed (§8.4).
     cmd.env("TMPDIR", &ctx.tmpdir)
         .env("LC_MESSAGES", "C")
@@ -268,12 +261,6 @@ fn head_cut(text: &str) -> usize {
         i -= 1;
     }
     i
-}
-
-/// Variables bash never sees: provider keys, and startup files that would
-/// run before every command.
-fn hidden_var(name: &str) -> bool {
-    name.ends_with("_API_KEY") || name == "BASH_ENV" || name == "ENV"
 }
 
 fn collect(mut r: std::io::PipeReader, buf: &Mutex<Buf>) {
@@ -338,7 +325,7 @@ mod tests {
         if let Some(t) = timeout {
             a["timeout"] = json!(t);
         }
-        run(a.as_object().unwrap().clone(), &c, false).await
+        run(a.as_object().unwrap().clone(), &c).await
     }
 
     #[tokio::test]
@@ -364,7 +351,7 @@ mod tests {
             let mut args = Map::new();
             args.insert("command".into(), Value::String(cmd.into()));
             let ctx = ToolCtx::new(d.path(), &d.path().join("tmp"), 10_000);
-            async move { super::run(args, &ctx, false).await }
+            async move { super::run(args, &ctx).await }
         };
         let nothing = ToolOutput::ok("(no output)\n[exit code 1: grep says no line matched]");
         assert_eq!(run("grep zzz a.txt").await, nothing);
@@ -395,7 +382,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let c = ToolCtx::new(d.path(), &d.path().join("t"), 10_000);
         let a = json!({"command": "pwd; echo $TMPDIR; echo ${TERM}"});
-        let out = run(a.as_object().unwrap().clone(), &c, false).await;
+        let out = run(a.as_object().unwrap().clone(), &c).await;
         // pwd prints the resolved path: /var is /private/var on macOS.
         let want = format!(
             "{}\n{}\ndumb",
@@ -439,7 +426,6 @@ mod tests {
         let out = run(
             json!({"command": "sleep 30"}).as_object().unwrap().clone(),
             &c,
-            false,
         )
         .await;
         assert!(out.text.ends_with("[aborted]"), "{}", out.text);
@@ -466,6 +452,7 @@ mod tests {
             cache_dirs: vec![],
             tmpdir: d.path().join("t"),
             network: true,
+            hidden: vec![],
         };
         let psi_safety::Isolation::On(sb) = psi_safety::isolation::choose(true, cfg, None) else {
             panic!("bubblewrap must work for the local check");
@@ -473,7 +460,7 @@ mod tests {
         c.sandbox = Some(sb);
         let run1 = |cmd: &str, t: i64| {
             let a = json!({"command": cmd, "timeout": t});
-            run(a.as_object().unwrap().clone(), &c, false)
+            run(a.as_object().unwrap().clone(), &c)
         };
         let out = run1("echo hi > f; cat f; echo $TMPDIR", 10).await;
         assert_eq!(out.text, format!("hi\n{}", d.path().join("t").display()));
@@ -488,20 +475,28 @@ mod tests {
             out.is_error && out.text.contains("Read-only file system"),
             "{out:?}"
         );
-        // A rerun the user approved runs without the sandbox: the host's
-        // /tmp, not a private one.
-        let marker = format!("/tmp/psi-test-{}", std::process::id());
-        let a = json!({"command": format!("touch {marker}")});
-        let out = run(a.as_object().unwrap().clone(), &c, true).await;
-        assert!(!out.is_error, "{out:?}");
-        assert!(std::path::Path::new(&marker).exists());
-        let _ = std::fs::remove_file(&marker);
     }
 
-    #[test]
-    fn keys_and_startup_files_are_hidden() {
-        assert!(hidden_var("OPENAI_API_KEY"));
-        assert!(hidden_var("BASH_ENV"));
-        assert!(!hidden_var("PATH"));
+    /// bash gets no key, token or agent socket, and git asks no
+    /// credential helper.
+    #[tokio::test]
+    async fn credentials_stay_out_of_the_environment() {
+        let d = tempfile::tempdir().unwrap();
+        let c = ToolCtx::new(d.path(), &d.path().join("t"), 10_000);
+        let cmd = command(&["true".into()], d.path(), &c);
+        let envs: Vec<_> = cmd.as_std().get_envs().collect();
+        let set = |k: &str| {
+            envs.iter()
+                .find(|(n, _)| *n == k)
+                .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+        };
+        assert_eq!(
+            set("GIT_CONFIG_KEY_0").as_deref(),
+            Some("credential.helper")
+        );
+        assert_eq!(set("GIT_CONFIG_VALUE_0").as_deref(), Some(""));
+        let a = json!({"command": "git config --get-all credential.helper; echo \"[$?]\""});
+        let out = run(a.as_object().unwrap().clone(), &c).await;
+        assert_eq!(out.text, "\n[0]", "an empty helper: the list is cleared");
     }
 }

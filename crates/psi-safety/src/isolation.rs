@@ -1,12 +1,12 @@
 //! The isolation boundary (psi-plan.md §8.4, D-07, D-08, D-30, D-44):
-//! minimal bubblewrap on Linux, a Seatbelt profile on macOS. It is good
-//! enough to stop a mistaken command from writing outside the workspace,
-//! and little more.
+//! minimal bubblewrap on Linux, a Seatbelt profile on macOS. It stops a
+//! command from writing outside the workspace and from reading credentials
+//! ([`crate::secrets`]), and little more.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 /// What bash runs inside.
 #[derive(Debug, Clone)]
@@ -14,9 +14,9 @@ pub enum Isolation {
     /// Every bash call runs inside the sandbox.
     On(Arc<Sandbox>),
     /// The user turned isolation off: something outside Psi (an eval
-    /// container) is the boundary. Bash runs directly and nothing extra asks.
+    /// container) is the boundary. Bash runs directly.
     Off,
-    /// No backend works; bash runs directly and every call asks (§8.1).
+    /// No backend works; bash is refused.
     Unavailable(String),
 }
 
@@ -24,14 +24,6 @@ impl Isolation {
     pub fn sandbox(&self) -> Option<&Arc<Sandbox>> {
         match self {
             Isolation::On(s) => Some(s),
-            _ => None,
-        }
-    }
-
-    /// The status line's word for it, when it needs one.
-    pub fn status(&self) -> Option<&'static str> {
-        match self {
-            Isolation::Unavailable(_) => Some("UNISOLATED"),
             _ => None,
         }
     }
@@ -82,14 +74,15 @@ pub struct SandboxConfig {
     /// The session's TMPDIR, bound last so nothing covers it.
     pub tmpdir: PathBuf,
     pub network: bool,
+    /// Credential files and directories ([`crate::secrets`]): empty or
+    /// unreadable inside.
+    pub hidden: Vec<PathBuf>,
 }
 
 #[derive(Debug)]
 pub struct Sandbox {
     backend: Backend,
     cfg: SandboxConfig,
-    /// Directories the user added for this session (§8.5).
-    added: RwLock<Vec<PathBuf>>,
 }
 
 /// Why a directory can't be a write root.
@@ -140,11 +133,7 @@ impl Sandbox {
             }
             !refused
         });
-        Ok(Self {
-            backend,
-            cfg,
-            added: RwLock::new(Vec::new()),
-        })
+        Ok(Self { backend, cfg })
     }
 
     pub fn config(&self) -> &SandboxConfig {
@@ -176,30 +165,11 @@ impl Sandbox {
         }
     }
 
-    /// Makes `dir` writable for the rest of the session.
-    pub fn add_dir(&self, dir: &Path, home: Option<&Path>) -> Result<(), String> {
-        if let Some(why) = refused_write_root(dir, home) {
-            return Err(format!(
-                "{} is {why}; it can't be made writable",
-                dir.display()
-            ));
-        }
-        if let Ok(mut a) = self.added.write()
-            && !a.iter().any(|d| d == dir)
-        {
-            a.push(dir.to_owned());
-        }
-        Ok(())
-    }
-
     /// Every directory a command inside may write.
     pub fn writable(&self) -> Vec<PathBuf> {
         let mut v = vec![self.cfg.root.clone()];
         v.extend(self.cfg.git_dirs.iter().cloned());
         v.extend(self.cfg.cache_dirs.iter().cloned());
-        if let Ok(a) = self.added.read() {
-            v.extend(a.iter().cloned());
-        }
         v.push(self.cfg.tmpdir.clone());
         match self.backend {
             Backend::Bwrap => v.push("/tmp".into()),
@@ -210,9 +180,10 @@ impl Sandbox {
     }
 
     /// The Seatbelt profile (§8.4): everything allowed, then each write
-    /// outside the writable directories denied. `require-not` makes it
-    /// independent of rule order. Paths are resolved, since Seatbelt
-    /// matches real paths (/tmp is /private/tmp).
+    /// outside the writable directories denied (`require-not` makes that
+    /// independent of rule order), then the hidden paths denied for reads
+    /// and writes. Paths are resolved, since Seatbelt matches real paths
+    /// (/tmp is /private/tmp).
     pub fn profile(&self) -> String {
         let dirs: Vec<String> = self
             .writable()
@@ -223,6 +194,18 @@ impl Sandbox {
             "(version 1)\n(allow default)\n(deny file-write* (require-not (require-any\n  {})))\n",
             dirs.join("\n  ")
         );
+        if !self.cfg.hidden.is_empty() {
+            let hidden: Vec<String> = self
+                .cfg
+                .hidden
+                .iter()
+                .map(|d| format!("(subpath {})", sbpl(&crate::blocked::resolve_path(d))))
+                .collect();
+            p.push_str(&format!(
+                "(deny file-read* file-write*\n  {})\n",
+                hidden.join("\n  ")
+            ));
+        }
         if !self.cfg.network {
             p.push_str("(deny network*)\n");
         }
@@ -251,9 +234,15 @@ impl Sandbox {
         for d in &self.cfg.cache_dirs {
             push("--bind-try", &[d, d]);
         }
-        if let Ok(added) = self.added.read() {
-            for d in added.iter() {
-                push("--bind-try", &[d, d]);
+        // After the writable directories, so none of them uncovers one:
+        // an empty directory over a directory, /dev/null over a file. A
+        // path that doesn't exist needs no cover (the mount would fail).
+        for h in &self.cfg.hidden {
+            let h = crate::blocked::resolve_path(h);
+            if h.is_dir() {
+                push("--tmpfs", &[&h]);
+            } else if h.exists() {
+                push("--ro-bind", &[Path::new("/dev/null"), &h]);
             }
         }
         // Last, so nothing covers it.
@@ -369,6 +358,7 @@ mod tests {
             cache_dirs: vec![root.join("missing-cache")],
             tmpdir: tmp.to_owned(),
             network,
+            hidden: vec![],
         }
     }
 
@@ -399,6 +389,7 @@ mod tests {
             cache_dirs: vec![],
             tmpdir: "/x".into(),
             network: true,
+            hidden: vec![],
         };
         assert!(Sandbox::new(Backend::Bwrap, c, Some(home)).is_err());
         let c = SandboxConfig {
@@ -407,10 +398,10 @@ mod tests {
             cache_dirs: vec![home.to_owned(), home.join(".cache")],
             tmpdir: "/x".into(),
             network: true,
+            hidden: vec![],
         };
         let sb = Sandbox::new(Backend::Bwrap, c, Some(home)).unwrap();
         assert_eq!(sb.config().cache_dirs, [home.join(".cache")]);
-        assert!(sb.add_dir(home, Some(home)).is_err());
     }
 
     #[test]
@@ -445,13 +436,9 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let root = d.path().join("root");
         std::fs::create_dir_all(&root).unwrap();
-        let sb = Sandbox::new(
-            Backend::Seatbelt,
-            cfg(&root, &d.path().join("t"), false),
-            None,
-        )
-        .unwrap();
-        sb.add_dir(Path::new("/opt/we \"x\""), None).unwrap();
+        let mut c = cfg(&root, &d.path().join("t"), false);
+        c.hidden = vec!["/opt/we \"x\"".into()];
+        let sb = Sandbox::new(Backend::Seatbelt, c, None).unwrap();
         let p = sb.profile();
         assert!(p.starts_with("(version 1)\n(allow default)\n(deny file-write* (require-not"));
         let real = root.canonicalize().unwrap();
@@ -459,7 +446,10 @@ mod tests {
             p.contains(&format!("(subpath \"{}\")", real.display())),
             "{p}"
         );
-        assert!(p.contains(r#"(subpath "/opt/we \"x\"")"#), "{p}");
+        assert!(
+            p.contains("(deny file-read* file-write*\n  (subpath \"/opt/we \\\"x\\\"\"))\n"),
+            "{p}"
+        );
         for dir in ["/private/tmp", "/private/var/folders", "/dev"] {
             assert!(p.contains(&format!("(subpath \"{dir}\")")), "{p}");
         }
@@ -495,10 +485,34 @@ mod tests {
         let outside = d.path().join("outside");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
-        let sb = match choose(true, cfg(&root, &tmp, true), None) {
+        // Credentials: a directory, a file, and one that doesn't exist.
+        let keys = d.path().join("keys");
+        let token = d.path().join("token");
+        std::fs::create_dir_all(&keys).unwrap();
+        std::fs::write(keys.join("id"), "secret-key").unwrap();
+        std::fs::write(&token, "secret-token").unwrap();
+        let mut c = cfg(&root, &tmp, true);
+        c.hidden = vec![keys.clone(), token.clone(), d.path().join("absent")];
+        let sb = match choose(true, c, None) {
             Isolation::On(s) => s,
             other => panic!("bubblewrap must work for the local check: {other:?}"),
         };
+        let (_, out) = sh(
+            &sb,
+            &root,
+            &format!(
+                "(ls -A {k}; cat {k}/id; cat {t}) 2>&1; echo end",
+                k = keys.display(),
+                t = token.display()
+            ),
+        );
+        assert!(!out.contains("secret"), "{out}");
+        // The directory is empty; the file is /dev/null, unreadable.
+        assert!(
+            out.contains("No such file") && out.contains("Permission denied"),
+            "{out}"
+        );
+        assert!(out.ends_with("end\n"), "{out}");
         let (ok, out) = sh(&sb, &root, &format!("echo x > {}/f", outside.display()));
         assert!(!ok, "{out}");
         assert!(out.contains("Read-only file system"), "{out}");
@@ -517,10 +531,6 @@ mod tests {
         assert_eq!(out.trim(), "z");
         assert_eq!(std::fs::read_to_string(tmp.join("private")).unwrap(), "z\n");
         assert!(!Path::new("/tmp/private").exists());
-        // A directory added for the session becomes writable.
-        sb.add_dir(&outside, None).unwrap();
-        let (ok, out) = sh(&sb, &root, &format!("echo x > {}/f", outside.display()));
-        assert!(ok, "{out}");
     }
 
     #[cfg(target_os = "linux")]
@@ -564,10 +574,17 @@ mod tests {
         let outside = d.path().join("outside");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
-        let sb = match choose(true, cfg(&root, &tmp, true), None) {
+        let keys = d.path().join("keys");
+        std::fs::create_dir_all(&keys).unwrap();
+        std::fs::write(keys.join("id"), "secret-key").unwrap();
+        let mut c = cfg(&root, &tmp, true);
+        c.hidden = vec![keys.clone(), d.path().join("absent")];
+        let sb = match choose(true, c, None) {
             Isolation::On(s) => s,
             other => panic!("Seatbelt must work on macOS: {other:?}"),
         };
+        let (ok, out) = sh(&sb, &root, &format!("cat {}/id", keys.display()));
+        assert!(!ok && !out.contains("secret"), "{out}");
         assert_eq!(sb.backend(), Backend::Seatbelt);
         let target = outside.join("f");
         let (ok, out) = sh(&sb, &root, &format!("echo x > {}", target.display()));
@@ -591,9 +608,6 @@ mod tests {
         // Shared, unlike bwrap's: the host sees it.
         assert!(Path::new(&marker).exists());
         let _ = std::fs::remove_file(&marker);
-        sb.add_dir(&outside, None).unwrap();
-        let (ok, out) = sh(&sb, &root, &format!("echo x > {}", target.display()));
-        assert!(ok, "{out}");
     }
 
     #[cfg(target_os = "macos")]
@@ -630,6 +644,5 @@ mod tests {
             matches!(&i, Isolation::Unavailable(e) if e.contains("home directory")),
             "{i:?}"
         );
-        assert_eq!(i.status(), Some("UNISOLATED"));
     }
 }
