@@ -1,55 +1,12 @@
-//! Keeping the context in the window (psi-plan.md §7.4). Past the trigger,
-//! the entries before a verbatim tail are summarized, and the
-//! summary joins a chain of earlier ones (D-40); the two oldest are merged
-//! when the chain grows too long.
+//! Keeping the context in the window (design-going-forward.md: a summary is
+//! the safety net, not the engine). Past the trigger, the entries before a
+//! verbatim tail are summarized. There is one summary at a time: a new one
+//! is written with the earlier one in view and takes its place. A run gets
+//! a small number of them (`Budgets::max_summaries`) and then stops.
 
 use psi_ai::ChatMessage;
 use psi_session::{Block, Entry, EntryBody, Role, text_of};
 use serde_json::Value;
-
-/// The `compaction` setting: `{"tail": tokens | "auto", "summary":
-/// "structured" | "free"}`. Tail and summary exist to
-/// compare variants (H-07, H-11).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct CompactionSettings {
-    /// Tokens kept verbatim after a summary; `None` is the default size
-    /// (`tail_tokens`). 0 keeps only the last user message or step.
-    pub tail: Option<u64>,
-    pub summary: SummaryForm,
-}
-
-/// How a summary is laid out.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum SummaryForm {
-    /// Fixed headings (goal, constraints, decisions, state, problems, next).
-    #[default]
-    Structured,
-    /// The same content as prose, without headings.
-    Free,
-}
-
-impl CompactionSettings {
-    pub fn from_setting(v: &Value) -> Result<Self, String> {
-        const USAGE: &str =
-            "compaction is {\"tail\": tokens or \"auto\", \"summary\": \"structured\" or \"free\"}";
-        let o = match v {
-            Value::Null => return Ok(Self::default()),
-            Value::Object(o) => o,
-            _ => return Err(USAGE.into()),
-        };
-        let tail = match o.get("tail") {
-            None | Some(Value::Null) => None,
-            Some(Value::String(s)) if s == "auto" => None,
-            Some(t) => Some(t.as_u64().ok_or(USAGE)?),
-        };
-        let summary = match o.get("summary").map(|v| v.as_str()) {
-            None | Some(Some("structured")) => SummaryForm::Structured,
-            Some(Some("free")) => SummaryForm::Free,
-            _ => return Err(USAGE.into()),
-        };
-        Ok(Self { tail, summary })
-    }
-}
 
 /// D-20: estimate conservatively when the server's count is not known.
 pub(crate) const CHARS_PER_TOKEN: u64 = 3;
@@ -143,8 +100,9 @@ fn message_chars(m: &ChatMessage) -> usize {
     }
 }
 
-/// The summaries that stand in for the entries before the cut, oldest
-/// first, and where the part sent as is starts.
+/// The summary that stands in for the entries before the cut (several,
+/// oldest first, in sessions from when they formed a chain), and where the
+/// part sent as is starts.
 #[derive(Debug, Default)]
 pub(crate) struct Chain<'a> {
     /// (compaction entry id, summary)
@@ -266,20 +224,17 @@ pub const STATE_HEADER: &str = "[Recorded by the harness for the earlier convers
 /// The most files of each kind the harness state lists (the latest ones).
 const MAX_STATE_FILES: usize = 30;
 
-/// The tail's default size. It was pi's keepRecentTokens (20K, or 20% of
-/// a larger window) until 2026-11-04: at 64K that left about 20K of room
-/// per summary, and the cog trial summarized 5 times, the last two 2
-/// minutes apart.
-const DEFAULT_TAIL: u64 = 10_000;
+/// The tail's size. It was pi's keepRecentTokens (20K, or 20% of a larger
+/// window) until 2026-11-04: at 64K that left about 20K of room per
+/// summary, and the cog trial summarized 5 times, the last two 2 minutes
+/// apart.
+const TAIL: u64 = 10_000;
 
-/// Tokens kept as they are after a summary: [`DEFAULT_TAIL`], but at most
-/// half of what is left under the trigger after `overhead` (system prompt,
-/// tools, summaries), so a compaction leaves room to work before the next
-/// one. `set` (the `tail` setting) replaces the default size, under the
-/// same cap.
-pub(crate) fn tail_tokens(trigger: u64, overhead: u64, set: Option<u64>) -> u64 {
-    set.unwrap_or(DEFAULT_TAIL)
-        .min(trigger.saturating_sub(overhead) / 2)
+/// Tokens kept as they are after a summary: [`TAIL`], but at most half of
+/// what is left under the trigger after `overhead` (system prompt, tools,
+/// the summary), so a compaction leaves room to work before the next one.
+pub(crate) fn tail_tokens(trigger: u64, overhead: u64) -> u64 {
+    TAIL.min(trigger.saturating_sub(overhead) / 2)
 }
 
 /// How many tokens one step's results may take: what is left under the
@@ -333,43 +288,18 @@ pub(crate) fn plan_cut(branch: &[&Entry], from: usize, tail: u64) -> Option<usiz
         .then_some(cut)
 }
 
-/// How long a summary may be, in words: short enough that about three
-/// fit in the chain's budget (a tenth of the window) before the two oldest
-/// are merged. At about 7 characters a word and 3 characters a token,
-/// that is a seventieth of the window (234 words at 16K, 936 at 64K).
-/// Twice that at 16K merged after every compaction (2026-11-01 run).
+/// How long a summary may be, in words: a seventieth of the window at
+/// about 7 characters a word and 3 characters a token (234 words at 16K,
+/// 936 at 64K), about a thirtieth of the window in tokens.
 pub(crate) fn summary_words(n_ctx: u64) -> u64 {
     (n_ctx / 70).clamp(150, 1500)
 }
 
 /// The length and headings every summary is asked for. A summary is the
 /// model's own report, so it keeps what a call showed apart from what it
-/// only believes, keeps what it found out about the code (the headings
-/// otherwise hold only what the user gave), and, after an earlier summary
-/// (`corrections`), names what that one got wrong: earlier blocks never
-/// change (D-40, H-17).
-fn summary_spec(words: u64, form: SummaryForm, corrections: bool) -> String {
-    if form == SummaryForm::Free {
-        let corrections = if corrections {
-            "anything an earlier summary says that later work showed is wrong, with what is true; "
-        } else {
-            ""
-        };
-        return format!(
-            "under {words} words, as plain prose without headings: the goal; \
-             every name, number, path and requirement the user gave, exactly as given; \
-             what you learned about the code by reading or running it, each with the file or command it came from; \
-             what was decided; what works or fails as a call showed (name the call), \
-             and apart from it what is done or believed but not checked; \
-             {corrections}open problems; and the next step."
-        );
-    }
-    let corrections = if corrections {
-        "## Corrections\n\
-         (anything an earlier summary says that later work showed is wrong, with what is true; or none)\n"
-    } else {
-        ""
-    };
+/// only believes, and keeps what it found out about the code (the headings
+/// otherwise hold only what the user gave) (H-17).
+fn summary_spec(words: u64) -> String {
     format!(
         "under {words} words, with these headings:\n\n\
          ## Goal\n\
@@ -383,22 +313,21 @@ fn summary_spec(words: u64, form: SummaryForm, corrections: bool) -> String {
          (what works or fails, each with the call that showed it)\n\
          ### Not checked\n\
          (what is done or believed, but no call has shown it)\n\
-         {corrections}\
          ## Open problems\n\
          ## Next step"
     )
 }
 
 /// The instruction appended to the conversation to get a summary (D-38).
-pub(crate) fn summary_instruction(after_summary: bool, words: u64, form: SummaryForm) -> String {
+pub(crate) fn summary_instruction(after_summary: bool, words: u64) -> String {
     let what = if after_summary {
-        "everything after the last summary"
+        "the conversation so far, the earlier summary at its start included (your new summary takes its place: keep what still holds from it and fix what later work showed is wrong)"
     } else {
         "the conversation so far"
     };
     format!(
         "Stop the task for a moment: older messages are about to be removed from this conversation, and you will continue from your summary of them. Do not call tools now. Summarize {what} for yourself, {}",
-        summary_spec(words, form, after_summary)
+        summary_spec(words)
     )
 }
 
@@ -431,13 +360,12 @@ pub(crate) fn request_before(branch: &[&Entry], from: usize) -> Option<String> {
 
 /// The request text of a summary built from text (the fallback), with the
 /// user's request when the entries don't hold it (`request_before`), and
-/// the earlier summaries when they fit, so it can correct them too.
+/// the earlier summary, which the new one takes the place of.
 pub(crate) fn plain_summary_prompt(
     conversation: &str,
     request: Option<&str>,
     earlier: &[&str],
     words: u64,
-    form: SummaryForm,
 ) -> String {
     let request = request
         .map(|r| format!("The user's request this work is for:\n<request>\n{r}\n</request>\n\n"))
@@ -446,9 +374,14 @@ pub(crate) fn plain_summary_prompt(
         .iter()
         .map(|s| format!("<earlier_summary>\n{s}\n</earlier_summary>\n\n"))
         .collect();
+    let what = if earlier.is_empty() {
+        "this part of the agent's work"
+    } else {
+        "the agent's work so far, the earlier summary included (the new summary takes its place: keep what still holds from it and fix what the conversation shows is wrong)"
+    };
     format!(
-        "{request}{earlier_text}<conversation>\n{conversation}\n</conversation>\n\nSummarize this part of the agent's work for the agent, {}",
-        summary_spec(words, form, !earlier.is_empty())
+        "{request}{earlier_text}<conversation>\n{conversation}\n</conversation>\n\nSummarize {what} for the agent, {}",
+        summary_spec(words)
     )
 }
 
@@ -502,17 +435,6 @@ fn cut_chars(s: &str, max: usize) -> String {
     let head: String = s.chars().take(max / 2).collect();
     let tail: String = s.chars().skip(n - max / 2).collect();
     format!("{head}\n[... {} characters cut ...]\n{tail}", n - max)
-}
-
-/// The request text that merges the two oldest summaries into one.
-pub(crate) fn merge_prompt(older: &str, newer: &str, words: u64, form: SummaryForm) -> String {
-    let layout = match form {
-        SummaryForm::Structured => "with the same headings",
-        SummaryForm::Free => "as plain prose",
-    };
-    format!(
-        "Merge these two summaries of consecutive parts of a coding agent's work into one, under {words} words, {layout}. Keep every name, number, path and requirement exactly, and what was learned about the code; where they disagree, the second is newer. Apply the second's corrections: fix or drop what they say is wrong, and leave the corrections themselves out.\n\n<summary>\n{older}\n</summary>\n\n<summary>\n{newer}\n</summary>"
-    )
 }
 
 /// A summary is usable when the model answered in text, did not call a
@@ -686,26 +608,9 @@ mod tests {
     #[test]
     fn the_tail_is_10k_unless_the_window_is_small() {
         // 64K: 10K (half pi's 20K).
-        assert_eq!(tail_tokens(45_875, 3000, None), 10_000);
+        assert_eq!(tail_tokens(45_875, 3000), 10_000);
         // 16K: half of what is left under the trigger.
-        assert_eq!(tail_tokens(9831, 1831, None), 4000);
-        // The setting replaces the size, under the same cap.
-        assert_eq!(tail_tokens(45_875, 3000, Some(0)), 0);
-        assert_eq!(tail_tokens(9831, 1831, Some(2000)), 2000);
-        assert_eq!(tail_tokens(9831, 1831, Some(50_000)), 4000);
-    }
-
-    #[test]
-    fn the_compaction_setting_reads_tail_and_summary_form() {
-        use serde_json::json;
-        let read = CompactionSettings::from_setting;
-        assert_eq!(read(&Value::Null).unwrap(), CompactionSettings::default());
-        let s = read(&json!({"tail": 0, "summary": "free"})).unwrap();
-        assert_eq!((s.tail, s.summary), (Some(0), SummaryForm::Free));
-        assert_eq!(read(&json!({"tail": "auto"})).unwrap().tail, None);
-        assert!(read(&json!({"tail": "big"})).is_err());
-        assert!(read(&json!({"summary": "bullets"})).is_err());
-        assert!(read(&json!(5)).is_err());
+        assert_eq!(tail_tokens(9831, 1831), 4000);
     }
 
     #[test]
@@ -731,70 +636,34 @@ mod tests {
         // The part holds a user message already.
         assert_eq!(request_before(&refs, 0), None);
         assert_eq!(request_before(&refs, 2), None);
-        let p = plain_summary_prompt(
-            "Assistant: reading",
-            Some("Write docs/API.md"),
-            &[],
-            200,
-            SummaryForm::Structured,
-        );
+        let p = plain_summary_prompt("Assistant: reading", Some("Write docs/API.md"), &[], 200);
         assert!(p.starts_with("The user's request this work is for:\n<request>\nWrite docs/API.md\n</request>\n\n<conversation>"));
-        assert!(
-            plain_summary_prompt("x", None, &[], 200, SummaryForm::Structured)
-                .starts_with("<conversation>")
-        );
+        assert!(plain_summary_prompt("x", None, &[], 200).starts_with("<conversation>"));
     }
 
     #[test]
-    fn a_free_form_summary_asks_for_the_same_content_without_headings() {
-        let free = summary_instruction(true, 234, SummaryForm::Free);
-        let structured = summary_instruction(true, 234, SummaryForm::Structured);
-        assert!(structured.contains("## Goal"));
-        assert!(!free.contains("##"));
-        assert!(free.contains("exactly as given") && free.contains("under 234 words"));
-        for (s, words) in [
-            (&structured, "## Learned about the code"),
-            (&free, "you learned"),
-        ] {
-            assert!(s.contains(words), "{s}");
-            assert!(s.contains("an earlier summary says"), "{s}");
-            assert!(
-                s.contains("not checked") || s.contains("Not checked"),
-                "{s}"
-            );
-        }
-        assert!(merge_prompt("a", "b", 100, SummaryForm::Free).contains("as plain prose"));
-    }
-
-    #[test]
-    fn a_summary_keeps_checked_apart_and_corrects_earlier_ones() {
-        // H-17: the first summary has nothing to correct.
-        let first = summary_instruction(false, 936, SummaryForm::Structured);
-        assert!(!first.contains("## Corrections"), "{first}");
+    fn a_summary_keeps_checked_apart_and_a_later_one_takes_the_earlier_ones_place() {
+        // H-17.
+        let first = summary_instruction(false, 936);
+        assert!(first.contains("under 936 words"));
         assert!(
             first.contains("## Learned about the code\n(what you found by reading or running it")
         );
         assert!(first.contains(
             "## Current state\n### Checked\n(what works or fails, each with the call that showed it)\n### Not checked\n"
         ));
-        let later = summary_instruction(true, 936, SummaryForm::Structured);
-        assert!(later.contains("but no call has shown it)\n## Corrections\n"));
-        assert!(later.contains("## Corrections\n(anything an earlier summary says"));
-        assert!(later.contains("or none)\n## Open problems\n## Next step"));
-        // The fallback sees the earlier summaries, and corrects them too.
-        let p = plain_summary_prompt("x", None, &["S1", "S2"], 936, SummaryForm::Structured);
-        assert!(p.starts_with(
-            "<earlier_summary>\nS1\n</earlier_summary>\n\n<earlier_summary>\nS2\n</earlier_summary>\n\n<conversation>"
-        ));
-        assert!(p.contains("## Corrections"));
+        assert!(first.ends_with("## Open problems\n## Next step"));
+        assert!(!first.contains("earlier summary"));
+        let later = summary_instruction(true, 936);
         assert!(
-            !plain_summary_prompt("x", None, &[], 936, SummaryForm::Structured)
-                .contains("## Corrections")
+            later.contains("your new summary takes its place"),
+            "{later}"
         );
-        // A merge applies them and keeps what was learned.
-        let m = merge_prompt("a", "b", 936, SummaryForm::Structured);
-        assert!(m.contains("and what was learned about the code;"));
-        assert!(m.contains("Apply the second's corrections: fix or drop what they say is wrong"));
+        // The fallback sees the earlier summary and replaces it too.
+        let p = plain_summary_prompt("x", None, &["S1"], 936);
+        assert!(p.starts_with("<earlier_summary>\nS1\n</earlier_summary>\n\n<conversation>"));
+        assert!(p.contains("the new summary takes its place"));
+        assert!(!plain_summary_prompt("x", None, &[], 936).contains("takes its place"));
     }
 
     #[test]
@@ -891,17 +760,5 @@ mod tests {
             harness_state(&refs).unwrap(),
             "[Recorded by the harness for the earlier conversation]\nLast post-edit check: `cargo test` passed"
         );
-    }
-
-    #[test]
-    fn about_three_summaries_fit_the_chain_budget() {
-        for n_ctx in [16_384, 65_536, 131_072] {
-            let summary_tokens = summary_words(n_ctx) * 7 / CHARS_PER_TOKEN;
-            let budget = n_ctx / 10;
-            assert!(
-                (3 * summary_tokens..4 * summary_tokens).contains(&budget),
-                "{n_ctx}"
-            );
-        }
     }
 }

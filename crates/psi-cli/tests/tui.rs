@@ -273,25 +273,6 @@ impl Tui {
         self.send(s.as_bytes());
     }
 
-    /// Picks an answer on a card once it takes keys (it ignores them for
-    /// 400 ms after it appears): `moves` steps down (or up when negative)
-    /// from the safe answer it starts on, then Enter.
-    fn answer(&mut self, moves: i32) {
-        std::thread::sleep(Duration::from_millis(450));
-        let key: &[u8] = if moves < 0 { b"\x1b[A" } else { b"\x1b[B" };
-        for _ in 0..moves.unsigned_abs() {
-            self.send(key);
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        self.typ("\r");
-    }
-
-    /// Esc on a card once it takes keys: the safe answer.
-    fn answer_safe(&mut self) {
-        std::thread::sleep(Duration::from_millis(450));
-        self.esc();
-    }
-
     /// Esc on its own: a byte after it too soon reads as Alt+key.
     fn esc(&mut self) {
         self.send(b"\x1b");
@@ -1013,7 +994,7 @@ fn the_tui_has_no_request_limit_by_default() {
     // 2026-11-03: a long cog run stopped at 40 model requests, the print
     // runs' backstop; the TUI has none unless --max-turns asks for one.
     // Each call a different one: the same call over and over is a loop,
-    // which pauses (below).
+    // which stops the run (below).
     let mut replies: Vec<Reply> = (0..45)
         .map(|i| call("read", json!({"path": format!("a{i}.txt")})))
         .collect();
@@ -1027,35 +1008,28 @@ fn the_tui_has_no_request_limit_by_default() {
     t.typ("read it a lot\r");
     t.wait_for("all done", Duration::from_secs(30));
     assert!(!t.all().contains("stopped:"), "{}", t.all());
-    assert!(!t.all().contains("paused:"), "{}", t.all());
+    assert!(!t.all().contains("stopped:"), "{}", t.all());
     assert_eq!(s.chat_requests().len(), 46);
     t.quit();
 }
 
 #[test]
-fn a_loop_of_the_same_call_pauses_and_asks() {
+fn a_loop_of_the_same_call_stops_the_run() {
     // 2026-11-06: 623 calls of two commands over 106 minutes; the nudges
-    // went unheeded and nothing stopped the run (§8.6).
+    // went unheeded and nothing stopped the run (§8.6). Now the run goes
+    // on once with a note naming the calls, and stops the second time;
+    // no card asks.
     let same = || call("read", json!({"path": "a.txt"}));
-    let mut replies: Vec<Reply> = (0..13).map(|_| same()).collect();
-    // After "Continue": twelve more, and the pause again.
-    replies.extend((0..12).map(|_| same()));
+    let replies: Vec<Reply> = (0..25).map(|_| same()).collect();
     let (mut t, s) = Tui::start(replies, |p| std::fs::write(p.join("a.txt"), "x\n").unwrap());
     t.wait_for("› ", SLOW);
     t.typ("read it a lot\r");
-    let card = "paused: the last 12 turns repeated earlier calls and changed no file";
-    t.wait_screen(card, Duration::from_secs(30));
-    assert_eq!(s.chat_requests().len(), 13);
-    t.answer(-1); // Continue
-    // The card is drawn many times, so the requests say when it is back.
-    let start = Instant::now();
-    while s.chat_requests().len() < 25 && start.elapsed() < Duration::from_secs(30) {
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    t.wait_screen(card, SLOW);
+    t.wait_for(
+        "stopped: the last 12 turns repeated earlier calls and changed no file",
+        Duration::from_secs(60),
+    );
     let reqs = s.chat_requests();
     assert_eq!(reqs.len(), 25);
-    // "Continue" told the model which call it repeated, and the screen says so.
     let last = reqs[13]["messages"]
         .as_array()
         .unwrap()
@@ -1071,12 +1045,10 @@ fn a_loop_of_the_same_call_pauses_and_asks() {
     assert!(note.contains("\n- read: a.txt\n"), "{note}");
     assert!(
         t.all()
-            .contains("no_progress: going on with a note naming the repeated calls"),
+            .contains("no_progress: the run goes on once, with a note naming the repeated calls"),
         "{}",
         t.all()
     );
-    t.answer_safe(); // Stop the run
-    t.wait_for("stopped: the last 12 turns repeated earlier calls", SLOW);
     t.quit();
 }
 
@@ -1347,20 +1319,18 @@ fn the_spinner_names_the_call_the_model_is_writing() {
 fn compact_shows_a_spinner_and_esc_stops_it() {
     // A summary of about 100K tokens took 47 s in the cog trial with nothing
     // on screen moving, and Esc couldn't stop /compact (2026-11-04).
-    let long = |s: &str| format!("{s} {}", "words to summarize later. ".repeat(20));
+    // The first answer is longer than the part kept as it is (10K tokens),
+    // so there is something to summarize.
+    let long = |s: &str, n: usize| format!("{s} {}", "words to summarize later. ".repeat(n));
     let (mut t, _s) = Tui::start(
         vec![
-            text(&long("first answer")),
-            text(&long("second answer")),
+            text(&long("first answer", 1300)),
+            text(&long("second answer", 20)),
             Reply::Hang {
                 text: String::new(),
             },
         ],
-        |p| {
-            // A small tail, so two short exchanges leave something to summarize.
-            let home = p.join("../home/.psi/settings.jsonc");
-            std::fs::write(home, r#"{"compaction": {"tail": 50}}"#).unwrap();
-        },
+        |_| {},
     );
     t.wait_for("› ", SLOW);
     t.typ("one\r");
@@ -1375,5 +1345,53 @@ fn compact_shows_a_spinner_and_esc_stops_it() {
     // The run is over: a prompt can be typed again.
     t.typ("/stats\r");
     t.wait_for("model requests", SLOW);
+    t.quit();
+}
+
+/// /plan asks the model for a plan file in the form the harness runs;
+/// /run carries it out and shows the harness's report of each task.
+#[test]
+fn plan_and_run_write_and_carry_out_a_checklist() {
+    let (mut t, s) = Tui::start(
+        vec![
+            text("The plan is in plan.md."),
+            call("write", json!({"path": "a.txt", "text": "a\n"})),
+            text("Wrote a.txt."),
+        ],
+        |p| std::fs::write(p.join("plan.md"), "# Plan\n\n- [ ] Write a.txt\n").unwrap(),
+    );
+    t.wait_for("› ", SLOW);
+    t.typ("/plan\r");
+    t.wait_for("The plan is in plan.md.", SLOW);
+    let asked = s.chat_requests()[0]["messages"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        asked.starts_with("Write the plan we worked out to plan.md, and don't start the work."),
+        "{asked}"
+    );
+    assert!(
+        asked.contains("one line per step as `- [ ] ...`"),
+        "{asked}"
+    );
+    t.typ("/run\r");
+    t.wait_for("▌ task 1 of 1: Write a.txt", SLOW);
+    t.wait_for("  check: none is set", SLOW);
+    t.wait_for("  ticked in plan.md", SLOW);
+    t.wait_for("plan: all 1 items of plan.md are done", SLOW);
+    let all = t.all();
+    assert!(all.contains("  changed: 1 file (A a.txt)"), "{all}");
+    assert_eq!(
+        std::fs::read_to_string(t.project.join("plan.md")).unwrap(),
+        "# Plan\n\n- [x] Write a.txt\n"
+    );
+    // The task's context was fresh: the plan and the item, not the chat.
+    let task = s.chat_requests()[1]["messages"].to_string();
+    assert!(task.contains("[Task from psi]") && !task.contains("The plan is in plan.md."));
     t.quit();
 }

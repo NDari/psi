@@ -151,7 +151,15 @@ impl Sandbox {
             Backend::Bwrap => "read-only file system",
             Backend::Seatbelt => "operation not permitted",
         };
-        crate::blocked::blocked_path_with(output, &self.writable(), marker)
+        // Seatbelt denies a read of a hidden path with the same words:
+        // that is not a write to rerun elsewhere.
+        crate::blocked::blocked_path_with(output, &self.writable(), marker).filter(|p| {
+            !self
+                .cfg
+                .hidden
+                .iter()
+                .any(|h| p.starts_with(crate::blocked::resolve_path(h)))
+        })
     }
 
     /// The program and arguments to put before the command.
@@ -585,6 +593,7 @@ mod tests {
         };
         let (ok, out) = sh(&sb, &root, &format!("cat {}/id", keys.display()));
         assert!(!ok && !out.contains("secret"), "{out}");
+        assert_eq!(sb.blocked(&out), None, "{out}");
         assert_eq!(sb.backend(), Backend::Seatbelt);
         let target = outside.join("f");
         let (ok, out) = sh(&sb, &root, &format!("echo x > {}", target.display()));

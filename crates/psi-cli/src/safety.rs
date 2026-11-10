@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use psi_agent::Safety;
-use psi_agent::approval::{Approver, Headless};
 use psi_safety::Sandbox;
 use psi_safety::checkpoint::Checkpoints;
 use psi_safety::git::{git_available, git_dirs_outside, project_root};
@@ -48,16 +47,7 @@ fn expand_home(p: &str, home: Option<&Path>) -> PathBuf {
     }
 }
 
-/// Headless runs: a pause stops (D-18).
 pub fn setup(settings: &Value, paths: &SetupPaths) -> Result<SafetySetup> {
-    setup_with(settings, paths, Arc::new(Headless))
-}
-
-pub fn setup_with(
-    settings: &Value,
-    paths: &SetupPaths,
-    approver: Arc<dyn Approver>,
-) -> Result<SafetySetup> {
     let mut warnings = Vec::new();
     let rules = Rules::layered(
         &strings(&settings["refuse"]),
@@ -141,7 +131,6 @@ pub fn setup_with(
         safety: Safety {
             policy,
             checkpoints,
-            approver,
             info,
         },
         warnings,

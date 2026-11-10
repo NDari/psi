@@ -16,6 +16,8 @@ use super::ui::UiMsg;
 #[derive(Debug)]
 pub enum Cmd {
     Prompt(String),
+    /// Carry out the open items of a plan file (/run).
+    RunPlan(PathBuf),
     /// The model server is up (the TUI started without one).
     Connect {
         n_ctx: u64,
@@ -65,6 +67,13 @@ impl Worker {
                 Cmd::Prompt(p) => {
                     let out: RunOutcome = self.agent.run(&p).await;
                     UiMsg::RunDone(out)
+                }
+                Cmd::RunPlan(plan) => {
+                    let out = self.agent.run_plan(&plan).await;
+                    UiMsg::PlanDone {
+                        complete: out.complete,
+                        end: out.end,
+                    }
                 }
                 Cmd::Connect {
                     n_ctx,

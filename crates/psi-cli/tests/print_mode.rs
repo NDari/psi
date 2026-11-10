@@ -768,3 +768,62 @@ fn the_thinking_switch_reaches_the_server() {
         json!({"enable_thinking": false})
     );
 }
+
+/// `psi run`: the plan's open items one task each, the harness's report of
+/// each on stdout, the ticks in the file, and the exit code.
+#[test]
+fn psi_run_carries_out_a_plan_and_reports_each_task() {
+    let write = |path: &str| {
+        Reply::Chat(ScriptedReply::call(
+            "write",
+            json!({"path": path, "text": "x\n"}),
+        ))
+    };
+    let plan = "# Plan\n\n- [x] Done before\n- [ ] Write a.txt\n- [ ] Write b.txt\n";
+    let server = ReplayServer::start(vec![
+        write("a.txt"),
+        text("wrote a"),
+        // The second task never ends by itself: the limit stops it.
+        write("b.txt"),
+        write("b.txt"),
+        write("b.txt"),
+    ])
+    .unwrap();
+    let e = env_for(&server);
+    std::fs::write(e.project.join("plan.md"), plan).unwrap();
+    std::fs::write(
+        e.home.join(".psi/settings.jsonc"),
+        r#"{ "limits": { "requests": 2 }, "post_edit_check": "test -f a.txt" }"#,
+    )
+    .unwrap();
+    let out = psi(&e, &["run"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{stdout}\n{stderr}");
+    assert!(
+        stdout.starts_with(
+            "task 2 of 3: Write a.txt\n  ended: by itself\n  changed: 1 file (A a.txt)\n  check: `test -f a.txt` passed\n  2 requests, 1 tool calls, "
+        ),
+        "{stdout}"
+    );
+    assert!(stdout.contains("\n  ticked in plan.md\n\ntask 3 of 3: Write b.txt\n  ended: stopped: reached the limit of 2 model requests in one run\n"), "{stdout}");
+    assert!(
+        stdout.ends_with(
+            "  left open: the task did not end by itself\n\nplan: stopped at item 3 of 3: the task did not end by itself\n"
+        ),
+        "{stdout}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(e.project.join("plan.md")).unwrap(),
+        plan.replace("- [ ] Write a.txt", "- [x] Write a.txt")
+    );
+    // Nothing left to do is a success; a prompt with it is an error.
+    std::fs::write(e.project.join("done.md"), "- [x] all\n").unwrap();
+    let out = psi(&e, &["run", "done.md"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "plan: all 1 items of done.md are done\n"
+    );
+    assert!(!psi(&e, &["-p", "x", "run"]).status.success());
+}

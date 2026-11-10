@@ -19,7 +19,8 @@ pub enum NotifyKind {
 pub enum Activity {
     Idle,
     Working,
-    /// A pause card or a dialog waits for the user.
+    /// Something waits for the user. Nothing does since runs stopped
+    /// asking (design-going-forward.md); kept for the day something does.
     Waiting,
 }
 

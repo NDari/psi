@@ -17,6 +17,11 @@
   "refuse": [],
   // Shipped entries to drop, by name, e.g. ["kubectl"].
   "refuse_remove": [],
+  // Limits on one task of a plan and on one print run (-p): model requests,
+  // tool calls, and summaries of a full context. At a limit the run stops
+  // with the reason. The TUI's own chat has no request or call limit.
+  // Starting values, to be set from use.
+  "limits": { "requests": 40, "tool_calls": 200, "summaries": 2 },
   // The project's check, run once after each turn whose write or edit calls
   // changed files; the model sees a short result (D-36). A command, or
   // {"command": "cargo check -q", "timeout": 120}. null is off.

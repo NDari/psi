@@ -1,6 +1,6 @@
 //! What the interactive mode draws (psi-plan.md §11.2): tool calls
 //! committed once as a header, a summary, a few output lines and a short
-//! diff; the status line; cards; dropdowns.
+//! diff; the status line; dropdowns.
 
 use psi_tui::theme::{self, Token};
 use psi_tui::{Line, Style};
@@ -397,31 +397,6 @@ pub fn prompt_progress((total, cache, processed): (u64, u64, u64)) -> String {
         s.push_str(&format!(", {} from the cache", short_tokens(cache)));
     }
     s
-}
-
-/// A card's answers as a list, the selected one marked, and the keys
-/// (cards used to take single letters, which typing could answer).
-pub fn choices(items: &[String], sel: usize, safe: usize, border: Style) -> Vec<Line> {
-    let mut out = Vec::new();
-    for (i, it) in items.iter().enumerate() {
-        let mut l = Line::default();
-        l.push("│ ", border);
-        if i == sel {
-            l.push(format!("▸ {it}"), theme::style(Token::Accent).bold());
-        } else {
-            l.push(format!("  {it}"), dim());
-        }
-        out.push(l);
-    }
-    let esc = items
-        .get(safe)
-        .map(|s| s.to_lowercase())
-        .unwrap_or_default();
-    let mut keys = Line::default();
-    keys.push("└ ", border);
-    keys.push(format!("↑↓ choose · Enter confirm · Esc {esc}"), dim());
-    out.push(keys);
-    out
 }
 
 /// A list under the input box: completions, or a picker.

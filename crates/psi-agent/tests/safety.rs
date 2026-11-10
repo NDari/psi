@@ -1,15 +1,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)] // Test code.
 //! Safety through the real agent loop (design-going-forward.md, goal 1):
 //! what is refused, blocked writes, hidden credentials, checkpoints with
-//! /undo and /rewind, and guards. The model is the replay server; pauses
-//! are answered by a script.
+//! /undo and /rewind, and guards. The model is the replay server.
 
-use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use futures_util::future::BoxFuture;
-use psi_agent::approval::{Approver, Headless};
 use psi_agent::recovery::{rewind, session_changes, undo};
 use psi_agent::{Agent, AgentConfig, Budgets, RunOutcome, Safety, Stop};
 use psi_ai::Client;
@@ -22,30 +18,6 @@ use psi_session::{EntryBody, SessionFile};
 use psi_tools::{ToolCtx, core_tools};
 use serde_json::{Value, json};
 use tempfile::TempDir;
-
-/// Answers pauses in order; records what it was asked.
-#[derive(Default)]
-struct Scripted {
-    pauses: Mutex<Vec<String>>,
-    /// Answers to pauses, in order: true goes on (default: stop).
-    go_on: Mutex<VecDeque<bool>>,
-    /// The agent's label queue: a `/label` typed while the card is up.
-    label_queue: Mutex<Option<Arc<Mutex<VecDeque<String>>>>>,
-}
-
-impl Approver for Scripted {
-    fn pause(&self, reason: String) -> BoxFuture<'static, bool> {
-        if let Some(q) = self.label_queue.lock().unwrap().as_ref() {
-            q.lock().unwrap().push_back("typed while paused".into());
-        }
-        self.pauses.lock().unwrap().push(reason);
-        let go = self.go_on.lock().unwrap().pop_front().unwrap_or(false);
-        Box::pin(async move { go })
-    }
-    fn interactive(&self) -> bool {
-        true
-    }
-}
 
 struct Fx {
     _tmp: TempDir,
@@ -78,11 +50,10 @@ impl Fx {
         Arc::new(Checkpoints::open(&self.home.join(".psi/checkpoints"), &self.root, &id).unwrap())
     }
 
-    fn safety(&self, approver: Arc<dyn Approver>, cp: Option<Arc<Checkpoints>>) -> Safety {
+    fn safety(&self, cp: Option<Arc<Checkpoints>>) -> Safety {
         Safety {
             policy: Policy::new(Rules::shipped(), &self.root, Some(&self.home), &self.tmpdir),
             checkpoints: cp,
-            approver,
             info: Value::Null,
         }
     }
@@ -129,6 +100,8 @@ impl Fx {
             system_prompt: "sys".into(),
             tools: core_tools(),
             home: Some(self.home.clone()),
+            attended: false,
+            task_budgets: Budgets::default(),
         };
         Agent::new(Client::new(&server.base_url()), session, cfg, ctx).with_safety(safety)
     }
@@ -192,52 +165,53 @@ fn decisions(a: &Agent) -> Vec<String> {
         .collect()
 }
 
-/// Nothing asks: a listed command is refused the same way with a person
-/// at the keyboard and without one, and the model is told what to do.
+/// Nothing asks: a listed command is refused, and the model is told what
+/// to do.
 #[tokio::test]
 async fn listed_commands_are_refused_and_nothing_asks() {
     let fx = Fx::new();
     let push = json!({"command": "make build && git push origin main"});
-    for approver in [
-        Arc::new(Headless) as Arc<dyn Approver>,
-        Arc::new(Scripted::default()),
-    ] {
-        let server = ReplayServer::start(vec![call("bash", push.clone()), text("ok")]).unwrap();
-        let mut a = fx.agent(&server, fx.session(), fx.safety(approver, None), false);
-        assert_eq!(a.run("ship it").await.stop, Stop::Done);
-        assert_eq!(
-            results(&a)[0],
-            (
-                "Not run: psi refuses `git push`, and the command contains it. Leave it to the user: do the rest without it, and say in your answer that it still has to be done.".into(),
-                true
-            )
-        );
-        assert_eq!(decisions(&a), ["refused"]);
-    }
+    let server = ReplayServer::start(vec![call("bash", push), text("ok")]).unwrap();
+    let mut a = fx.agent(&server, fx.session(), fx.safety(None), false);
+    assert_eq!(a.run("ship it").await.stop, Stop::Done);
+    assert_eq!(
+        results(&a)[0],
+        (
+            "Not run: psi refuses `git push`, and the command contains it. Leave it to the user: do the rest without it, and say in your answer that it still has to be done.".into(),
+            true
+        )
+    );
+    assert_eq!(decisions(&a), ["refused"]);
 }
 
-/// A `/label` typed while the run waits (here on a pause card) marks the
-/// entry that was latest then and is written before the next entry; the
-/// model never sees it. In the cog trial (2026-11-05) the owner's label
-/// had to wait for the end of the turn.
+/// A `/label` typed while the run works marks the entry that was latest
+/// then and is written before the next entry; the model never sees it. In
+/// the cog trial (2026-11-05) the owner's label had to wait for the end of
+/// the turn.
 #[tokio::test]
 async fn a_label_typed_during_a_run_marks_the_latest_entry() {
     let fx = Fx::new();
     let server = ReplayServer::start(vec![
-        call("bash", json!({"command": "true"})),
-        call("bash", json!({"command": "true"})),
+        call("bash", json!({"command": "sleep 0.3"})),
         text("ok"),
     ])
     .unwrap();
-    let ap = Arc::new(Scripted::default());
-    ap.go_on.lock().unwrap().push_back(true);
-    let budgets = Budgets {
-        max_turns: 1,
-        ..Budgets::default()
-    };
-    let safety = fx.safety(ap.clone(), None);
-    let mut a = fx.agent_with(&server, fx.session(), safety, false, budgets);
-    *ap.label_queue.lock().unwrap() = Some(a.queues().labels.clone());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut a = fx
+        .agent(&server, fx.session(), fx.safety(None), false)
+        .with_events(tx);
+    // Typed when the call starts, while it runs.
+    let labels = a.queues().labels.clone();
+    tokio::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            if matches!(ev, psi_agent::AgentEvent::ToolStart { .. }) {
+                labels
+                    .lock()
+                    .unwrap()
+                    .push_back("typed while working".into());
+            }
+        }
+    });
     a.run("go").await;
     let entries = a.session().entries();
     let at = entries
@@ -247,13 +221,17 @@ async fn a_label_typed_during_a_run_marks_the_latest_entry() {
     let EntryBody::Label { target_id, label } = &entries[at].body else {
         unreachable!()
     };
-    assert_eq!(label.as_deref(), Some("typed while paused"));
-    // The latest entry when it was typed: the first call's result.
+    assert_eq!(label.as_deref(), Some("typed while working"));
+    // The latest entry when it was typed: the call, before its result.
     assert_eq!(target_id, &entries[at - 1].id);
-    assert!(matches!(entries[at - 1].body, EntryBody::ToolResult { .. }));
+    assert!(
+        !entries[..at]
+            .iter()
+            .any(|e| matches!(e.body, EntryBody::ToolResult { .. }))
+    );
     // Not part of what the model is sent.
     let last = server.chat_requests().last().cloned().unwrap();
-    assert!(!last.to_string().contains("typed while paused"));
+    assert!(!last.to_string().contains("typed while working"));
 }
 
 /// Qwen3.8 27B, `sh_precommit` (code eval 2026-11-05, step 18): a quoting
@@ -264,12 +242,7 @@ async fn a_command_that_does_not_parse_runs_and_bash_names_the_error() {
     let fx = Fx::new();
     let cmd = json!({"command": "t=$(printf '\\t')\necho '--- content of staged b.py:'\ngit cat-file -p :'we'\"$t\"dir/b.py'; echo \"<<<end\"\necho '--- diff output via git diff --cached for b.py:'\ngit diff --cached -- 'we'\"$t\"dir/b.py' | cat -A\necho '--- diff with -U0:'\ngit diff --cached -U0 -- 'we'\"$t\"dir/b.py' | cat -A"});
     let server = ReplayServer::start(vec![call("bash", cmd), text("ok")]).unwrap();
-    let mut a = fx.agent(
-        &server,
-        fx.session(),
-        fx.safety(Arc::new(Headless), None),
-        false,
-    );
+    let mut a = fx.agent(&server, fx.session(), fx.safety(None), false);
     a.run("test the hook").await;
     let r = results(&a);
     assert!(r[0].1, "{r:?}");
@@ -309,12 +282,7 @@ async fn file_tools_stay_inside_the_workspace() {
     .unwrap();
     let session = fx.session();
     let cp = fx.checkpoints(&session);
-    let mut a = fx.agent(
-        &server,
-        session,
-        fx.safety(Arc::new(Headless), Some(cp.clone())),
-        false,
-    );
+    let mut a = fx.agent(&server, session, fx.safety(Some(cp.clone())), false);
     a.run("go").await;
     let r = results(&a);
     let want = format!(
@@ -357,7 +325,7 @@ async fn credentials_cannot_be_read() {
         text("ok"),
     ])
     .unwrap();
-    let safety = fx.safety(Arc::new(Headless), None);
+    let safety = fx.safety(None);
     let mut a = fx.agent(&server, fx.session(), safety, true);
     a.run("go").await;
     let r = results(&a);
@@ -375,92 +343,36 @@ async fn credentials_cannot_be_read() {
     assert_eq!(decisions(&a), ["refused"]);
 }
 
+/// A run is bounded: at a limit it stops with the reason and never waits
+/// for an answer (design-going-forward.md).
 #[tokio::test]
-async fn going_on_at_the_tool_call_limit_runs_the_next_calls() {
+async fn a_limit_stops_the_run_with_the_reason() {
     let fx = Fx::new();
     let ls = || call("bash", json!({"command": "true"}));
-    let server = ReplayServer::start(vec![ls(), ls(), ls(), text("done")]).unwrap();
-    let approver = Arc::new(Scripted::default());
-    approver.go_on.lock().unwrap().push_back(true);
-    let budgets = Budgets {
-        max_tool_calls: 2,
-        ..Budgets::default()
-    };
-    let mut a = fx.agent_with(
-        &server,
-        fx.session(),
-        fx.safety(approver.clone(), None),
-        false,
-        budgets,
-    );
-    let out = a.run("go").await;
-    assert_eq!(out.stop, Stop::Done, "{:?}", out.stop);
-    assert_eq!(out.tool_calls, 3);
-    let pauses = approver.pauses.lock().unwrap().clone();
-    assert_eq!(pauses.len(), 1, "{pauses:?}");
-    assert!(pauses[0].contains("limit of 2 tool calls"), "{pauses:?}");
-    let refused = a.session().entries().iter().any(|e| {
-        matches!(&e.body, EntryBody::ToolResult { content, .. }
-            if psi_session::text_of(content).starts_with("Not run"))
-    });
-    assert!(!refused, "a call after going on was refused");
-}
-
-#[tokio::test]
-async fn a_budget_pauses_in_the_tui_and_going_on_gives_as_much_again() {
-    // §5: hitting a budget pauses and asks; headless runs stop (2026-11-03:
-    // a long cog run ended at 40 requests instead).
-    let fx = Fx::new();
-    let ls = || call("bash", json!({"command": "true"}));
-    let server = ReplayServer::start(vec![ls(), ls(), ls(), ls(), ls(), text("done")]).unwrap();
-    let approver = Arc::new(Scripted::default());
-    approver.go_on.lock().unwrap().push_back(true);
-    let budgets = Budgets {
-        max_turns: 2,
-        ..Budgets::default()
-    };
-    let mut a = fx.agent_with(
-        &server,
-        fx.session(),
-        fx.safety(approver.clone(), None),
-        false,
-        budgets,
-    );
-    let out = a.run("go").await;
-    // Paused at 2 (went on), then at 4 (stopped).
-    let pauses = approver.pauses.lock().unwrap().clone();
-    assert_eq!(pauses.len(), 2, "{pauses:?}");
-    assert!(
-        pauses[0].contains("limit of 2 model requests"),
-        "{pauses:?}"
-    );
-    assert!(
-        pauses[1].contains("limit of 4 model requests"),
-        "{pauses:?}"
-    );
-    assert!(matches!(out.stop, Stop::Budget(_)), "{:?}", out.stop);
-    assert_eq!(out.turns, 4);
-    // Each pause is in the session with the answer and the wait, so a
-    // review can take the user's time out of the run's.
-    let recorded: Vec<Value> = a
-        .session()
-        .entries()
-        .iter()
-        .filter_map(|e| match &e.body {
-            EntryBody::Custom { custom_type, data } if custom_type == "pause" => Some(data.clone()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(recorded.len(), 2, "{recorded:?}");
-    assert_eq!(recorded[0]["answer"], "go on");
-    assert_eq!(recorded[1]["answer"], "stop");
-    assert!(
-        recorded[0]["reason"]
-            .as_str()
-            .unwrap()
-            .contains("limit of 2")
-    );
-    assert!(recorded[0]["waited_ms"].is_u64());
+    for (budgets, want, turns) in [
+        (
+            Budgets {
+                max_turns: 2,
+                ..Budgets::default()
+            },
+            "reached the limit of 2 model requests in one run",
+            2,
+        ),
+        (
+            Budgets {
+                max_tool_calls: 3,
+                ..Budgets::default()
+            },
+            "reached the limit of 3 tool calls in one run",
+            3,
+        ),
+    ] {
+        let server = ReplayServer::start(vec![ls(), ls(), ls(), ls(), text("done")]).unwrap();
+        let mut a = fx.agent_with(&server, fx.session(), fx.safety(None), false, budgets);
+        let out = a.run("go").await;
+        assert_eq!(out.stop, Stop::Budget(want.into()));
+        assert_eq!(out.turns, turns);
+    }
 }
 
 #[tokio::test]
@@ -484,7 +396,7 @@ async fn a_symlink_and_dotdot_cannot_get_out_of_the_workspace() {
     ])
     .unwrap();
     let session = fx.session();
-    let mut a = fx.agent(&server, session, fx.safety(Arc::new(Headless), None), true);
+    let mut a = fx.agent(&server, session, fx.safety(None), true);
     a.run("go").await;
     let r = results(&a);
     assert!(!r[0].1, "{r:?}");
@@ -508,12 +420,7 @@ async fn a_failing_checkpoint_is_recorded_and_the_run_goes_on() {
     .unwrap();
     let session = fx.session();
     let cp = fx.checkpoints(&session);
-    let mut a = fx.agent(
-        &server,
-        session,
-        fx.safety(Arc::new(Headless), Some(cp.clone())),
-        false,
-    );
+    let mut a = fx.agent(&server, session, fx.safety(Some(cp.clone())), false);
     // The shadow repository disappears: the captures fail.
     std::fs::remove_dir_all(cp.git_dir()).unwrap();
     assert_eq!(a.run("go").await.stop, Stop::Done);
@@ -534,13 +441,9 @@ async fn a_blocked_write_says_so() {
     let outside = fx.root.parent().unwrap().join("outside");
     std::fs::create_dir_all(&outside).unwrap();
     let cmd = json!({"command": format!("echo hi > {}/f", outside.display())});
-    // The same with a person at the keyboard: nothing offers a rerun.
-    for approver in [
-        Arc::new(Headless) as Arc<dyn Approver>,
-        Arc::new(Scripted::default()),
-    ] {
+    {
         let server = ReplayServer::start(vec![call("bash", cmd.clone()), text("ok")]).unwrap();
-        let mut a = fx.agent(&server, fx.session(), fx.safety(approver, None), true);
+        let mut a = fx.agent(&server, fx.session(), fx.safety(None), true);
         a.run("go").await;
         let r = results(&a);
         let want = format!(
@@ -576,12 +479,7 @@ async fn undo_puts_back_the_branch_tips_after_a_rewrite() {
     .unwrap();
     let session = fx.session();
     let cp = fx.checkpoints(&session);
-    let mut a = fx.agent(
-        &server,
-        session,
-        fx.safety(Arc::new(Headless), Some(cp.clone())),
-        false,
-    );
+    let mut a = fx.agent(&server, session, fx.safety(Some(cp.clone())), false);
     assert_eq!(a.run("tidy up").await.stop, Stop::Done);
     let r = results(&a);
     assert!(!r[0].1, "{r:?}");
@@ -613,12 +511,7 @@ async fn undo_takes_back_a_commit_that_changed_no_file() {
     .unwrap();
     let session = fx.session();
     let cp = fx.checkpoints(&session);
-    let mut a = fx.agent(
-        &server,
-        session,
-        fx.safety(Arc::new(Headless), Some(cp.clone())),
-        false,
-    );
+    let mut a = fx.agent(&server, session, fx.safety(Some(cp.clone())), false);
     assert_eq!(a.run("commit it").await.stop, Stop::Done);
     assert_ne!(fx.git(&["rev-parse", "HEAD"]), first);
     let r = undo(a.session_mut(), &cp).unwrap().unwrap();
@@ -645,12 +538,7 @@ async fn undo_and_rewind_restore_edits_and_bash_changes() {
     .unwrap();
     let session = fx.session();
     let cp = fx.checkpoints(&session);
-    let mut a = fx.agent(
-        &server,
-        session,
-        fx.safety(Arc::new(Headless), Some(cp.clone())),
-        true,
-    );
+    let mut a = fx.agent(&server, session, fx.safety(Some(cp.clone())), true);
     assert_eq!(a.run("first").await.stop, Stop::Done);
     // The user's own edit between prompts is captured at the next submit.
     std::fs::write(fx.root.join("mine.txt"), "mine\n").unwrap();
@@ -738,85 +626,23 @@ fn two_commands_in_turn(n: usize) -> Vec<Reply> {
 const NO_PROGRESS_PAUSE: &str = "the last 12 turns repeated earlier calls and changed no file";
 
 #[tokio::test]
-async fn an_unheeded_no_progress_nudge_pauses_and_going_on_continues() {
-    let fx = Fx::new();
-    // Two new calls, twelve repeats (the pause), two more, then an answer.
-    let mut replies = two_commands_in_turn(16);
-    replies.push(text("done"));
-    let server = ReplayServer::start(replies).unwrap();
-    let ap = Arc::new(Scripted::default());
-    ap.go_on.lock().unwrap().push_back(true);
-    let mut a = fx.agent(&server, fx.session(), fx.safety(ap.clone(), None), false);
-    let out = a.run("look around").await;
-    assert_eq!(out.stop, Stop::Done, "{:?}", out.stop);
-    assert_eq!(out.tool_calls, 16);
-    assert_eq!(*ap.pauses.lock().unwrap(), [NO_PROGRESS_PAUSE]);
-    // Going on tells the model which calls it repeated: as things were,
-    // the next call repeated in 40 of 42 samples (experiments.md, 2026-11-09).
-    let reqs = server.chat_requests();
-    let last_message = |i: usize| {
-        reqs[i]["messages"]
-            .as_array()
-            .unwrap()
-            .last()
-            .unwrap()
-            .clone()
-    };
-    assert_eq!(last_message(13)["role"], "tool");
-    assert_eq!(
-        last_message(14),
-        json!({"role": "user", "content": "[Note from psi] You made the same calls again and again, the last 12 turns in a row, and no file changed. The calls:\n- bash: echo a\n- bash: echo b\nDon't make them again: use what you have, do something different, or answer."})
-    );
-    let notes = |v: &Value| v.to_string().matches("[Note from psi]").count();
-    assert_eq!((notes(&reqs[13]), notes(&reqs[16])), (0, 1));
-    // The nudge on the sixth repeat, the pause on the twelfth, no second
-    // nudge between them.
-    let r = results(&a);
-    let nudged: Vec<usize> = (0..r.len())
-        .filter(|&i| r[i].0.contains("repeated earlier calls"))
-        .collect();
-    assert_eq!(nudged, [7], "{r:?}");
-    assert_eq!(
-        guard_events(&a)
-            .iter()
-            .map(|(g, m)| (g.as_str(), m.starts_with("paused: ")))
-            .collect::<Vec<_>>(),
-        [
-            ("no_progress", false),
-            ("no_progress", true),
-            ("no_progress", false)
-        ]
-    );
-    assert_eq!(
-        guard_events(&a)[2].1,
-        "going on with a note naming the repeated calls"
-    );
-    let answers: Vec<Value> = a
-        .session()
-        .entries()
-        .iter()
-        .filter_map(|e| match &e.body {
-            EntryBody::Custom { custom_type, data } if custom_type == "pause" => {
-                Some(json!([data["reason"], data["answer"]]))
-            }
-            _ => None,
-        })
-        .collect();
-    assert_eq!(answers, [json!([NO_PROGRESS_PAUSE, "go on"])]);
-}
-
-#[tokio::test]
-async fn a_headless_run_goes_on_once_with_the_note_and_stops_the_second_time() {
+async fn a_run_goes_on_once_with_the_note_and_stops_the_second_time() {
     let fx = Fx::new();
     let server = ReplayServer::start(two_commands_in_turn(40)).unwrap();
-    let safety = fx.safety(Arc::new(Headless), None);
+    let safety = fx.safety(None);
     let mut a = fx.agent(&server, fx.session(), safety, false);
     let out = a.run("look around").await;
-    // Nobody to ask: the note at the first pause (14 calls), the stop at
-    // the second (12 more).
+    // The note at the first stop (14 calls), the stop itself at the
+    // second (12 more).
     assert_eq!(out.stop, Stop::Guard(NO_PROGRESS_PAUSE.into()));
     assert_eq!(out.tool_calls, 26);
     let reqs = server.chat_requests();
+    // The note tells the model which calls it repeated: as things were,
+    // the next call repeated in 40 of 42 samples (experiments.md, 2026-11-09).
+    assert_eq!(
+        reqs[14]["messages"].as_array().unwrap().last().unwrap(),
+        &json!({"role": "user", "content": "[Note from psi] You made the same calls again and again, the last 12 turns in a row, and no file changed. The calls:\n- bash: echo a\n- bash: echo b\nDon't make them again: use what you have, do something different, or answer."})
+    );
     let notes = |v: &Value| v.to_string().matches("[Note from psi]").count();
     assert_eq!(
         (notes(&reqs[13]), notes(&reqs[14]), notes(&reqs[25])),
@@ -826,17 +652,17 @@ async fn a_headless_run_goes_on_once_with_the_note_and_stops_the_second_time() {
     assert_eq!(
         events.iter().map(|(_, m)| m.as_str()).collect::<Vec<_>>()[1..],
         [
-            "paused: the last 12 turns repeated earlier calls and changed no file",
-            "this run can't ask, so it goes on once, with a note naming the repeated calls",
+            "stopped: the last 12 turns repeated earlier calls and changed no file",
+            "the run goes on once, with a note naming the repeated calls",
             // After the note the nudge comes again first.
             "The last 6 turns repeated earlier calls and changed no file. Try a different approach, or answer if you are done.",
-            "paused: the last 12 turns repeated earlier calls and changed no file",
+            "stopped: the last 12 turns repeated earlier calls and changed no file",
         ]
     );
 }
 
 #[tokio::test]
-async fn a_headless_run_that_leaves_the_loop_after_the_note_finishes() {
+async fn a_run_that_leaves_the_loop_after_the_note_finishes() {
     let fx = Fx::new();
     let mut replies = two_commands_in_turn(14);
     replies.push(call(
@@ -845,7 +671,7 @@ async fn a_headless_run_that_leaves_the_loop_after_the_note_finishes() {
     ));
     replies.push(text("done"));
     let server = ReplayServer::start(replies).unwrap();
-    let safety = fx.safety(Arc::new(Headless), None);
+    let safety = fx.safety(None);
     let mut a = fx.agent(&server, fx.session(), safety, false);
     let out = a.run("look around").await;
     assert_eq!(out.stop, Stop::Done, "{:?}", out.stop);
@@ -853,7 +679,7 @@ async fn a_headless_run_that_leaves_the_loop_after_the_note_finishes() {
 }
 
 #[tokio::test]
-async fn repeated_failures_nudge_then_pause() {
+async fn repeated_failures_nudge_then_stop() {
     let fx = Fx::new();
     let replies = (0..6)
         .map(|_| {
@@ -864,8 +690,7 @@ async fn repeated_failures_nudge_then_pause() {
         })
         .collect();
     let server = ReplayServer::start(replies).unwrap();
-    let ap = Arc::new(Scripted::default());
-    let mut a = fx.agent(&server, fx.session(), fx.safety(ap.clone(), None), false);
+    let mut a = fx.agent(&server, fx.session(), fx.safety(None), false);
     let out = a.run("test").await;
     assert_eq!(
         out.stop,
@@ -880,8 +705,4 @@ async fn repeated_failures_nudge_then_pause() {
         "{r:?}"
     );
     assert!(!r[1].0.contains("same way"));
-    assert_eq!(
-        *ap.pauses.lock().unwrap(),
-        ["the same call failed 5 times in a row"]
-    );
 }

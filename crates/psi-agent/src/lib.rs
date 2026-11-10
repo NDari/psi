@@ -2,20 +2,20 @@
 //! plus the tool calls it returns) until the model stops calling tools or a
 //! budget stops it.
 
-pub mod approval;
 mod call;
 mod compact;
 mod events;
 mod generating;
 pub mod guards;
 mod messages;
+pub mod plan;
 pub mod post_edit;
 pub mod prompt;
 pub mod recovery;
 mod run;
 
-pub use compact::{CompactionSettings, SummaryForm};
 pub use events::AgentEvent;
 pub use messages::build_messages;
+pub use plan::TaskReport;
 pub use post_edit::PostEditCheck;
-pub use run::{Agent, AgentConfig, Budgets, Queues, RunOutcome, Safety, Stop};
+pub use run::{Agent, AgentConfig, Budgets, PlanOutcome, Queues, RunOutcome, Safety, Stop};

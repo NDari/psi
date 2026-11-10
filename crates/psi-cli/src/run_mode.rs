@@ -6,13 +6,12 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use psi_agent::approval::{Approver, Headless};
 use psi_agent::prompt::{PromptFacts, project_context, system_prompt};
 use psi_agent::{Agent, AgentConfig, Budgets, Stop};
 use psi_ai::profile::{ContextWindow, ModelProfile};
 use psi_ai::{AiError, Client, WireLog};
 use psi_cli::config;
-use psi_cli::safety::{SafetySetup, SetupPaths, setup_with};
+use psi_cli::safety::{SafetySetup, SetupPaths, setup};
 use psi_session::SessionFile;
 use psi_tools::{ToolCtx, core_tools};
 use serde_json::Value;
@@ -26,6 +25,8 @@ const CHARS_PER_TOKEN: f64 = 3.0;
 
 pub struct RunArgs {
     pub prompt: String,
+    /// `psi run`: the plan file to carry out, in place of a prompt.
+    pub plan: Option<PathBuf>,
     pub json: bool,
     pub model: Option<String>,
     pub continue_last: bool,
@@ -83,10 +84,10 @@ pub struct Prepared {
 
 /// The model check, the session, safety and the agent, for print, JSON
 /// and interactive modes alike.
-pub async fn prepare(args: &RunArgs, approver: Arc<dyn Approver>) -> Result<Prepared> {
+pub async fn prepare(args: &RunArgs) -> Result<Prepared> {
     let home = std::env::home_dir();
     let cwd = std::env::current_dir().context("reading the working directory")?;
-    let mode = if args.prompt.is_empty() && !args.json {
+    let mode = if args.prompt.is_empty() && !args.json && args.plan.is_none() {
         "interactive"
     } else if args.json {
         "json"
@@ -141,7 +142,7 @@ pub async fn prepare(args: &RunArgs, approver: Arc<dyn Approver>) -> Result<Prep
         safety,
         sandbox,
         warnings,
-    } = setup_with(
+    } = setup(
         &args.settings,
         &SetupPaths {
             cwd: &cwd,
@@ -149,7 +150,6 @@ pub async fn prepare(args: &RunArgs, approver: Arc<dyn Approver>) -> Result<Prep
             tmpdir: &tmpdir,
             session: &stem,
         },
-        approver,
     )?;
     let mut warnings = warnings;
     warnings.extend(args.notes.iter().cloned());
@@ -162,11 +162,27 @@ pub async fn prepare(args: &RunArgs, approver: Arc<dyn Approver>) -> Result<Prep
     let system = system_prompt(&names, &cwd, &project_context(&cwd, home.as_deref()), facts);
     let mut ctx = ToolCtx::new(&cwd, &tmpdir, result_chars(n_ctx));
     ctx.sandbox = sandbox;
-    let mut budgets = Budgets::default();
+    // The `limits` setting: one task of a plan and one print run.
+    let limit = |key: &str, default: u32| {
+        args.settings["limits"][key]
+            .as_u64()
+            .map_or(default, |n| n.min(u64::from(u32::MAX)) as u32)
+    };
+    let defaults = Budgets::default();
+    let mut budgets = Budgets {
+        max_turns: limit("requests", defaults.max_turns),
+        max_tool_calls: limit("tool_calls", defaults.max_tool_calls),
+        max_summaries: limit("summaries", defaults.max_summaries),
+        ..defaults
+    };
+    if let Some(n) = args.max_turns {
+        budgets.max_turns = n;
+    }
+    let task_budgets = budgets.clone();
     match args.max_turns {
-        Some(n) => budgets.max_turns = n,
+        Some(_) => {}
         // The TUI has no cap on requests or tool calls unless one is asked
-        // for (pi parity): Esc stops a run and the guards still pause it.
+        // for: Esc stops a run and the guards still stop it.
         // Print runs keep the default as a backstop against a runaway loop.
         None if mode == "interactive" => {
             budgets.max_turns = u32::MAX;
@@ -180,20 +196,19 @@ pub async fn prepare(args: &RunArgs, approver: Arc<dyn Approver>) -> Result<Prep
         n_ctx,
         enable_thinking: profile.reasoning.enable_thinking,
         budgets,
+        task_budgets,
         system_prompt: system,
         tools,
         home: home.clone(),
+        attended: mode == "interactive",
     };
     let info = safety.info.clone();
     let post_edit = psi_agent::PostEditCheck::from_setting(&args.settings["post_edit_check"])
         .map_err(anyhow::Error::msg)?;
-    let compaction = psi_agent::CompactionSettings::from_setting(&args.settings["compaction"])
-        .map_err(anyhow::Error::msg)?;
     let agent = Agent::new(client, session, cfg, ctx)
         .with_safety(safety)
         .with_post_edit_check(post_edit)
-        .with_server(server)
-        .with_compaction(compaction);
+        .with_server(server);
     Ok(Prepared {
         agent,
         profile,
@@ -277,7 +292,7 @@ pub async fn run(args: RunArgs) -> Result<ExitCode> {
         tmpdir,
         warnings,
         ..
-    } = prepare(&args, Arc::new(Headless)).await?;
+    } = prepare(&args).await?;
     for w in &warnings {
         eprintln!("psi: {w}");
     }
@@ -317,6 +332,31 @@ pub async fn run(args: RunArgs) -> Result<ExitCode> {
             cancel.cancel();
         }
     });
+
+    if let Some(plan) = &args.plan {
+        let out = agent.run_plan(plan).await;
+        let session_path = agent.session().path().to_owned();
+        drop(agent);
+        if let Some(p) = printer {
+            let _ = p.await;
+        }
+        let _ = std::fs::remove_dir_all(&tmpdir);
+        if !args.json {
+            for r in &out.reports {
+                println!("{}\n", r.lines().join("\n"));
+            }
+            println!("plan: {}", out.end);
+        }
+        tracing::info!(session = %session_path.display(), "plan run finished");
+        // 0 when every item is done; else as the task that stopped it.
+        let code = match out.reports.last().map(|r| r.stop.as_str()) {
+            _ if out.complete => 0,
+            Some("aborted") => 130,
+            Some("failed") | None => 1,
+            Some(_) => 3,
+        };
+        return Ok(ExitCode::from(code));
+    }
 
     let prompt = if args.prompt == "-" {
         let mut s = String::new();

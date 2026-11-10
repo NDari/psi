@@ -497,6 +497,11 @@ mod tests {
         assert_eq!(set("GIT_CONFIG_VALUE_0").as_deref(), Some(""));
         let a = json!({"command": "git config --get-all credential.helper; echo \"[$?]\""});
         let out = run(a.as_object().unwrap().clone(), &c).await;
-        assert_eq!(out.text, "\n[0]", "an empty helper: the list is cleared");
+        // The last value is the empty one, which clears the helpers the
+        // config files name before it (macOS ships `osxkeychain`).
+        assert!(
+            out.text == "\n[0]" || out.text.ends_with("\n\n[0]"),
+            "{out:?}"
+        );
     }
 }

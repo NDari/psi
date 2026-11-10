@@ -70,6 +70,12 @@ enum OnOff {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Carry out the open items of a plan file, one task each in a fresh context (psi help plans).
+    Run {
+        /// The plan: a markdown file with a checklist.
+        #[arg(default_value = "plan.md")]
+        plan: PathBuf,
+    },
     /// Run coding tasks in podman and grade them (manual; needs llama-server).
     #[command(subcommand)]
     Eval(EvalCommand),
@@ -221,46 +227,53 @@ fn init_tracing() {
         .init();
 }
 
-fn run(cli: Cli) -> Result<ExitCode> {
-    match cli.command {
+fn run(mut cli: Cli) -> Result<ExitCode> {
+    match cli.command.take() {
+        Some(Command::Run { plan }) => agent_command(cli, Some(plan)),
         Some(Command::Eval(cmd)) => eval_command(cmd),
         Some(Command::Inspect(args)) => inspect_command(args),
         Some(Command::Replay(args)) => runtime()?.block_on(replay_command(args)),
         Some(Command::ReplayServer(args)) => replay_server_command(args),
         Some(Command::Help { topic }) => help_command(topic.as_deref()),
-        None => {
-            let cwd = std::env::current_dir().context("reading the working directory")?;
-            let home = std::env::home_dir();
-            // An unset variable in `psi -p "$PROMPT"` would otherwise run
-            // as the interactive mode, with no request limit.
-            if cli.print.as_deref().is_some_and(|p| p.trim().is_empty()) {
-                bail!("psi -p got an empty prompt; give it one, or \"-\" to read it from stdin");
-            }
-            let interactive = cli.print.is_none();
-            let paths = SettingsPaths::discover(home.as_deref(), &cwd);
-            let (settings, notes) = config::load(&paths, flags_layer(&cli))?;
-            tracing::debug!(%settings, "settings loaded");
-            let args = run_mode::RunArgs {
-                prompt: cli.print.unwrap_or_default(),
-                json: cli.json,
-                model: cli.model,
-                continue_last: cli.continue_last,
-                session: cli.session,
-                max_turns: cli.max_turns,
-                settings,
-                notes,
-            };
-            if interactive {
-                if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-                    bail!(
-                        "the interactive mode needs a terminal; run a prompt with psi -p \"...\""
-                    );
-                }
-                return interactive::run(args);
-            }
-            runtime()?.block_on(run_mode::run(args))
-        }
+        None => agent_command(cli, None),
     }
+}
+
+/// The agent itself: the interactive mode, a print run (`-p`), or a plan
+/// run (`psi run`).
+fn agent_command(cli: Cli, plan: Option<PathBuf>) -> Result<ExitCode> {
+    let cwd = std::env::current_dir().context("reading the working directory")?;
+    let home = std::env::home_dir();
+    // An unset variable in `psi -p "$PROMPT"` would otherwise run
+    // as the interactive mode, with no request limit.
+    if cli.print.as_deref().is_some_and(|p| p.trim().is_empty()) {
+        bail!("psi -p got an empty prompt; give it one, or \"-\" to read it from stdin");
+    }
+    if plan.is_some() && cli.print.is_some() {
+        bail!("psi run carries out a plan; it takes no -p prompt");
+    }
+    let interactive = cli.print.is_none() && plan.is_none();
+    let paths = SettingsPaths::discover(home.as_deref(), &cwd);
+    let (settings, notes) = config::load(&paths, flags_layer(&cli))?;
+    tracing::debug!(%settings, "settings loaded");
+    let args = run_mode::RunArgs {
+        prompt: cli.print.unwrap_or_default(),
+        plan,
+        json: cli.json,
+        model: cli.model,
+        continue_last: cli.continue_last,
+        session: cli.session,
+        max_turns: cli.max_turns,
+        settings,
+        notes,
+    };
+    if interactive {
+        if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+            bail!("the interactive mode needs a terminal; run a prompt with psi -p \"...\"");
+        }
+        return interactive::run(args);
+    }
+    runtime()?.block_on(run_mode::run(args))
 }
 
 fn help_command(topic: Option<&str>) -> Result<ExitCode> {

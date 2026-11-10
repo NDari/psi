@@ -19,7 +19,6 @@ use psi_tui::{
 use serde_json::Value;
 use std::collections::BTreeMap;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use super::complete::Completer;
@@ -32,8 +31,12 @@ use super::worker::Cmd;
 /// What reaches the UI thread.
 pub enum UiMsg {
     Agent(AgentEvent),
-    Pause(String, oneshot::Sender<bool>),
     RunDone(RunOutcome),
+    /// A plan run (/run) ended: whether every item is done, and why it ended.
+    PlanDone {
+        complete: bool,
+        end: String,
+    },
     /// The model server is up (the TUI started without one).
     Connected {
         n_ctx: u64,
@@ -96,6 +99,14 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ),
     ("/stats", "tokens, timing, guards and refusals this session"),
     (
+        "/plan",
+        "have the model write the plan you discussed as a checklist: /plan [file] (default plan.md)",
+    ),
+    (
+        "/run",
+        "carry out a plan's open items, one task each in a fresh context: /run [file] (default plan.md)",
+    ),
+    (
         "/copy",
         "copy the last answer to the clipboard; /copy code: its last code block",
     ),
@@ -139,19 +150,6 @@ impl Running {
         }
     }
 }
-
-/// The selected answer on the card showing. Cards used to take single
-/// letters, and a key typed into the prompt as a card appeared answered it
-/// (a pause was answered "stop" 22 ms after it showed in the cog trial,
-/// 2026-11-04). Now ↑↓ move, Enter confirms, Esc gives the safe answer, and
-/// keys are ignored for a moment after a card appears.
-struct Ask {
-    sel: usize,
-    shown: Instant,
-}
-
-/// How long a new card ignores keys.
-const ASK_SETTLE: Duration = Duration::from_millis(400);
 
 enum Picker {
     /// Pick an entry; `files` restores files too (/rewind).
@@ -218,8 +216,6 @@ pub struct App<W: Write> {
     running: Option<Running>,
     /// The process group of a `!cmd` still running.
     user_bash: Option<u32>,
-    ask: Ask,
-    pause: Option<(String, oneshot::Sender<bool>)>,
     picker: Option<Picker>,
     pending_entries: Option<&'static str>,
     completer: Completer,
@@ -289,11 +285,6 @@ impl<W: Write> App<W> {
             cancel: p.cancel,
             running: None,
             user_bash: None,
-            ask: Ask {
-                sel: 0,
-                shown: Instant::now(),
-            },
-            pause: None,
             picker: None,
             pending_entries: None,
             completer,
@@ -347,9 +338,7 @@ impl<W: Write> App<W> {
     }
 
     fn activity(&self) -> Activity {
-        if self.pause.is_some() {
-            Activity::Waiting
-        } else if self.running.is_some() {
+        if self.running.is_some() {
             Activity::Working
         } else {
             Activity::Idle
@@ -476,15 +465,6 @@ impl<W: Write> App<W> {
     }
 
     fn on_key(&mut self, k: KeyEvent) {
-        if self.pause.is_some() {
-            if let Some(i) = self.ask_key(&k)
-                && let Some((_, tx)) = self.pause.take()
-            {
-                let _ = tx.send(i == 0);
-                self.reset_ask();
-            }
-            return;
-        }
         if self.picker.is_some() {
             return self.picker_key(k);
         }
@@ -690,44 +670,6 @@ impl<W: Write> App<W> {
         let first = self.editor.cursor().0 == 0 && col == 0;
         self.completer.update(&word, first);
         self.drop_sel = 0;
-    }
-
-    /// The answers of the card on screen and its safe one; None when no
-    /// card is up.
-    fn card_choices(&self) -> Option<(Vec<String>, usize)> {
-        let own = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
-        if self.pause.is_some() {
-            return Some((own(&["Continue", "Stop the run"]), 1));
-        }
-        None
-    }
-
-    /// A new card is on screen (or the next one after an answer): start on
-    /// its safe answer, and wait a moment before taking keys.
-    fn reset_ask(&mut self) {
-        if let Some((_, safe)) = self.card_choices() {
-            self.ask = Ask {
-                sel: safe,
-                shown: Instant::now(),
-            };
-        }
-    }
-
-    /// A key on the card on screen: the answer picked, if one was.
-    fn ask_key(&mut self, k: &KeyEvent) -> Option<usize> {
-        let (items, safe) = self.card_choices()?;
-        if self.ask.shown.elapsed() < ASK_SETTLE {
-            return None;
-        }
-        let n = items.len();
-        match k.code {
-            KeyCode::Up => self.ask.sel = self.ask.sel.saturating_sub(1),
-            KeyCode::Down => self.ask.sel = (self.ask.sel + 1).min(n.saturating_sub(1)),
-            KeyCode::Enter => return Some(self.ask.sel.min(n.saturating_sub(1))),
-            KeyCode::Esc => return Some(safe),
-            _ => {}
-        }
-        None
     }
 
     fn picker_key(&mut self, k: KeyEvent) {
@@ -1050,7 +992,7 @@ impl<W: Write> App<W> {
         let busy = self.running.is_some();
         let needs_idle = matches!(
             name,
-            "undo" | "rewind" | "tree" | "new" | "resume" | "compact"
+            "undo" | "rewind" | "tree" | "new" | "resume" | "compact" | "run" | "plan"
         );
         if busy && needs_idle {
             return self.error(&format!("/{name} waits until the run ends (Esc aborts it)"));
@@ -1088,6 +1030,20 @@ impl<W: Write> App<W> {
                 self.send(Cmd::Compact(arg.to_owned()));
             }
             "diff" => self.send(Cmd::Diff),
+            "plan" => {
+                let file = if arg.is_empty() { "plan.md" } else { arg };
+                self.send_prompt(plan_request(file), false);
+            }
+            "run" => {
+                if let Some(url) = &self.status.offline {
+                    let msg = format!("  no model server at {url} yet; start it (just llm-up)");
+                    return self.error(&msg);
+                }
+                let file = if arg.is_empty() { "plan.md" } else { arg };
+                self.commit_user(&format!("/run {file}"));
+                self.running = Some(Running::new(false));
+                self.send(Cmd::RunPlan(file.into()));
+            }
             "copy" => self.copy(arg),
             "rewind" | "tree" | "fork" | "stats" | "inspect" => {
                 self.pending_entries = Some(match name {
@@ -1174,12 +1130,6 @@ impl<W: Write> App<W> {
     fn on_msg(&mut self, m: UiMsg) {
         match m {
             UiMsg::Agent(ev) => self.on_agent(ev),
-            UiMsg::Pause(reason, tx) => {
-                self.flush_text();
-                self.pause = Some((reason, tx));
-                self.reset_ask();
-                self.bell("paused: waiting for you");
-            }
             UiMsg::Connected {
                 n_ctx,
                 server,
@@ -1220,6 +1170,19 @@ impl<W: Write> App<W> {
                     Stop::Failed(r) => format!("failed: {r}"),
                 };
                 self.bell(&what);
+            }
+            UiMsg::PlanDone { complete, end } => {
+                self.flush_text();
+                self.running = None;
+                self.status.busy = None;
+                self.restore_queued();
+                let style = if complete {
+                    theme::style(Token::Success)
+                } else {
+                    theme::style(Token::Warning)
+                };
+                self.commit(vec![Line::styled(format!("  plan: {end}"), style)]);
+                self.bell(&format!("plan: {end}"));
             }
             UiMsg::Info(s) => self.info(&format!("  {s}")),
             UiMsg::Compacted(r) => {
@@ -1546,6 +1509,30 @@ impl<W: Write> App<W> {
                 );
                 self.commit(line.wrap(w));
             }
+            AgentEvent::TaskStart { n, total, item } => {
+                self.flush_text();
+                let mut l = Line::default();
+                l.push("▌ ", theme::style(Token::Accent).bold());
+                l.push(
+                    format!("task {n} of {total}: {item}"),
+                    theme::style(Token::Accent).bold(),
+                );
+                self.commit(vec![Line::default(), l]);
+            }
+            AgentEvent::TaskEnd { report } => {
+                self.flush_text();
+                // What the harness recorded: the report's lines after its title.
+                let mark = if report.ticked {
+                    theme::style(Token::Success)
+                } else {
+                    theme::style(Token::Warning)
+                };
+                let mut lines = vec![Line::default()];
+                for (i, text) in report.lines().into_iter().enumerate() {
+                    lines.push(Line::styled(text, if i == 0 { mark.bold() } else { dim() }));
+                }
+                self.commit(lines);
+            }
             AgentEvent::Notice { text } => {
                 self.flush_text();
                 let w = self.width();
@@ -1729,15 +1716,8 @@ impl<W: Write> App<W> {
         let (rows, (cr, cc)) = self.editor.render(w, "› ", Style::default());
         live.extend(rows);
         live.push(border);
-        let mut cursor = Some((top + cr, cc));
-        if let Some((reason, _)) = &self.pause {
-            let y = theme::style(Token::Warning);
-            live.push(Line::styled(format!("┌ paused: {reason}"), y));
-            if let Some((items, safe)) = self.card_choices() {
-                live.extend(view::choices(&items, self.ask.sel, safe, y));
-            }
-            cursor = None;
-        } else if let Some(p) = &self.picker {
+        let cursor = Some((top + cr, cc));
+        if let Some(p) = &self.picker {
             let (items, sel): (Vec<String>, usize) = match p {
                 Picker::Goto { items, sel, .. } | Picker::Fork { items, sel } => {
                     (items.iter().map(|(_, l)| l.clone()).collect(), *sel)
@@ -1802,6 +1782,14 @@ impl<W: Write> App<W> {
         }
         self.r.draw(&live, cursor)
     }
+}
+
+/// What /plan sends: the model writes the plan it worked out with the
+/// user as a file the harness can carry out (`psi_agent::plan`).
+fn plan_request(file: &str) -> String {
+    format!(
+        "Write the plan we worked out to {file}, and don't start the work. Make it a markdown file: first the goal, and what a fresh reader must know to do any one step (constraints, decisions, the files involved, how to check the work). Then a checklist, one line per step as `- [ ] ...`, in the order to do them. Each step is done by a model that sees only this file and that one line, in a few minutes, so make each small, self-contained and checkable."
+    )
 }
 
 /// /stats: tokens, timing, guards and refusals on the branch.

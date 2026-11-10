@@ -76,6 +76,8 @@ impl Fx {
             system_prompt: "sys".into(),
             tools: core_tools(),
             home: None,
+            attended: false,
+            task_budgets: Budgets::default(),
         };
         let ctx = ToolCtx::new(&self.cwd, &self.cwd.join("../../tmp"), 20_000);
         let tmp = self.cwd.join("../../tmp");

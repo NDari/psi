@@ -1,5 +1,6 @@
 //! Keeping the context in the window before each request (psi-plan.md
-//! §7.4): a summary of everything before a verbatim tail. The decisions themselves are in `crate::compact`.
+//! §7.4): one summary of everything before a verbatim tail. The decisions
+//! themselves are in `crate::compact`.
 
 use std::time::Instant;
 
@@ -11,7 +12,7 @@ use serde_json::json;
 use super::{Agent, Planned};
 use crate::compact::{
     CHARS_PER_TOKEN, Chain, SUMMARIZER_SYSTEM, check_summary, estimate_tokens, flatten,
-    merge_prompt, plain_summary_prompt, plan_cut, request_before, step_budget, summary_chain,
+    plain_summary_prompt, plan_cut, request_before, step_budget, summary_chain,
     summary_instruction, summary_words, tail_tokens, trigger,
 };
 use crate::events::AgentEvent;
@@ -30,6 +31,13 @@ pub(super) enum Compacted {
 const INSTRUCTION_TOKENS: u64 = 400;
 
 impl Agent {
+    /// Whether the next request is past the size at which the earlier
+    /// conversation is summarized.
+    pub(super) fn past_trigger(&self) -> bool {
+        let (tokens, at) = self.context_size();
+        tokens >= at
+    }
+
     /// Past the trigger, summarizes the earlier conversation. Returns
     /// whether it did.
     pub(super) async fn fit_context(&mut self) -> Result<bool, String> {
@@ -46,7 +54,7 @@ impl Agent {
 
     /// The estimated size of the next request, and the trigger.
     fn context_size(&self) -> (u64, u64) {
-        let branch = self.session.branch();
+        let branch = self.context();
         let (messages, _) = build_with_sources(&self.system_prompt(), &branch);
         let tokens = estimate_tokens(&branch, &messages, self.tools_chars());
         (tokens, self.trigger())
@@ -82,7 +90,7 @@ impl Agent {
         planned: &[(RawToolCall, Planned)],
         outputs: &mut [ToolOutput],
     ) -> Result<Vec<usize>, String> {
-        let overhead = self.overhead(&summary_chain(&self.session.branch()));
+        let overhead = self.overhead(&summary_chain(&self.context()));
         let result_tokens = self.ctx.max_result_chars as u64 / CHARS_PER_TOKEN;
         let budget = step_budget(self.cfg.n_ctx, self.trigger(), overhead, result_tokens);
         let mut used = 0;
@@ -135,10 +143,10 @@ impl Agent {
         })
     }
 
-    /// Summarizes the entries since the last cut, up to a verbatim tail,
-    /// and adds the summary to the chain (D-40). First by extending the
-    /// last request, so the server reuses its prefix cache (D-38), then
-    /// from the entries as text.
+    /// Summarizes the entries since the last cut, up to a verbatim tail.
+    /// The new summary is written with the earlier one in view and takes
+    /// its place. First by extending the last request, so the server
+    /// reuses its prefix cache (D-38), then from the entries as text.
     pub(super) async fn compact(
         &mut self,
         tokens: u64,
@@ -159,12 +167,11 @@ impl Agent {
         focus: Option<&str>,
     ) -> Result<Compacted, String> {
         let n_ctx = self.cfg.n_ctx;
-        let branch = self.session.branch();
+        let branch = self.context();
         let chain = summary_chain(&branch);
         let from = chain.keep_from;
         let overhead = self.overhead(&chain);
-        let set = self.compaction;
-        let tail = tail_tokens(self.trigger(), overhead, set.tail);
+        let tail = tail_tokens(self.trigger(), overhead);
         let Some(cut) = plan_cut(&branch, from, tail) else {
             return Ok(Compacted::Nothing);
         };
@@ -177,8 +184,13 @@ impl Agent {
             .unwrap_or_default();
         let max_chars =
             (n_ctx.saturating_sub(self.cfg.max_output + 1500) * CHARS_PER_TOKEN) as usize;
-        // The fallback sees the earlier summaries when they take at most
-        // half its room, so it can correct them as the extended request can.
+        // The fallback sees the earlier summary when it takes at most half
+        // its room (always, but for a chain from an older session).
+        let all_ids: Vec<String> = chain
+            .summaries
+            .iter()
+            .map(|(id, _)| (*id).to_owned())
+            .collect();
         let earlier_chars: usize = chain.summaries.iter().map(|(_, s)| s.len()).sum();
         let earlier: Vec<String> = if earlier_chars <= max_chars / 2 {
             chain
@@ -212,7 +224,7 @@ impl Agent {
         if fallback.is_none() {
             let mut r = req;
             r.messages.push(ChatMessage::User(
-                summary_instruction(after_summary, words, set.summary) + &focus_text,
+                summary_instruction(after_summary, words) + &focus_text,
             ));
             match self.summary_request(&r).await {
                 Ok(resp) => match check_summary(&resp) {
@@ -226,8 +238,7 @@ impl Agent {
         if done.is_none() {
             let earlier: Vec<&str> = earlier.iter().map(String::as_str).collect();
             let r = self.plain_request(
-                plain_summary_prompt(&text, request.as_deref(), &earlier, words, set.summary)
-                    + &focus_text,
+                plain_summary_prompt(&text, request.as_deref(), &earlier, words) + &focus_text,
             );
             let failed = match self.summary_request(&r).await {
                 Ok(resp) => match check_summary(&resp) {
@@ -254,11 +265,17 @@ impl Agent {
             return Ok(Compacted::Failed);
         };
         self.compact_failed_at = None;
+        // The summary takes the place of the ones it was written with.
+        let replaces = if method == "extend" || !earlier.is_empty() {
+            all_ids
+        } else {
+            Vec::new()
+        };
         self.record(EntryBody::Compaction {
             summary,
             first_kept_id,
             tokens_before: Some(tokens),
-            replaces: vec![],
+            replaces,
         })?;
         self.record(EntryBody::Custom {
             custom_type: "compaction".into(),
@@ -266,56 +283,7 @@ impl Agent {
                          "usage": resp.usage, "timings": resp.timings,
                          "ms": started.elapsed().as_millis() as u64}),
         })?;
-        self.merge_summaries().await?;
         Ok(Compacted::Done)
-    }
-
-    /// When the summaries together pass a tenth of the window, the two
-    /// oldest are merged into one: the only place a summary is summarized
-    /// again (D-40).
-    async fn merge_summaries(&mut self) -> Result<(), String> {
-        let branch = self.session.branch();
-        let chain = summary_chain(&branch);
-        let chars: usize = chain.summaries.iter().map(|(_, s)| s.len()).sum();
-        if chain.summaries.len() < 2 || chars as u64 / CHARS_PER_TOKEN <= self.cfg.n_ctx / 10 {
-            return Ok(());
-        }
-        let ((a_id, a), (b_id, b)) = (chain.summaries[0], chain.summaries[1]);
-        let replaces = vec![a_id.to_owned(), b_id.to_owned()];
-        let first_kept_id = branch[chain.keep_from].id.clone();
-        let prompt = merge_prompt(a, b, summary_words(self.cfg.n_ctx), self.compaction.summary);
-        drop(branch);
-        let started = Instant::now();
-        let r = self.plain_request(prompt);
-        let merged = match self.summary_request(&r).await {
-            Ok(resp) => check_summary(&resp).map(|s| (s, resp)),
-            Err(AiError::Aborted) => return Ok(()),
-            Err(e) => Err(e.to_string()),
-        };
-        match merged {
-            Ok((summary, resp)) => {
-                self.record(EntryBody::Compaction {
-                    summary,
-                    first_kept_id,
-                    tokens_before: None,
-                    replaces,
-                })?;
-                self.record(EntryBody::Custom {
-                    custom_type: "compaction".into(),
-                    data: json!({"method": "merge", "usage": resp.usage,
-                                 "timings": resp.timings,
-                                 "ms": started.elapsed().as_millis() as u64}),
-                })?;
-            }
-            Err(e) => {
-                self.record(EntryBody::GuardEvent {
-                    guard: "compaction_failed".into(),
-                    message: format!("could not merge the two oldest summaries: {e}"),
-                    tool_call_id: None,
-                })?;
-            }
-        }
-        Ok(())
     }
 
     /// A request with only the summarizer's system prompt and `prompt`.

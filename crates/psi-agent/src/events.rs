@@ -73,6 +73,22 @@ pub enum AgentEvent {
     Retrying {
         reason: String,
     },
+    /// A task of a plan starts: item `n` of `total`, in a fresh context.
+    TaskStart {
+        n: usize,
+        total: usize,
+        item: String,
+    },
+    /// A task ended: the harness's report of it.
+    TaskEnd {
+        report: crate::plan::TaskReport,
+    },
+    /// A plan run ended: tasks ticked in it, items still open, and why.
+    PlanEnd {
+        done: usize,
+        open: usize,
+        reason: String,
+    },
     /// Something the user should know that isn't part of the conversation.
     Notice {
         text: String,

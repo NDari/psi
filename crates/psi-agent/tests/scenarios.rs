@@ -60,6 +60,8 @@ impl Fixture {
             system_prompt: "sys".into(),
             tools,
             home: None,
+            attended: false,
+            task_budgets: Budgets::default(),
         };
         Agent::new(Client::new(&self.server.base_url()), session, cfg, ctx)
     }
@@ -541,7 +543,6 @@ fn kinds(a: &Agent) -> Vec<String> {
         .map(|e| match &e.body {
             EntryBody::ToolResult { .. } => "result".into(),
             EntryBody::ClearedResults { entry_ids, .. } => format!("cleared {}", entry_ids.len()),
-            EntryBody::Compaction { replaces, .. } if !replaces.is_empty() => "merge".into(),
             EntryBody::Compaction { .. } => "compaction".into(),
             EntryBody::GuardEvent { guard, .. } => format!("guard {guard}"),
             _ => String::new(),
@@ -736,43 +737,6 @@ async fn a_summary_extends_the_last_request_and_keeps_a_tail() {
 }
 
 #[tokio::test]
-async fn the_compaction_setting_sets_the_tail_and_the_summary_form() {
-    let f = Fixture::new(vec![
-        read_at("f0.txt", 9500),
-        text("Porting the parser."),
-        text("done"),
-    ]);
-    write_files(&f.cwd, 1, 200);
-    let mut a = f
-        .agent_sized(Budgets::default(), core_tools(), 16_384, 7372)
-        .with_compaction(psi_agent::CompactionSettings {
-            tail: Some(0),
-            summary: psi_agent::SummaryForm::Free,
-        });
-    prefill(&mut a, 30);
-    let out = a.run("go on").await;
-    assert_eq!(out.stop, Stop::Done, "{:?} {:?}", out.stop, kinds(&a));
-    let reqs = f.server.chat_requests();
-    let sum = reqs[1]["messages"].as_array().unwrap();
-    let instruction = sum.last().unwrap()["content"].as_str().unwrap();
-    assert!(
-        instruction.contains("as plain prose without headings"),
-        "{instruction}"
-    );
-    assert!(!instruction.contains("## Goal"));
-    // A tail of 0 keeps only the last step: its call and its result.
-    let next = reqs[2]["messages"].as_array().unwrap();
-    assert!(
-        next[1]["content"]
-            .as_str()
-            .unwrap()
-            .contains("Porting the parser.")
-    );
-    assert_eq!(next.len(), 4, "{next:#?}");
-    assert_eq!(next[3]["role"], "tool");
-}
-
-#[tokio::test]
 async fn a_summary_falls_back_to_a_plain_request() {
     let f = Fixture::new(vec![
         read_at("f0.txt", 9500),
@@ -813,38 +777,14 @@ async fn a_summary_falls_back_to_a_plain_request() {
     );
 }
 
+/// A summary is the safety net, not the engine: a run gets two, and when
+/// the context fills a third time it stops and says the work is too big
+/// (design-going-forward.md). The 2026-11-01 re-read loops summarized 11
+/// times and more.
 #[tokio::test]
-async fn summarizing_again_and_again_without_changes_pauses() {
-    // Every step refills the context (the 2026-11-01 re-read loops): the
-    // twelfth summary with no file changed stops a headless run.
+async fn a_run_that_fills_the_context_a_third_time_stops() {
     let mut replies = Vec::new();
-    for i in 0..12 {
-        replies.push(read_at(&format!("f{i}.txt"), 9500));
-        replies.push(text(SUMMARY));
-    }
-    replies.push(text("not reached"));
-    let f = Fixture::new(replies);
-    write_files(&f.cwd, 12, 200);
-    let mut a = f.agent_sized(Budgets::default(), core_tools(), 16_384, 7372);
-    prefill(&mut a, 30);
-    let out = a.run("go on").await;
-    assert_eq!(
-        out.stop,
-        Stop::Guard("the context was summarized 12 times and no file changed".into()),
-        "{:?}",
-        kinds(&a)
-    );
-    assert_eq!(kinds(&a).iter().filter(|k| *k == "compaction").count(), 12);
-    assert!(kinds(&a).contains(&"guard compaction_loop".to_owned()));
-    assert_eq!(f.server.remaining(), 1);
-}
-
-#[tokio::test]
-async fn summarizing_often_while_writing_files_doesnt_pause() {
-    // The same refilling context, but every turn writes a file: progress,
-    // so no pause, even without checkpoints to notice the changes.
-    let mut replies = Vec::new();
-    for i in 0..14 {
+    for i in 0..3 {
         replies.push(Reply::Chat(ScriptedReply {
             prompt_tokens: 10_500,
             ..ScriptedReply::call(
@@ -859,9 +799,14 @@ async fn summarizing_often_while_writing_files_doesnt_pause() {
     let mut a = f.agent_sized(Budgets::default(), core_tools(), 16_384, 7372);
     prefill(&mut a, 30);
     let out = a.run("go on").await;
-    assert_eq!(out.stop, Stop::Done, "{:?} {:?}", out.stop, kinds(&a));
-    assert!(kinds(&a).iter().filter(|k| *k == "compaction").count() >= 12);
-    assert!(!kinds(&a).contains(&"guard compaction_loop".to_owned()));
+    let reason = "the work filled the context window 3 times; it is too big for one run. Split it into smaller tasks";
+    assert_eq!(out.stop, Stop::Budget(reason.into()), "{:?}", kinds(&a));
+    assert_eq!(kinds(&a).iter().filter(|k| *k == "compaction").count(), 2);
+    assert!(kinds(&a).contains(&"guard too_big".to_owned()));
+    // The third summary was not asked for.
+    assert_eq!(f.server.remaining(), 2);
+    // The next run starts its own count: it summarizes and goes on.
+    assert_eq!(a.run("go on").await.stop, Stop::Done);
 }
 
 #[tokio::test]
@@ -892,16 +837,14 @@ async fn a_failed_summary_is_recorded_and_not_retried_at_once() {
 }
 
 #[tokio::test]
-async fn summaries_chain_and_the_oldest_merge() {
-    let s1 = format!("S1 PELICAN-42 {}", "one ".repeat(700));
-    let s2 = format!("S2 {}", "two ".repeat(700));
-    let merged = "M PELICAN-42";
+async fn a_later_summary_takes_the_earlier_ones_place() {
+    let s1 = format!("S1 PELICAN-42 {}", "one ".repeat(300));
+    let s2 = "S2 PELICAN-42 two";
     let f = Fixture::new(vec![
         read_at("f0.txt", 9500),
         text(&s1),
         read_at("f1.txt", 9500),
-        text(&s2),
-        text(merged),
+        text(s2),
         text("done"),
     ]);
     write_files(&f.cwd, 2, 200);
@@ -913,10 +856,10 @@ async fn summaries_chain_and_the_oldest_merge() {
         .iter()
         .map(|i| i["method"].clone())
         .collect();
-    assert_eq!(methods, ["extend", "extend", "merge"]);
+    assert_eq!(methods, ["extend", "extend"]);
     let reqs = f.server.chat_requests();
-    // The second summary request carries the first summary and asks only
-    // for what came after it.
+    // The second summary request carries the first summary and asks for
+    // one that takes its place.
     let second = reqs[3]["messages"].as_array().unwrap();
     assert!(
         second[1]["content"]
@@ -928,15 +871,13 @@ async fn summaries_chain_and_the_oldest_merge() {
         second.last().unwrap()["content"]
             .as_str()
             .unwrap()
-            .contains("everything after the last summary")
+            .contains("your new summary takes its place")
     );
-    // The merge request has both, oldest first; afterwards one block.
-    let merge = reqs[4]["messages"][1]["content"].as_str().unwrap();
-    assert!(merge.find("S1 PELICAN").unwrap() < merge.find("S2 two").unwrap());
-    let last = reqs[5]["messages"][1]["content"].as_str().unwrap();
-    assert!(last.contains(merged));
-    assert!(!last.contains("S1 PELICAN") && !last.contains("S2 two"));
+    // Afterwards one summary: no chain, and no request to merge.
+    let last = reqs[4]["messages"][1]["content"].as_str().unwrap();
+    assert!(last.contains(s2) && !last.contains("S1 PELICAN"), "{last}");
     assert_eq!(last.matches("[Summary of earlier work").count(), 1);
+    assert_eq!(reqs.len(), 5);
 }
 
 #[tokio::test]
@@ -961,10 +902,7 @@ async fn past_the_trigger_it_summarizes_and_clears_nothing() {
 }
 
 #[tokio::test]
-async fn a_later_summary_can_correct_the_earlier_ones() {
-    // H-17: the first summary has nothing to correct; the second is asked
-    // for corrections, and when it falls back to a plain request it gets
-    // the earlier summary to correct.
+async fn a_fallback_summary_gets_the_earlier_one_to_replace() {
     let f = Fixture::new(vec![
         read_at("f0.txt", 9500),
         text("S1 the parser works"),
@@ -991,15 +929,19 @@ async fn a_later_summary_can_correct_the_earlier_ones() {
             .to_owned()
     };
     let first = ask(&reqs[1]);
-    assert!(first.contains("## Learned about the code") && !first.contains("## Corrections"));
-    let extended = ask(&reqs[3]);
-    assert!(extended.contains("## Corrections"), "{extended}");
+    assert!(first.contains("## Learned about the code") && !first.contains("takes its place"));
     let plain = ask(&reqs[4]);
     assert!(
         plain.contains("</request>\n\n<earlier_summary>\nS1 the parser works\n</earlier_summary>\n\n<conversation>"),
         "{plain}"
     );
-    assert!(plain.contains("## Corrections"));
+    assert!(plain.contains("the new summary takes its place"));
+    // One summary afterwards.
+    let last = reqs[5]["messages"][1]["content"].as_str().unwrap();
+    assert!(
+        last.contains("S2") && !last.contains("S1 the parser works"),
+        "{last}"
+    );
 }
 
 fn psi_agent_note() -> &'static str {

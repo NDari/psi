@@ -7,6 +7,7 @@
 pub const TOPICS: &[(&str, &str)] = &[
     ("commands", include_str!("../../../docs/help/commands.md")),
     ("models", include_str!("../../../docs/help/models.md")),
+    ("plans", include_str!("../../../docs/help/plans.md")),
     (
         "post-edit-check",
         include_str!("../../../docs/help/post-edit-check.md"),
@@ -26,6 +27,10 @@ const ALIASES: &[(&str, &str)] = &[
     ("undo", "safety"),
     ("sandbox", "safety"),
     ("check", "post-edit-check"),
+    ("plan", "plans"),
+    ("tasks", "plans"),
+    ("run", "plans"),
+    ("limits", "plans"),
     ("config", "settings"),
     ("slash", "commands"),
 ];

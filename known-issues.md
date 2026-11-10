@@ -6,8 +6,7 @@ Problems we know about and have chosen not to fix yet, with how much they matter
 
 ### What "nothing the owner can't recover from" doesn't cover yet (added 2026-11-09, with step 2 of `design-going-forward.md`)
 
-- **The Seatbelt side is not run yet (high, before the Mac build is used).** Hiding credentials on macOS is written (a `file-read*` and `file-write*` deny for each hidden path in the profile) and has a test (`seatbelt_blocks_writes_outside`), but neither was run on a Mac. A profile that doesn't compile turns bash off there, loudly.
-- **The macOS keychain (high on the Mac).** A token kept in the login keychain is not hidden by a file deny for certain (`Library/Keychains` is on the list; the keychain is also reached through `securityd`). Git is covered another way: bash gets an empty `credential.helper`, so git asks no helper. Other tools that read the keychain (`gh` with keychain storage, `security find-generic-password`) are not. Needs a `mach-lookup` deny tried on the Mac.
+- **The macOS keychain (high on the Mac).** A token kept in the login keychain is not hidden by a file deny for certain (`Library/Keychains` is on the list; the keychain is also reached through `securityd`). Git is covered another way: bash gets an empty `credential.helper`, so git asks no helper. (Whether that keeps a keychain token from git could not be shown over SSH on 2026-11-09: the keychain gave nothing there with or without it. Try it in a terminal on the Mac.) Other tools that read the keychain (`gh` with keychain storage, `security find-generic-password`) are not. Needs a `mach-lookup` deny tried on the Mac.
 - **The SSH agent socket on macOS (medium).** `SSH_AUTH_SOCK` is removed from bash's environment, but launchd's socket is under `/private/tmp`, which Seatbelt leaves readable and writable, so a command that looks for it can use the agent. On Linux the socket is under the runtime directory, which is hidden. Needs a `network-outbound` deny on the socket's path, tried on the Mac.
 - **Gitignored files in a directory ignored as a whole (low).** Checkpoints capture ignored files up to 1 MB each (2,000 at most), but not inside a directory that is itself ignored (`target/`, `node_modules/`, also a `secrets/` folder), and not larger ones. A clobbered file there can't be undone.
 - **Git objects (low).** Checkpoints record branch and tag tips and HEAD, not the commits. `/undo` after a rewrite relies on the old commits still being in `.git`, which holds unless something prunes them (`git gc --prune=now`, `git reflog expire`). Removing `.git` and dropping a stash are refused; a stash's contents are not recorded.
@@ -15,6 +14,16 @@ Problems we know about and have chosen not to fix yet, with how much they matter
 - **A failed checkpoint doesn't stop the run (low).** It is recorded as a guard event and the run goes on, so changes after it can't be undone until a capture works again. File writes used to ask in that state.
 - **The refuse list reads the command, not files (accepted).** A script written first and run after (`bash push.sh`, `make deploy`) runs what is inside. The list is a courtesy; hidden credentials are what stop a push.
 - **Read before overwrite (low, from 2026-11-03).** The file tools refuse to replace a file the model hasn't read; bash doesn't check. Checkpoints still undo it.
+
+### Plans and tasks: what the first version leaves out (added 2026-11-09, with step 3 of `design-going-forward.md`)
+
+- **A failed check at the end of a task stops the plan without another try (medium, from use).** The model saw the check fail after its edits during the task (the post-edit check), but when the last change came from bash, or the model stopped early, the end-of-task check is the first it fails. Running the plan again starts the item over in a fresh context, on top of the files as the failed task left them.
+- **The record of earlier items is per session (low).** A task's prompt lists what earlier tasks of the same session changed and whether the check passed. Items done in another session show only as ticked boxes in the plan.
+- **After `/run`, the chat goes on in the last task's context (low).** The conversation before the plan run is not sent any more (it is still in the session). Good for "fix what that task left", surprising for "as I said earlier".
+- **`psi inspect` doesn't show tasks (low).** `task_start` and `task_report` entries are in the session and are not in the timeline yet; step 5 builds on them.
+- **The limits are starting values (to set from use).** 40 requests, 200 tool calls and 2 summaries per task (`limits`), from the old print-run defaults.
+- **One summary at a time (accepted).** A new summary takes the earlier one's place, so what the model leaves out is gone from the context (the session keeps it). The design gives up faithful summaries over many compactions; a task that needs a third stops.
+- **Names from before (low).** `GuardAction::Pause` and the `*_PAUSE` constants stop the run now; `Activity::Waiting` in `psi-tui` is unused.
 
 ### Failure guards miss failures that aren't in a row (added 2026-11-05, medium priority, to implement; the `no_progress` pause built 2026-11-09)
 

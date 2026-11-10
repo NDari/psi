@@ -10,13 +10,15 @@ Keys:
 - network: "on" or "off". isolation: "on" (bubblewrap on Linux, Seatbelt on macOS) or "off".
 - cache_dirs: directories bash may write under the sandbox.
 - refuse, refuse_remove: commands bash never runs, added or dropped (psi help safety).
-- post_edit_check: a command run after turns that edit files (psi help post-edit-check).
-- compaction: {"tail": tokens kept verbatim after a summary (default "auto": 10K, less in
-  small windows), "summary":
-  "structured" (default) or "free"}. For experiments (H-07, H-11).
-- notify: "auto" (default), "bell" or "off". When a turn ends or something waits for you
-  while the terminal is unfocused, auto rings the bell and sends a desktop notification.
-  Psi also shows working or waiting in the title and the tab's progress indicator. In tmux,
+- post_edit_check: a command run after turns that edit files (psi help post-edit-check),
+  and at the end of each task of a plan.
+- limits: {"requests": 40, "tool_calls": 200, "summaries": 2}: what one task of a plan
+  or one print run (-p) may use before it stops with the reason (psi help plans).
+  "summaries" also holds in the TUI's chat: a run that fills the context window once
+  more stops and says the work is too big for one run.
+- notify: "auto" (default), "bell" or "off". When a run or a plan ends while the
+  terminal is unfocused, auto rings the bell and sends a desktop notification.
+  Psi also shows working in the title and the tab's progress indicator. In tmux,
   set -g focus-events on (to know about focus) and set -g allow-passthrough on.
 
 Models are in ~/.psi/models.jsonc (psi help models).

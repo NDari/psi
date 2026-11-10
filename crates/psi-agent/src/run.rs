@@ -20,9 +20,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
-use crate::approval::{Approver, Headless};
 use crate::call::decide;
-use crate::compact::CompactionSettings;
 use crate::events::AgentEvent;
 use crate::generating::Generating;
 use crate::guards::{GuardAction, Guards};
@@ -31,16 +29,23 @@ use crate::post_edit::{self, PostEditCheck};
 use crate::prompt;
 
 mod fit;
+mod tasks;
 
-/// Limits on one run (§5). Reaching one stops a headless run.
+pub use tasks::PlanOutcome;
+
+/// Limits on one run (design-going-forward.md: a run is bounded). At a
+/// limit the run stops with the reason; it never waits for an answer.
 #[derive(Debug, Clone)]
 pub struct Budgets {
     /// Model requests per run (H-13).
     pub max_turns: u32,
     pub max_tool_calls: u32,
     pub max_wall: Option<Duration>,
-    /// Failed tool calls in a row before a nudge; twice this pauses (§8.6).
+    /// Failed tool calls in a row before a nudge; twice this stops (§8.6).
     pub max_consecutive_errors: u32,
+    /// Summaries of the earlier conversation per run. A run that fills the
+    /// window once more stops: the task is too big for one run.
+    pub max_summaries: u32,
 }
 
 impl Default for Budgets {
@@ -50,6 +55,7 @@ impl Default for Budgets {
             max_tool_calls: 200,
             max_wall: None,
             max_consecutive_errors: 10,
+            max_summaries: 2,
         }
     }
 }
@@ -63,9 +69,15 @@ pub struct AgentConfig {
     pub n_ctx: u64,
     pub enable_thinking: Option<bool>,
     pub budgets: Budgets,
+    /// The limits on one task of a plan (`run_plan`): the TUI's own chat
+    /// has no request limit, a task always does.
+    pub task_budgets: Budgets,
     pub system_prompt: String,
     pub tools: Vec<Tool>,
     pub home: Option<PathBuf>,
+    /// A person is at the keyboard (the TUI): an answer that announces a
+    /// step without making the call isn't nudged, since they can say "go on".
+    pub attended: bool,
 }
 
 /// Messages for a running agent (pi parity): steering goes in before the
@@ -94,7 +106,7 @@ pub enum Stop {
     /// A budget was reached (the model's run, cut short).
     Budget(String),
     Aborted,
-    /// A guard paused the run and nobody chose to go on (§8.6).
+    /// A guard stopped the run (§8.6).
     Guard(String),
     /// The harness or the server failed.
     Failed(String),
@@ -133,18 +145,16 @@ pub struct Safety {
     pub policy: Policy,
     /// `None` when checkpoints are off (no git).
     pub checkpoints: Option<Arc<Checkpoints>>,
-    pub approver: Arc<dyn Approver>,
     /// Isolation and checkpoint state, recorded in `session_info`.
     pub info: Value,
 }
 
 impl Safety {
-    /// The shipped refuse list, no checkpoints, nobody at the keyboard.
+    /// The shipped refuse list and no checkpoints.
     pub fn headless(root: &Path, home: Option<&Path>, tmpdir: &Path) -> Self {
         Self {
             policy: Policy::new(Rules::shipped(), root, home, tmpdir),
             checkpoints: None,
-            approver: Arc::new(Headless),
             info: Value::Null,
         }
     }
@@ -168,7 +178,6 @@ pub struct Agent {
     /// What the server says it runs (model file, window, build), for the
     /// session record: requests only name the alias (`local`).
     server: Option<Value>,
-    compaction: CompactionSettings,
     /// The last request sent, to check a summary request extends it (D-38).
     last_request: Option<ChatRequest>,
     /// The context size when summarizing last failed: no new try until it
@@ -215,7 +224,6 @@ impl Agent {
             abort: Arc::new(Mutex::new(CancellationToken::new())),
             post_edit: None,
             server: None,
-            compaction: CompactionSettings::default(),
             last_request: None,
             compact_failed_at: None,
             compacting: false,
@@ -268,12 +276,6 @@ impl Agent {
         if let Ok(mut f) = self.ctx.files.lock() {
             *f = psi_tools::FileTracker::default();
         }
-    }
-
-    /// The tail size and summary form compaction uses (the `compaction` setting).
-    pub fn with_compaction(mut self, settings: CompactionSettings) -> Self {
-        self.compaction = settings;
-        self
     }
 
     /// The server's model file, window and build, recorded in
@@ -463,29 +465,25 @@ impl Agent {
         self.record(Self::user_message(input))?;
         let start = Instant::now();
         let b = self.cfg.budgets.clone();
-        // A limit the user goes past in the TUI moves on by the same amount.
-        let (mut turn_limit, mut call_limit) = (b.max_turns, b.max_tool_calls);
+        let (turn_limit, call_limit) = (b.max_turns, b.max_tool_calls);
         let mut guards = Guards::new(b.max_consecutive_errors);
-        // A run that can't ask went on from a no-progress pause already.
+        // The run went on from a no-progress stop once already.
         let mut loop_noted = false;
+        let mut summaries = 0u32;
         let mut overflow_retries = 0u32;
         loop {
             if self.ctx.cancel.is_cancelled() {
                 return Ok(Stop::Aborted);
             }
             if out.turns >= turn_limit {
-                let reason = format!("reached the limit of {turn_limit} model requests in one run");
-                if let Some(stop) = self.budget_reached(reason).await? {
-                    return Ok(stop);
-                }
-                turn_limit = turn_limit.saturating_add(b.max_turns);
+                return Ok(Stop::Budget(format!(
+                    "reached the limit of {turn_limit} model requests in one run"
+                )));
             }
             if out.tool_calls >= call_limit {
-                let reason = format!("reached the limit of {call_limit} tool calls in one run");
-                if let Some(stop) = self.budget_reached(reason).await? {
-                    return Ok(stop);
-                }
-                call_limit = call_limit.saturating_add(b.max_tool_calls);
+                return Ok(Stop::Budget(format!(
+                    "reached the limit of {call_limit} tool calls in one run"
+                )));
             }
             if let Some(w) = b.max_wall
                 && start.elapsed() >= w
@@ -499,18 +497,22 @@ impl Agent {
             let turn = out.turns;
             self.emit(AgentEvent::TurnStart { turn });
 
-            if self.fit_context().await?
-                && let Some(GuardAction::Pause { guard, reason }) = guards.on_compaction()
-            {
+            // A summary is the safety net: a run gets a few, then stops.
+            if summaries >= b.max_summaries && self.past_trigger() {
+                let reason = format!(
+                    "the work filled the context window {} times; it is too big for one run. Split it into smaller tasks",
+                    summaries + 1
+                );
                 self.record(EntryBody::GuardEvent {
-                    guard: guard.into(),
-                    message: format!("paused: {reason}"),
+                    guard: "too_big".into(),
+                    message: format!("stopped: {reason}"),
                     tool_call_id: None,
                 })?;
-                if let Some(stop) = self.pause_run(reason).await? {
-                    return Ok(stop);
-                }
-                guards.reset();
+                return Ok(Stop::Budget(reason));
+            }
+            if self.fit_context().await? {
+                summaries += 1;
+                guards.on_compaction();
             }
             let resp = match self.request().await {
                 Ok(r) => r,
@@ -582,9 +584,9 @@ impl Agent {
                         })?;
                         continue;
                     }
-                    // Headless only: a person at the keyboard can just say
+                    // Unattended only: a person at the keyboard can just say
                     // "go on", and a false alarm would cost them a turn.
-                    if !self.safety.approver.interactive()
+                    if !self.cfg.attended
                         && let Some(GuardAction::Nudge { guard, text }) =
                             guards.on_answer(&resp.text)
                     {
@@ -623,71 +625,27 @@ impl Agent {
                     .take_loop_note()
                     .filter(|(r, _)| *r == reason)
                     .map(|(_, note)| note);
-                // A run that can't ask gets the note once in place of the
-                // stop; the next such pause stops it.
-                let unasked = note.is_some() && !self.safety.approver.interactive() && !loop_noted;
-                if !unasked && let Some(stop) = self.pause_run(reason).await? {
-                    return Ok(stop);
-                }
+                // The run gets the note once in place of the stop; the
+                // next such stop ends it.
+                let Some(text) = note.filter(|_| !loop_noted) else {
+                    return Ok(Stop::Guard(reason));
+                };
+                loop_noted = true;
                 guards.reset();
-                if let Some(text) = note {
-                    loop_noted = true;
-                    let message = if unasked {
-                        "this run can't ask, so it goes on once, with a note naming the repeated calls"
-                    } else {
-                        "going on with a note naming the repeated calls"
-                    };
-                    self.record(EntryBody::GuardEvent {
-                        guard: "no_progress".into(),
-                        message: message.into(),
-                        tool_call_id: None,
-                    })?;
-                    self.record(EntryBody::CustomMessage {
-                        custom_type: "guard".into(),
-                        content: vec![Block::Text { text }],
-                    })?;
-                }
+                self.record(EntryBody::GuardEvent {
+                    guard: "no_progress".into(),
+                    message: "the run goes on once, with a note naming the repeated calls".into(),
+                    tool_call_id: None,
+                })?;
+                self.record(EntryBody::CustomMessage {
+                    custom_type: "guard".into(),
+                    content: vec![Block::Text { text }],
+                })?;
             }
             for s in Queues::take(&self.queues.steering) {
                 self.record(Self::user_message(&s))?;
             }
         }
-    }
-
-    /// A budget ran out: headless runs stop; in the TUI the run pauses and
-    /// asks (§5), and going on gives it as much again.
-    async fn budget_reached(&mut self, reason: String) -> Result<Option<Stop>, String> {
-        if !self.safety.approver.interactive() {
-            return Ok(Some(Stop::Budget(reason)));
-        }
-        Ok(match self.pause_run(reason.clone()).await? {
-            None => None,
-            Some(Stop::Aborted) => Some(Stop::Aborted),
-            Some(_) => Some(Stop::Budget(reason)),
-        })
-    }
-
-    /// Asks whether to go on after a guard's pause or a budget; the stop
-    /// when not. Each pause is recorded with how long it waited for the
-    /// user, so a review can tell waiting from working (the cog trial's
-    /// worker paused six times, and only gaps in the timestamps showed it).
-    async fn pause_run(&mut self, reason: String) -> Result<Option<Stop>, String> {
-        let started = Instant::now();
-        let stop = tokio::select! {
-            g = self.safety.approver.pause(reason.clone()) => (!g).then(|| Stop::Guard(reason.clone())),
-            () = self.ctx.cancel.cancelled() => Some(Stop::Aborted),
-        };
-        let answer = match &stop {
-            None => "go on",
-            Some(Stop::Aborted) => "aborted",
-            Some(_) => "stop",
-        };
-        self.record(EntryBody::Custom {
-            custom_type: "pause".into(),
-            data: json!({"reason": reason, "answer": answer,
-                         "waited_ms": started.elapsed().as_millis() as u64}),
-        })?;
-        Ok(stop)
     }
 
     fn system_prompt(&self) -> String {
@@ -697,9 +655,23 @@ impl Agent {
         )
     }
 
+    /// The entries requests are built from: the branch after the last task
+    /// start (`crate::plan::TASK_START`), so a task's context is fresh.
+    fn context(&self) -> Vec<&Entry> {
+        let branch = self.session.branch();
+        let start = branch
+            .iter()
+            .rposition(|e| {
+                matches!(&e.body, EntryBody::Custom { custom_type, .. }
+                    if custom_type == crate::plan::TASK_START)
+            })
+            .map_or(0, |i| i + 1);
+        branch[start..].to_vec()
+    }
+
     /// The next request, from the session branch.
     fn build_request(&self) -> ChatRequest {
-        let messages = build_messages(&self.system_prompt(), &self.session.branch());
+        let messages = build_messages(&self.system_prompt(), &self.context());
         let offered = self.tool_names();
         let tools = self
             .all_schemas()
@@ -841,7 +813,7 @@ impl Agent {
 
     /// Runs the calls of one response: read-only ones side by side, the
     /// rest one at a time, in order, each through the policy. Returns how
-    /// many ran, and why a guard paused, if one did.
+    /// many ran, and why a guard stopped the run, if one did.
     /// Runs one response's calls; those past `allowed` (the rest of the
     /// run's tool-call budget) are refused, not run.
     async fn run_calls(
@@ -994,7 +966,7 @@ impl Agent {
         for (id, action) in fired {
             let (guard, message) = match action {
                 GuardAction::Nudge { guard, text } => (guard, text),
-                GuardAction::Pause { guard, reason } => (guard, format!("paused: {reason}")),
+                GuardAction::Pause { guard, reason } => (guard, format!("stopped: {reason}")),
             };
             self.record(EntryBody::GuardEvent {
                 guard: guard.into(),
@@ -1144,7 +1116,7 @@ impl Agent {
     /// Context overflow (§4.2): drop the oldest turns so the request fits,
     /// and record it.
     async fn drop_old_turns(&mut self, n_prompt: u64, n_ctx: u64) -> Result<(), String> {
-        let keep = plan_drop(&self.session.branch(), n_prompt, n_ctx, self.cfg.max_output)
+        let keep = plan_drop(&self.context(), n_prompt, n_ctx, self.cfg.max_output)
             .ok_or_else(|| format!("the request ({n_prompt} tokens) does not fit the context window ({n_ctx} tokens), even with only the last turn"))?;
         self.record(EntryBody::Compaction {
             summary: String::new(),

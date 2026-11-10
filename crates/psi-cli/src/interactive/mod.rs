@@ -2,7 +2,6 @@
 //! agent as print mode. The UI runs on the main thread; the agent on the
 //! tokio runtime; they talk over channels (§3.3).
 
-mod approver;
 mod complete;
 mod paste;
 mod ui;
@@ -25,7 +24,6 @@ use psi_tui::theme::{self, Token};
 use psi_tui::{Keymap, Line, Style};
 
 use crate::run_mode::{Prepared, RunArgs, prepare};
-use approver::TuiApprover;
 use complete::Completer;
 use ui::{App, AppParts, Notify};
 use view::Status;
@@ -203,7 +201,6 @@ pub fn run(args: RunArgs) -> Result<ExitCode> {
         .build()
         .context("starting the async runtime")?;
     let (ui_tx, mut ui_rx) = tokio::sync::mpsc::unbounded_channel();
-    let approver = Arc::new(TuiApprover { ui: ui_tx.clone() });
     let Prepared {
         agent,
         profile,
@@ -215,7 +212,7 @@ pub fn run(args: RunArgs) -> Result<ExitCode> {
         sessions,
         warnings,
         info,
-    } = rt.block_on(prepare(&args, approver))?;
+    } = rt.block_on(prepare(&args))?;
 
     let (ev_tx, ev_rx) = tokio::sync::mpsc::unbounded_channel();
     let agent = agent.with_events(ev_tx);

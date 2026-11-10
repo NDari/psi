@@ -1,4 +1,0 @@
-// The no-tail variant (evals/variants/README.md, H-07).
-{
-  "compaction": { "tail": 0 },
-}

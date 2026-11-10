@@ -5,6 +5,8 @@ Slash commands and keys in the interactive mode.
 - /rewind: go back to an earlier prompt, conversation and files.
 - /tree: move to another point in the conversation (files stay).
 - /diff: the session's file changes, by source. /show <n>: tool call n in full.
+- /plan [file]: have the model write the plan you discussed as a checklist. /run [file]:
+  carry out its open items, one task each in a fresh context (psi help plans).
 - /stats: tokens, timing, guards and refusals. /inspect: the session as a timeline.
 - /help, /inspect, /diff and /show open in $PAGER (less if unset).
 - /copy: the last answer to the clipboard; /copy code: its last code block (OSC 52;
