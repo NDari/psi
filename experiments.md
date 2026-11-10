@@ -46,22 +46,6 @@ Flags worth sweeping: `-fa`, `-b`/`-ub`, `-ctk`/`-ctv` (KV cache type), `-t`, `-
 - Matching definitions across languages is a heuristic; a rename shows up as a removal.
 - The owner isn't sure it's worth it yet.
 
-### Summaries without thinking (added 2026-11-05)
-
-**Question:** with thinking on, can a summary request turn thinking off, so the model doesn't think before it summarizes, and still reuse the server's cache?
-
-**Context:** the cog review with the 27B and thinking on (`qwen27b-t` flags, `~/.psi/sessions/-home-ndari-projects-cog-/2026-11-05-2246_87bc74da.*`): its one summary, at 47.2K tokens, reused the cache for 44.5K and read the rest in 12 s, then wrote 4,834 tokens at 20 tok/s, 236 s. The summary is 8.2K characters, about 2,000 tokens, so most of the output was thinking. With thinking off the same review's summary took 94 s (1,595 tokens).
-
-**The catch, from the 27B's template (Qwen3.8, read from `/props`):** thinking changes two places in the prompt. At the end, the generation prompt is `<think>\n` with thinking on and `<think>\n\n</think>\n\n` with it off; that part alone would keep the cache. But with thinking on (or not set) the template also puts a reasoning-effort line first in the system message, `xhigh` by default ("Reasoning effort is set to xhigh. Please think carefully through the task..."), so turning thinking off for one request changes the start of the prompt and the server reads all of it again: about 47K tokens, minutes at this model's reading speed, which costs more than the thinking saved. `reasoning_effort` low changes the same line, so it breaks the cache too.
-
-**How, if worth it:**
-- Check each model's template first: the 35B's (Qwen3.6) may differ only in the generation prompt. Where it does, send the summary request with `enable_thinking: false` and accept the small re-read at the end. Psi's `extends_request` and `cache_break` treat a different thinking setting as a break at the start (fit.rs), so they would need to know which part changes.
-- Or ask for a short summary think: an instruction in the summary request ("don't think at length") costs nothing in cache, but the model may ignore it.
-- Measure the summary time and its output tokens on a recorded request (`psi replay`), not in a run.
-
-**Open:**
-- Psi sends no `reasoning_effort`, so the 27B with thinking runs at its template's default, xhigh. Whether medium or low does as well on agent work with less thinking is a separate question; it changes the system prompt, so it would be set once per session, never per request.
-
 ### Not running an exact repeat (added 2026-11-09)
 
 **Question:** when the loop note fails and the model makes the same call again, should the harness not run it, and say so with the output it gave before?
@@ -130,6 +114,24 @@ Flags worth sweeping: `-fa`, `-b`/`-ub`, `-ctk`/`-ctv` (KV cache type), `-t`, `-
 
 The note, as a user message at the end: "[Note from psi] This task has made N requests and changed no file. You have read enough: make the change now with edit, then run the check." (N = 23 and 29).
 
+**Run 2026-11-10 with thinking on** (`qwen27b-t`: thinking on, the card's thinking sampling; `~/.psi/evals/2026-11-10-1213-cog-plan-qwen27b-t`), stopped by the owner at request 26 of task 1 after 54 minutes, so there is no grade:
+
+- **It edited.** Whole-file reads in batches for 14 requests, the first edit to `env.go` at request 15, the build and tests at 16 to 18, a second edit at 21, and `bare_words_test.go` written at 23. Without thinking the task never edited in 40 requests.
+- **It is slow:** about 2 minutes a request, against under 5 seconds without thinking.
+- **It filled the window in one task:** the context passed the trigger at request 20 (39K tokens, from reading whole files), and the summary failed, cut off by the output limit ("Summaries without thinking", under Done).
+- One run, not finished: it shows that thinking changes what the model does on this task, not how it ends.
+
+**The same two requests with thinking on (2026-11-10):** the server restarted as `just llm-up qwen27b-t`, and the recorded requests sent with `--set 'chat_template_kwargs={"enable_thinking":true}' --set temperature=1.0 --set top_p=0.95 --set presence_penalty=0.0` (the card's thinking sampling), 10 samples each, nothing appended.
+
+| Request | Next action |
+|---|---|
+| 24 | 10 read, search or run the tests (2 run `go build` and `go test`), 0 edit |
+| 30 | 10 read, search or run the tests (1 runs `go test`, 0 for `evalBlock`), 0 edit |
+
+- Thinking does not make it edit at these points: 0 of 20, as without it. The lookups differ (error handling, tests, `CallFrame`), and the hunt for `evalBlock` is gone at request 30.
+- A sample generated 47 to 3,184 tokens (the server's log; a call alone is about 70), so several thought for one to two minutes and then read on.
+- These requests carry a history written without thinking; a run with thinking from the start may not get here at all.
+
 - The hunt for `evalBlock` is one draw at request 24 and half the draws once it has started. Reading on without editing is what the model does there every time.
 - Told once that nothing is changed yet, it edits, in the function the step names. Whether the edit is right was not looked at.
 
@@ -152,6 +154,31 @@ Removed on 2026-11-10 with step 6 of `design-going-forward.md`; the full text is
 | An outline in place of a cleared read | 2026-11-05 | Clearing old results was cut. |
 
 ## Done
+
+### Summaries without thinking (added 2026-11-05)
+
+**Question:** with thinking on, can a summary request turn thinking off, so the model doesn't think before it summarizes, and still reuse the server's cache?
+
+**Context:** the cog review with the 27B and thinking on (`qwen27b-t` flags, `~/.psi/sessions/-home-ndari-projects-cog-/2026-11-05-2246_87bc74da.*`): its one summary, at 47.2K tokens, reused the cache for 44.5K and read the rest in 12 s, then wrote 4,834 tokens at 20 tok/s, 236 s. The summary is 8.2K characters, about 2,000 tokens, so most of the output was thinking. With thinking off the same review's summary took 94 s (1,595 tokens).
+
+**The catch, from the 27B's template (Qwen3.8, read from `/props`):** thinking changes two places in the prompt. At the end, the generation prompt is `<think>\n` with thinking on and `<think>\n\n</think>\n\n` with it off; that part alone would keep the cache. But with thinking on (or not set) the template also puts a reasoning-effort line first in the system message, `xhigh` by default ("Reasoning effort is set to xhigh. Please think carefully through the task..."), so turning thinking off for one request changes the start of the prompt and the server reads all of it again: about 47K tokens, minutes at this model's reading speed, which costs more than the thinking saved. `reasoning_effort` low changes the same line, so it breaks the cache too.
+
+**How, if worth it:**
+- Check each model's template first: the 35B's (Qwen3.6) may differ only in the generation prompt. Where it does, send the summary request with `enable_thinking: false` and accept the small re-read at the end. Psi's `extends_request` and `cache_break` treat a different thinking setting as a break at the start (fit.rs), so they would need to know which part changes.
+- Or ask for a short summary think: an instruction in the summary request ("don't think at length") costs nothing in cache, but the model may ignore it.
+- Measure the summary time and its output tokens on a recorded request (`psi replay`), not in a run.
+
+**Open:**
+- Psi sends no `reasoning_effort`, so the 27B with thinking runs at its template's default, xhigh. Whether medium or low does as well on agent work with less thinking is a separate question; it changes the system prompt, so it would be set once per session, never per request.
+
+**Built 2026-11-10.** In the cog plan trial with thinking on (`qwen27b-t`), the first summary was cut off by the 8,192-token output limit and failed, so the run went on without one. A summary request now goes out with `enable_thinking: false` whenever the profile has it on; everything else about the request is the same.
+
+- **The cost, checked with `/apply-template` on the 27B:** with thinking on the system message starts with "Reasoning effort is set to xhigh. ..."; with it off that line is gone. So the summary request does not reuse the server's cache and the context is read again (about 200 tokens a second on the Mac). That is about what the thinking cost before, and the summary arrives.
+- **Tried on the request that failed** (`psi replay` of wire request 20 of that trial with `--set 'chat_template_kwargs={"enable_thinking":false}'`, then the same body sent directly; the thinking sampling kept, one sample, seed 0): the summary arrived with no thinking (`reasoning_content` empty). It took 9.5 minutes: 257 s to read the 39.3K tokens again (153 tokens a second, nothing from the cache) and 312 s to write 6,664 tokens. The summary is 3,349 words where the instruction says under 936. Its last lines list about 18 test files as edited; the session shows two edits to `env.go` and one new file, so that list looks wrong (not checked line by line).
+- **So:** the change does its one job, a summary that arrives. It does not make a summary cheap with thinking on, and nothing more is planned here: the design's answer to costly summaries is tasks small enough not to need one. Not seen inside a live run.
+- **A way to keep the cache, not tried:** leave thinking on and end the request with an assistant message holding an empty think block. `/apply-template` renders that as a continuation with the system message unchanged (the think block appears twice). Whether the chat endpoint accepts it with thinking on, and whether the model then writes a summary, needs a replay.
+- **Reasoning effort:** `chat_template_kwargs.reasoning_effort` changes the system line too ("low": "Keep your thinking brief and focused..."), so it is a per-session setting, as noted above. Psi sends none.
+
 
 ### Does the loop note last? (added 2026-11-09)
 

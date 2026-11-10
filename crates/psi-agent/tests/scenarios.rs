@@ -49,13 +49,24 @@ impl Fixture {
         n_ctx: u64,
         max_result_chars: usize,
     ) -> Agent {
+        self.agent_thinking(budgets, tools, n_ctx, max_result_chars, None)
+    }
+
+    fn agent_thinking(
+        &self,
+        budgets: Budgets,
+        tools: Vec<psi_tools::Tool>,
+        n_ctx: u64,
+        max_result_chars: usize,
+        enable_thinking: Option<bool>,
+    ) -> Agent {
         let session = SessionFile::create(&self.sessions, &self.cwd).unwrap();
         let ctx = ToolCtx::new(&self.cwd, &self.cwd.join("../tmp"), max_result_chars);
         let cfg = AgentConfig {
             model: "local".into(),
             max_output: 512,
             n_ctx,
-            enable_thinking: None,
+            enable_thinking,
             sampling: Default::default(),
             budgets,
             system_prompt: "sys".into(),
@@ -742,6 +753,30 @@ async fn a_summary_extends_the_last_request_and_keeps_a_tail() {
     assert_eq!(tail[..], sum[sum.len() - 1 - tail.len()..sum.len() - 1]);
     // The session keeps everything.
     assert_eq!(tool_results(&a).len(), 31);
+}
+
+/// With thinking on, the summary request alone goes out with it off:
+/// thinking used up the output limit and cut a summary off (the 27B,
+/// 2026-11-10).
+#[tokio::test]
+async fn a_summary_is_asked_for_without_thinking() {
+    let f = Fixture::new(vec![read_at("f0.txt", 9500), text(SUMMARY), text("done")]);
+    write_files(&f.cwd, 1, 200);
+    let mut a = f.agent_thinking(Budgets::default(), core_tools(), 16_384, 7372, Some(true));
+    prefill(&mut a, 30);
+    let out = a.run("go on").await;
+    assert_eq!(out.stop, Stop::Done, "{:?} {:?}", out.stop, kinds(&a));
+    assert_eq!(compaction_info(&a)[0]["method"], "extend");
+    let reqs = f.server.chat_requests();
+    let thinking: Vec<_> = reqs
+        .iter()
+        .map(|r| r["chat_template_kwargs"]["enable_thinking"].clone())
+        .collect();
+    assert_eq!(thinking, [json!(true), json!(false), json!(true)]);
+    // Nothing else about the summary request changes.
+    let first = reqs[0]["messages"].as_array().unwrap();
+    let sum = reqs[1]["messages"].as_array().unwrap();
+    assert_eq!(sum[..first.len()], first[..]);
 }
 
 #[tokio::test]

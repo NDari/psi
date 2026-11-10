@@ -155,6 +155,7 @@ A summary is the safety net, not the engine: tasks are meant to be small enough 
 - **Trigger:** when the room left would fall below one answer plus one tool result, or usage passes 70% of the window, whichever comes first.
 - **One summary at a time.** Everything before a verbatim tail of 10K tokens is summarized; a later summary is written with the earlier one in view and takes its place.
 - **The request extends the last one (D-38):** the last real request unchanged, with the summary instruction appended, so the server reuses its prompt cache. If that can't work (no room, a tool call, a cut-off answer), a plain request built from text is the fallback.
+- **Without thinking:** when the profile has thinking on, the summary request alone goes out with it off, so thinking can't use up the output limit before the summary is written. On a chat template that puts the thinking setting in the system message (Qwen3.8), the server reads the context again for that request.
 - **Headings (H-17):** goal, constraints and facts, learned about the code, decisions, current state split into checked and not checked, corrections, open problems, next step.
 - **The harness adds its own record** after the summary: files read and changed, and the last post-edit check. Then one line tells the model to go on from the summary's next step.
 - **A limit:** a run gets 2 summaries; when the context fills again it stops and says the work is too big for one run.

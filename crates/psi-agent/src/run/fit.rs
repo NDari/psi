@@ -311,7 +311,20 @@ impl Agent {
 
     /// Sends a summary request; its text is not streamed anywhere, but how
     /// far the server has read the prompt is, for the spinner.
+    ///
+    /// A summary goes out with thinking off when the profile has it on:
+    /// thinking before a summary used the whole output limit and cut the
+    /// summary off (the 27B, 2026-11-10), and took most of its time before
+    /// that (236 s against 94 s, 2026-11-05). Where the chat template puts
+    /// the thinking setting in the system message (Qwen3.8), the server
+    /// reads the context again for this request instead of reusing its
+    /// cache: a known cost, taken for a summary that arrives.
     async fn summary_request(&self, req: &ChatRequest) -> Result<Response, AiError> {
+        let mut req = req.clone();
+        if req.enable_thinking == Some(true) {
+            req.enable_thinking = Some(false);
+        }
+        let req = &req;
         let events = self.events.clone();
         let mut on_delta = move |d: Delta| {
             if let (
