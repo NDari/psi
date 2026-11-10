@@ -1393,5 +1393,27 @@ fn plan_and_run_write_and_carry_out_a_checklist() {
     // The task's context was fresh: the plan and the item, not the chat.
     let task = s.chat_requests()[1]["messages"].to_string();
     assert!(task.contains("[Task from psi]") && !task.contains("The plan is in plan.md."));
+    // The view per task: the list, one task's changes, and going back.
+    t.wait_for(
+        "/tasks lists the tasks; /diff task <n> and /undo task <n> work on one",
+        SLOW,
+    );
+    t.typ("/tasks\r");
+    t.wait_for("   1  done  Write a.txt", SLOW);
+    t.wait_for("1 file (plan.md item 1)", SLOW);
+    let n = t.takes();
+    t.typ("/diff task 1\r");
+    t.wait_paged("▌ by task 1: Write a.txt", SLOW);
+    t.wait_paged("+a", SLOW);
+    t.wait_back(n, SLOW);
+    t.typ("/undo task 2\r");
+    t.wait_for("there is no task 2: this session has 1 task", SLOW);
+    t.typ("/undo task 1\r");
+    t.wait_for("undo task 1: 1 files written, 1 deleted", SLOW);
+    assert!(!t.project.join("a.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(t.project.join("plan.md")).unwrap(),
+        "# Plan\n\n- [ ] Write a.txt\n"
+    );
     t.quit();
 }

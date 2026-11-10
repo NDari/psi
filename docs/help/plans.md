@@ -18,10 +18,13 @@ What a run does, for each open item in order:
   Otherwise the item stays open, the report says why, and the run stops there. Run it
   again to retry that item; /undo takes its changes back first if you want.
 
+Afterwards: /tasks lists the session's tasks; /diff task <n> shows what one changed;
+/undo task <n> puts files, git refs and the plan's ticks back to before task n (and so
+the tasks after it). Plain /undo steps back one task at a time.
+
 Limits: each task gets the "limits" setting (requests, tool_calls, summaries). A task
 that fills the context window more often than "summaries" allows is too big: split the
 item. A run never waits for an answer; at a limit it stops with the reason.
 
-A plan is any markdown file; checklist lines inside code fences are not items. Edit it
-freely between runs: add, reorder or reword items, or untick one to do it again.
-psi run exits 0 when every item is done, 3 when a task stopped, 1 when one failed.
+A plan is any markdown file (lines inside code fences are not items). Edit it between
+runs: add or reword items, untick one to redo it. psi run exits 0 when all are done.

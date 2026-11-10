@@ -27,6 +27,12 @@ pub enum Cmd {
     /// `!cmd` output to add to the context of the next prompt.
     Context(String),
     Undo,
+    /// The session's tasks (/tasks).
+    Tasks,
+    /// What the session's n-th task changed (/diff task n).
+    TaskDiff(usize),
+    /// Back to before the session's n-th task (/undo task n).
+    UndoTask(usize),
     /// Move the conversation (and with `files`, the files) to an entry.
     Goto {
         id: String,
@@ -89,6 +95,15 @@ impl Worker {
                     Err(e) => UiMsg::Error(e),
                 },
                 Cmd::Undo => self.undo(),
+                Cmd::Tasks => UiMsg::Tasks(recovery::tasks(self.agent.session())),
+                Cmd::TaskDiff(n) => match self.checkpoints() {
+                    Ok(cp) => match recovery::task_diff(self.agent.session(), &cp, n) {
+                        Ok(change) => UiMsg::Diff(vec![change]),
+                        Err(e) => UiMsg::Error(e),
+                    },
+                    Err(m) => *m,
+                },
+                Cmd::UndoTask(n) => self.undo_task(n),
                 Cmd::Goto { id, files } => self.goto(&id, files),
                 Cmd::Diff => self.diff(),
                 Cmd::Label { id, label } => {
@@ -162,6 +177,30 @@ impl Worker {
             Ok(None) => UiMsg::Info(
                 "nothing to undo: the files and branch tips match every earlier prompt".into(),
             ),
+            Err(e) => UiMsg::Error(format!("undo failed: {e}")),
+        }
+    }
+
+    fn undo_task(&mut self, n: usize) -> UiMsg {
+        let cp = match self.checkpoints() {
+            Ok(c) => c,
+            Err(m) => return *m,
+        };
+        match recovery::undo_task(self.agent.session_mut(), &cp, n) {
+            Ok((r, undone)) => UiMsg::Restored {
+                what: match undone {
+                    1 => format!("undo task {n}"),
+                    _ => format!("undo task {n} and the {} after it", undone - 1),
+                },
+                written: r.written.len(),
+                deleted: r.deleted.len(),
+                refs: r.refs.len(),
+                left_alone: r
+                    .left_alone
+                    .iter()
+                    .map(|(p, why)| format!("{} ({why})", p.display()))
+                    .collect(),
+            },
             Err(e) => UiMsg::Error(format!("undo failed: {e}")),
         }
     }

@@ -190,6 +190,53 @@ async fn a_plan_runs_one_item_at_a_time_each_in_a_fresh_context() {
     );
 }
 
+/// The view per task (design-going-forward.md, goal 3): what each task
+/// changed, and going back to before one, from the checkpoints its report
+/// recorded.
+#[tokio::test]
+async fn a_tasks_changes_can_be_seen_and_taken_back() {
+    use psi_agent::recovery::{task_diff, tasks, undo_task};
+    let fx = Fx::new();
+    let server = ReplayServer::start(vec![
+        write("hello.txt", "hello\n"),
+        text("done"),
+        write("bye.txt", "bye\n"),
+        text("done"),
+    ])
+    .unwrap();
+    let mut a = fx.agent(&server, Budgets::default());
+    assert!(a.run_plan(Path::new("plan.md")).await.complete);
+    let cp = a.safety().checkpoints.clone().unwrap();
+    let all = tasks(a.session());
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[1].item, "Write bye.txt");
+
+    // One task's changes, not the session's.
+    let second = task_diff(a.session(), &cp, 2).unwrap();
+    assert_eq!(second.source, "by task 2: Write bye.txt");
+    assert!(
+        second.diff.contains("+bye") && !second.diff.contains("hello"),
+        "{}",
+        second.diff
+    );
+    assert_eq!(
+        task_diff(a.session(), &cp, 3).unwrap_err(),
+        "there is no task 3: this session has 2 tasks"
+    );
+
+    // Back to before the second task: its file goes, and its tick with it.
+    let (_, undone) = undo_task(a.session_mut(), &cp, 2).unwrap();
+    assert_eq!(undone, 1);
+    assert!(fx.root.join("hello.txt").exists() && !fx.root.join("bye.txt").exists());
+    assert_eq!(fx.plan(), PLAN.replacen("- [ ]", "- [x]", 1));
+    // Back to before the first: both tasks, and the plan as it was written.
+    let (r, undone) = undo_task(a.session_mut(), &cp, 1).unwrap();
+    assert_eq!(undone, 2);
+    assert!(!fx.root.join("hello.txt").exists());
+    assert_eq!(fx.plan(), PLAN);
+    assert!(r.deleted.iter().any(|p| p.ends_with("hello.txt")));
+}
+
 #[tokio::test]
 async fn a_failed_check_leaves_the_item_open_and_stops_the_plan() {
     let fx = Fx::new();

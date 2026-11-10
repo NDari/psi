@@ -117,6 +117,65 @@ fn record_restore(session: &mut SessionFile, cp: &Checkpoints, _r: &Restore) -> 
     Ok(())
 }
 
+/// The tasks of plans carried out in this session, in order
+/// (`crate::plan`): what /tasks lists, and what `/diff task N` and
+/// `/undo task N` count from 1.
+pub fn tasks(session: &SessionFile) -> Vec<crate::plan::TaskReport> {
+    session
+        .branch()
+        .iter()
+        .filter_map(|e| match &e.body {
+            EntryBody::Custom { custom_type, data } if custom_type == crate::plan::TASK_REPORT => {
+                serde_json::from_value(data.clone()).ok()
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn task(session: &SessionFile, n: usize) -> Result<crate::plan::TaskReport, String> {
+    let all = tasks(session);
+    let count = all.len();
+    all.into_iter()
+        .nth(n.wrapping_sub(1))
+        .ok_or_else(|| match count {
+            0 => "no task was carried out in this session (/run starts a plan)".to_owned(),
+            1 => format!("there is no task {n}: this session has 1 task"),
+            _ => format!("there is no task {n}: this session has {count} tasks"),
+        })
+}
+
+/// `/diff task N`: what the session's `n`-th task changed, between the
+/// checkpoints at its start and end.
+pub fn task_diff(session: &SessionFile, cp: &Checkpoints, n: usize) -> Result<Change, String> {
+    let t = task(session, n)?;
+    let (Some(from), Some(to)) = (&t.from, &t.to) else {
+        return Err(format!("task {n} has no checkpoints (they were off)"));
+    };
+    Ok(Change {
+        source: format!("by task {n}: {}", t.item),
+        diff: cp.diff(from, to).map_err(|e| e.to_string())?,
+    })
+}
+
+/// `/undo task N`: restores the files and the project's branch tips to
+/// where they were when the session's `n`-th task started, which takes
+/// back that task and the ones after it (the plan file's ticks with them:
+/// it is in the workspace). Returns the restore and how many tasks went.
+pub fn undo_task(
+    session: &mut SessionFile,
+    cp: &Checkpoints,
+    n: usize,
+) -> Result<(Restore, usize), String> {
+    let t = task(session, n)?;
+    let Some(from) = t.from else {
+        return Err(format!("task {n} has no checkpoint to go back to"));
+    };
+    let undone = tasks(session).len() + 1 - n;
+    let r = restore(session, cp, &from, "undo")?;
+    Ok((r, undone))
+}
+
 /// One source of changes for /diff: what changed between two checkpoints.
 #[derive(Debug, Clone)]
 pub struct Change {

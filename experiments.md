@@ -184,6 +184,25 @@ Flags worth sweeping: `-fa`, `-b`/`-ub`, `-ctk`/`-ctv` (KV cache type), `-t`, `-
 - Draft acceptance with MTP falls as sampling loosens, so each try is slower.
 - If it works, where it goes: before the nudge (the harness quietly asks again), or after the note fails.
 
+### After a summary the model goes on with what the kept tail shows, not the summary's next step (added 2026-11-09)
+
+**Question:** in the first trial of `cog_bare_words` (Qwen3.8 27B, `~/.psi/evals/2026-11-10-0338-cog-bare-words-qwen27b`, MODEL-FAIL, 118 requests, no file edited), both summaries ended with a sound next step (reproduce the case, then change `evalWord` in `env.go`) and the model took it neither time: it went back to reading docs, looped on seven of them until the loop note at request 49, and read code in small slices until the context filled a third time. Why does it not go on from its own summary?
+
+**How (2026-11-09, `psi replay`, no script):** the request right after the first summary (wire request 29) holds the summary, the harness's record, the user's request repeated, and the kept tail: one call, a read of `plan/design-review.md`, and its result (29.5K characters, cut off with more to read). Sent again 10 times each way:
+
+| The request | Next action, of 10 |
+|---|---|
+| as recorded | 10 read the rest of the same doc (`offset: 592`) |
+| the tail removed (`--drop-last 2`) | 8 build cog and run the reproducer, 2 read `env.go`: the summary's next step |
+| a line added after the tail (`--append "[Note from psi] Earlier messages were replaced by your summary above. Go on from its Next step."`) | 10 build cog and run the reproducer |
+
+**So:** the kept tail decides. It is the latest thing in the context and shows the model in the middle of reading a doc, with a result that says there is more; the summary's plan is 10K characters above it. One line after the tail turns all 10 samples to the plan. Removing the tail does nearly the same and costs the tail's content.
+
+**Open:**
+- One step, one recording. The loop note looked as good in a one-step replay and held in 1 of 3 live runs ("Does the loop note last?", below). It needs a live run or two before it is believed, and the same check on another recording.
+- Which fix, if it holds: the line after the tail (cheap; it keeps the tail, so the cache-reusing summary request and the tail's content stay), or no tail when its last result is a cut-off read. The design's rule is to work around first and change the harness when a problem comes back on ordinary tasks; this is the first ordinary task it showed on.
+- The same trial is the case for plans: as one prompt the work filled the window three times. Try it as a plan (`/plan`, `/run`) before reading too much into the summary.
+
 ## Done
 
 ### Does the loop note last? (added 2026-11-09)

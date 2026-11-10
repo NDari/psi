@@ -39,6 +39,7 @@ yours.
 - [ ] `/` at the start lists commands; Up/Down put the selection in the box (what the box shows is what Enter runs); Tab accepts; Esc closes. (auto)
 - [ ] `@` lists files fuzzily, .gitignore-aware; Tab inserts the path. (auto)
 - [ ] `/plan` after talking a change through makes the model write `plan.md` with a checklist; `/run` carries out each open item under a `▌ task n of m` header, shows a report after each (ended, changed, check, counts, ticked or left open) and a `plan:` line at the end; the file's boxes are ticked. Esc during a task stops the plan and leaves the item open. (auto: one item)
+- [ ] After a `/run`: `/tasks` lists each task with done or open, files and check; `/diff task 1` pages that task's changes only; `/undo task 1` restores the files and unticks the plan; a number that isn't there says how many tasks there are. (auto)
 - [ ] A run that loops (the same calls again and again) goes on once with a note, then stops with `stopped: ...`; nothing asks, and typing "go on" starts a new run.
 - [ ] A refused command (ask the model to `git push`) shows `refused: ...` under the call and no card; the run goes on. (auto)
 - [ ] A blocked write (try `echo x > /etc/psi-test` in bash via the model) fails with "Blocked: ..." in the result and no card.

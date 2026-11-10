@@ -94,6 +94,11 @@ pub enum Event {
         decision: String,
         reason: String,
     },
+    /// A task of a plan: its start (`task 2 of 5: ...`), or the harness's
+    /// report of it at its end.
+    Task {
+        text: String,
+    },
     /// The user's `/label`, where it was written: after the entry it marks.
     Label {
         text: String,
@@ -140,6 +145,23 @@ pub fn timeline(rec: &Record) -> Timeline {
                 }
                 "server" => model = data["model_file"].as_str().map(str::to_owned),
                 "eval_end" => step_cap_hit |= data["step_cap_hit"] == Value::Bool(true),
+                "task_start" => events.push(Event::Task {
+                    text: format!(
+                        "task {} of {}: {}",
+                        data["n"],
+                        data["total"],
+                        data["item"].as_str().unwrap_or("?")
+                    ),
+                }),
+                "task_report" => {
+                    if let Ok(r) = serde_json::from_value::<psi_agent::TaskReport>(data.clone()) {
+                        // The report without its title line, which the start gave.
+                        let lines: Vec<String> = r.lines().into_iter().skip(1).collect();
+                        events.push(Event::Task {
+                            text: format!("task {} report:\n{}", r.n, lines.join("\n")),
+                        });
+                    }
+                }
                 "subagent" => events.push(Event::Guard {
                     guard: "subagent".into(),
                     message: format!(
@@ -461,7 +483,9 @@ impl Filter {
             return matches!(ev, Event::Step(s) if s.n == n);
         }
         // The user's marks show in every filtered view.
-        if !(self.failures || self.guards || self.blocked) || matches!(ev, Event::Label { .. }) {
+        if !(self.failures || self.guards || self.blocked)
+            || matches!(ev, Event::Label { .. } | Event::Task { .. })
+        {
             return true;
         }
         (self.failures
@@ -559,6 +583,9 @@ pub fn render_text(t: &Timeline, full: bool) -> String {
             }
             Event::Label { text } => {
                 let _ = writeln!(s, "\nlabel: {}", cut(text, width));
+            }
+            Event::Task { text } => {
+                let _ = writeln!(s, "\n{text}");
             }
         }
     }

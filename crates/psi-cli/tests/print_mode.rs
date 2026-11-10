@@ -817,6 +817,26 @@ fn psi_run_carries_out_a_plan_and_reports_each_task() {
         std::fs::read_to_string(e.project.join("plan.md")).unwrap(),
         plan.replace("- [ ] Write a.txt", "- [x] Write a.txt")
     );
+    // The session's timeline has the tasks and the harness's reports.
+    let session = sessions(&e).pop().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_psi"))
+        .arg("inspect")
+        .arg(&session)
+        .output()
+        .unwrap();
+    let timeline = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        timeline.contains("\ntask 2 of 3: Write a.txt\n"),
+        "{timeline}"
+    );
+    assert!(
+        timeline.contains("\ntask 2 report:\n  ended: by itself\n  changed: 1 file (A a.txt)\n"),
+        "{timeline}"
+    );
+    assert!(
+        timeline.contains("\ntask 3 report:\n  ended: stopped: reached the limit"),
+        "{timeline}"
+    );
     // Nothing left to do is a success; a prompt with it is an error.
     std::fs::write(e.project.join("done.md"), "- [x] all\n").unwrap();
     let out = psi(&e, &["run", "done.md"]);

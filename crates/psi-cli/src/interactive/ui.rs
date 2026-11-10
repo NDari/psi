@@ -57,6 +57,8 @@ pub enum UiMsg {
     },
     Moved(String),
     Diff(Vec<Change>),
+    /// The session's tasks (/tasks).
+    Tasks(Vec<psi_agent::TaskReport>),
     Entries {
         entries: Vec<Entry>,
         leaf: Option<String>,
@@ -81,7 +83,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/help", "list the commands and keys"),
     (
         "/undo",
-        "restore the files to before the last prompt that changed them",
+        "restore the files to before the last prompt or task that changed them; /undo task <n>: to before task n",
     ),
     (
         "/rewind",
@@ -91,7 +93,14 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "/tree",
         "move to another point in the conversation (files stay)",
     ),
-    ("/diff", "the session's changes, by source"),
+    (
+        "/diff",
+        "the session's changes, by source; /diff task <n>: what task n changed",
+    ),
+    (
+        "/tasks",
+        "the tasks of plans carried out in this session, each with how it ended",
+    ),
     ("/show", "a tool call in full: /show <n>"),
     (
         "/compact",
@@ -994,6 +1003,16 @@ impl<W: Write> App<W> {
             name,
             "undo" | "rewind" | "tree" | "new" | "resume" | "compact" | "run" | "plan"
         );
+        // `/diff task 2`, `/undo task 2`: the number of a task, as /tasks lists them.
+        let task_arg = match arg.strip_prefix("task") {
+            Some(rest) if matches!(name, "undo" | "diff") => match rest.trim().parse::<usize>() {
+                Ok(n) if n > 0 => Some(n),
+                _ => {
+                    return self.error(&format!("/{name} task <n>: the task's number in /tasks"));
+                }
+            },
+            _ => None,
+        };
         if busy && needs_idle {
             return self.error(&format!("/{name} waits until the run ends (Esc aborts it)"));
         }
@@ -1023,13 +1042,20 @@ impl<W: Write> App<W> {
                 self.page(lines);
             }
             "quit" | "exit" | "q" => self.quit = true,
-            "undo" => self.send(Cmd::Undo),
+            "undo" => match task_arg {
+                Some(n) => self.send(Cmd::UndoTask(n)),
+                None => self.send(Cmd::Undo),
+            },
+            "tasks" => self.send(Cmd::Tasks),
             "compact" => {
                 // A run of its own, so the spinner shows and Esc stops it.
                 self.running = Some(Running::new(true));
                 self.send(Cmd::Compact(arg.to_owned()));
             }
-            "diff" => self.send(Cmd::Diff),
+            "diff" => match task_arg {
+                Some(n) => self.send(Cmd::TaskDiff(n)),
+                None => self.send(Cmd::Diff),
+            },
             "plan" => {
                 let file = if arg.is_empty() { "plan.md" } else { arg };
                 self.send_prompt(plan_request(file), false);
@@ -1181,7 +1207,13 @@ impl<W: Write> App<W> {
                 } else {
                     theme::style(Token::Warning)
                 };
-                self.commit(vec![Line::styled(format!("  plan: {end}"), style)]);
+                self.commit(vec![
+                    Line::styled(format!("  plan: {end}"), style),
+                    Line::styled(
+                        "  /tasks lists the tasks; /diff task <n> and /undo task <n> work on one",
+                        dim(),
+                    ),
+                ]);
                 self.bell(&format!("plan: {end}"));
             }
             UiMsg::Info(s) => self.info(&format!("  {s}")),
@@ -1213,6 +1245,47 @@ impl<W: Write> App<W> {
                 self.info(&s);
             }
             UiMsg::Moved(id) => self.info(&format!("  the conversation continues from {id}")),
+            UiMsg::Tasks(tasks) => {
+                if tasks.is_empty() {
+                    return self
+                        .info("  no task was carried out in this session (/run starts a plan)");
+                }
+                let mut lines = vec![Line::default()];
+                for (i, t) in tasks.iter().enumerate() {
+                    let (mark, style) = if t.ticked {
+                        ("done", theme::style(Token::Success))
+                    } else {
+                        ("open", theme::style(Token::Warning))
+                    };
+                    let mut l = Line::default();
+                    l.push(format!("  {:>2}  ", i + 1), dim());
+                    l.push(mark, style);
+                    l.push(format!("  {}", t.item), Style::default());
+                    lines.push(l);
+                    let mut facts = match t.changed.len() {
+                        0 => "changed nothing".to_owned(),
+                        1 => "1 file".to_owned(),
+                        n => format!("{n} files"),
+                    };
+                    match &t.check {
+                        Some(c) if c.passed => facts.push_str(", check passed"),
+                        Some(_) => facts.push_str(", check failed"),
+                        None => {}
+                    }
+                    if let Some(why) = &t.open_because {
+                        facts.push_str(&format!("; left open: {why}"));
+                    }
+                    lines.push(Line::styled(
+                        format!("            {facts} ({} item {})", t.plan, t.n),
+                        dim(),
+                    ));
+                }
+                lines.push(Line::styled(
+                    "  /diff task <n> shows what one changed; /undo task <n> goes back to before it",
+                    dim(),
+                ));
+                self.commit(lines);
+            }
             UiMsg::Diff(changes) => {
                 if changes.is_empty() {
                     return self.info("  no changes in this session");
