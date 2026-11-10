@@ -43,8 +43,6 @@ pub struct Completer {
     kind: Option<Kind>,
     /// The box just took a selection; the next update keeps the list.
     hold: bool,
-    /// Extension commands: (name with the slash, description).
-    pub extra: Vec<(String, String)>,
 }
 
 impl Completer {
@@ -56,7 +54,6 @@ impl Completer {
             items: Vec::new(),
             kind: None,
             hold: false,
-            extra: Vec::new(),
         }
     }
 
@@ -87,8 +84,7 @@ impl Completer {
             self.kind = Some(Kind::Command);
             let all = COMMANDS
                 .iter()
-                .map(|(c, d)| ((*c).to_owned(), (*d).to_owned()))
-                .chain(self.extra.iter().cloned());
+                .map(|(c, d)| ((*c).to_owned(), (*d).to_owned()));
             self.items = all
                 .filter(|(c, _)| c.starts_with(word) && c != word)
                 .map(|(c, d)| Item {

@@ -34,7 +34,7 @@ impl Fixture {
     }
 
     fn agent(&self, budgets: Budgets) -> Agent {
-        self.agent_with(budgets, core_tools(false))
+        self.agent_with(budgets, core_tools())
     }
 
     fn agent_with(&self, budgets: Budgets, tools: Vec<psi_tools::Tool>) -> Agent {
@@ -500,7 +500,7 @@ async fn context_overflow_drops_old_turns_and_retries() {
     replies.push(text("done"));
     let f = Fixture::new(replies);
     // A window the harness thinks is large: only the server's overflow cuts.
-    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 1 << 20, 20_000);
+    let mut a = f.agent_sized(Budgets::default(), core_tools(), 1 << 20, 20_000);
     let out = a.run("count").await;
     assert_eq!(out.stop, Stop::Done, "{:?}", out.stop);
     let reqs = f.server.chat_requests();
@@ -550,93 +550,6 @@ fn kinds(a: &Agent) -> Vec<String> {
         .collect()
 }
 
-/// Clearing old results is off by default (§7.4, 2026-11-05); these
-/// tests cover it for when it is turned on.
-fn clearing_on(a: Agent) -> Agent {
-    a.with_compaction(psi_agent::CompactionSettings {
-        clear: true,
-        ..Default::default()
-    })
-}
-
-#[tokio::test]
-async fn old_tool_results_are_cleared_past_the_trigger() {
-    let mut replies = reads(8);
-    replies.push(text("done"));
-    let f = Fixture::new(replies);
-    // 250 lines: about the size 200 numbered lines were before read
-    // dropped its line numbers, so the trigger falls at the same step.
-    write_files(&f.cwd, 8, 250);
-    let mut a = clearing_on(f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372));
-    let out = a.run("read the files").await;
-    assert_eq!(out.stop, Stop::Done, "{:?}", out.stop);
-    // One batch, once past the trigger, down to 30% of the window (four
-    // of the five older results); no summary was needed.
-    assert_eq!(kinds(&a)[7], "cleared 4", "{:?}", kinds(&a));
-    assert!(!kinds(&a).contains(&"compaction".to_owned()));
-    let freed: Vec<u64> = a
-        .session()
-        .entries()
-        .iter()
-        .filter_map(|e| match &e.body {
-            EntryBody::ClearedResults { tokens_freed, .. } => Some(*tokens_freed),
-            _ => None,
-        })
-        .collect();
-    assert!(freed.iter().all(|&t| t >= 16_384 / 10), "{freed:?}");
-    let reqs = f.server.chat_requests();
-    let last = reqs.last().unwrap()["messages"].as_array().unwrap();
-    let results: Vec<&str> = last
-        .iter()
-        .filter(|m| m["role"] == "tool")
-        .map(|m| m["content"].as_str().unwrap())
-        .collect();
-    assert_eq!(results.len(), 8);
-    assert_eq!(
-        results[0],
-        "(Result cleared to save context: read f0.txt, 250 lines. Run it again if you need it.)"
-    );
-    // The most recent are sent whole, and the session keeps them all.
-    for r in &results[5..] {
-        assert!(r.contains("line 249"), "{r}");
-    }
-    assert!(tool_results(&a).iter().all(|(t, _)| t.contains("line 249")));
-}
-
-/// Clearing that leaves about what a summary would is enough, though it
-/// doesn't reach 30% of the window (the cog trial: at 64K Psi summarized
-/// at every trigger, when clearing alone would have done as well).
-#[tokio::test]
-async fn clearing_that_matches_a_summary_is_used_instead_of_one() {
-    let mut replies = reads(5);
-    replies.push(text("done"));
-    let f = Fixture::new(replies);
-    write_files(&f.cwd, 5, 350);
-    let mut a = clearing_on(f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372));
-    let out = a.run("read the files").await;
-    assert_eq!(out.stop, Stop::Done, "{:?}", out.stop);
-    let k = kinds(&a);
-    assert!(k.contains(&"cleared 2".to_owned()), "{k:?}");
-    assert!(!k.contains(&"compaction".to_owned()), "{k:?}");
-    // No summary request: five reads and the answer.
-    assert_eq!(f.server.chat_requests().len(), 6);
-    // It left more than 30% of the window: the old rule would have summarized.
-    let left: Vec<u64> = a
-        .session()
-        .entries()
-        .iter()
-        .filter_map(|e| match &e.body {
-            EntryBody::ClearedResults {
-                tokens_before,
-                tokens_freed,
-                ..
-            } => Some(tokens_before - tokens_freed),
-            _ => None,
-        })
-        .collect();
-    assert!(left.iter().all(|&t| t > 16_384 * 3 / 10), "{left:?}");
-}
-
 #[tokio::test]
 async fn a_step_keeps_only_the_results_the_context_can_hold() {
     // Six full reads at once in a 16K window (the 2026-11-01 re-read
@@ -655,10 +568,12 @@ async fn a_step_keeps_only_the_results_the_context_can_hold() {
             ..Default::default()
         }),
         call("read", json!({"path": "f3.txt"})),
+        // The fourth read passes the trigger: a summary, then the answer.
+        text(SUMMARY),
         text("done"),
     ]);
     write_files(&f.cwd, 6, 430);
-    let mut a = clearing_on(f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372));
+    let mut a = f.agent_sized(Budgets::default(), core_tools(), 16_384, 7372);
     let out = a.run("read the files").await;
     assert_eq!(out.stop, Stop::Done, "{:?}", out.stop);
     let r = tool_results(&a);
@@ -681,7 +596,7 @@ async fn a_step_keeps_only_the_results_the_context_can_hold() {
             .count(),
         1
     );
-    // The three it kept reach the model whole, not cleared.
+    // The three it kept reach the model whole.
     let reqs = f.server.chat_requests();
     let next: Vec<&str> = reqs[1]["messages"]
         .as_array()
@@ -770,7 +685,7 @@ const SUMMARY: &str =
 async fn compact_with_a_focus_extending_the_last_request_keeps_the_focus() {
     let f = Fixture::new(vec![text("ok"), text(SUMMARY)]);
     write_files(&f.cwd, 1, 200);
-    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    let mut a = f.agent_sized(Budgets::default(), core_tools(), 16_384, 7372);
     prefill(&mut a, 25);
     assert_eq!(a.run("go on").await.stop, Stop::Done);
     a.compact_now(Some("the parser")).await.unwrap();
@@ -791,7 +706,7 @@ async fn compact_with_a_focus_extending_the_last_request_keeps_the_focus() {
 async fn a_summary_extends_the_last_request_and_keeps_a_tail() {
     let f = Fixture::new(vec![read_at("f0.txt", 9500), text(SUMMARY), text("done")]);
     write_files(&f.cwd, 1, 200);
-    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    let mut a = f.agent_sized(Budgets::default(), core_tools(), 16_384, 7372);
     prefill(&mut a, 30);
     let out = a.run("go on").await;
     assert_eq!(out.stop, Stop::Done, "{:?} {:?}", out.stop, kinds(&a));
@@ -829,11 +744,10 @@ async fn the_compaction_setting_sets_the_tail_and_the_summary_form() {
     ]);
     write_files(&f.cwd, 1, 200);
     let mut a = f
-        .agent_sized(Budgets::default(), core_tools(false), 16_384, 7372)
+        .agent_sized(Budgets::default(), core_tools(), 16_384, 7372)
         .with_compaction(psi_agent::CompactionSettings {
             tail: Some(0),
             summary: psi_agent::SummaryForm::Free,
-            ..Default::default()
         });
     prefill(&mut a, 30);
     let out = a.run("go on").await;
@@ -867,7 +781,7 @@ async fn a_summary_falls_back_to_a_plain_request() {
         text("done"),
     ]);
     write_files(&f.cwd, 1, 200);
-    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    let mut a = f.agent_sized(Budgets::default(), core_tools(), 16_384, 7372);
     prefill(&mut a, 30);
     let out = a.run("go on").await;
     assert_eq!(out.stop, Stop::Done, "{:?}", out.stop);
@@ -911,7 +825,7 @@ async fn summarizing_again_and_again_without_changes_pauses() {
     replies.push(text("not reached"));
     let f = Fixture::new(replies);
     write_files(&f.cwd, 12, 200);
-    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    let mut a = f.agent_sized(Budgets::default(), core_tools(), 16_384, 7372);
     prefill(&mut a, 30);
     let out = a.run("go on").await;
     assert_eq!(
@@ -942,7 +856,7 @@ async fn summarizing_often_while_writing_files_doesnt_pause() {
     }
     replies.push(text("done"));
     let f = Fixture::new(replies);
-    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    let mut a = f.agent_sized(Budgets::default(), core_tools(), 16_384, 7372);
     prefill(&mut a, 30);
     let out = a.run("go on").await;
     assert_eq!(out.stop, Stop::Done, "{:?} {:?}", out.stop, kinds(&a));
@@ -963,7 +877,7 @@ async fn a_failed_summary_is_recorded_and_not_retried_at_once() {
         text("done"),
     ]);
     write_files(&f.cwd, 1, 200);
-    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    let mut a = f.agent_sized(Budgets::default(), core_tools(), 16_384, 7372);
     prefill(&mut a, 30);
     let out = a.run("go on").await;
     assert_eq!(out.stop, Stop::Done, "{:?} {:?}", out.stop, kinds(&a));
@@ -975,45 +889,6 @@ async fn a_failed_summary_is_recorded_and_not_retried_at_once() {
     );
     assert!(!k.contains(&"compaction".to_owned()), "{k:?}");
     assert_eq!(f.server.chat_requests().len(), 5);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn an_extension_can_stop_compaction() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(
-        dir.path().join("keep.lua"),
-        r#"return { name = "keep", version = "1", description = "keeps the history",
-          setup = function(psi)
-            psi.on("session_before_compact", function(ev)
-              return { cancel = true }
-            end)
-          end }"#,
-    )
-    .unwrap();
-    let (ui, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let sources = vec![psi_ext::Source::Lua(dir.path().join("keep.lua"))];
-    let (ext, errors) = tokio::task::spawn_blocking(move || {
-        psi_ext::ExtManager::start(
-            &sources,
-            std::sync::Arc::default(),
-            psi_ext::Limits::default(),
-            ui,
-        )
-    })
-    .await
-    .unwrap();
-    assert!(errors.is_empty(), "{errors:?}");
-    let f = Fixture::new(vec![read_at("f0.txt", 9500), text("done")]);
-    write_files(&f.cwd, 1, 200);
-    let mut a = f
-        .agent_sized(Budgets::default(), core_tools(false), 16_384, 7372)
-        .with_extensions(ext);
-    prefill(&mut a, 30);
-    let out = a.run("go on").await;
-    assert_eq!(out.stop, Stop::Done, "{:?}", out.stop);
-    // No summary was asked for; the run went straight on.
-    assert_eq!(f.server.chat_requests().len(), 2);
-    assert!(!kinds(&a).contains(&"compaction".to_owned()));
 }
 
 #[tokio::test]
@@ -1030,7 +905,7 @@ async fn summaries_chain_and_the_oldest_merge() {
         text("done"),
     ]);
     write_files(&f.cwd, 2, 200);
-    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    let mut a = f.agent_sized(Budgets::default(), core_tools(), 16_384, 7372);
     prefill(&mut a, 30);
     let out = a.run("go on").await;
     assert_eq!(out.stop, Stop::Done, "{:?} {:?}", out.stop, kinds(&a));
@@ -1065,95 +940,16 @@ async fn summaries_chain_and_the_oldest_merge() {
 }
 
 #[tokio::test]
-async fn old_results_are_cleared_where_the_cache_breaks_anyway() {
-    // Below the trigger nothing is cleared while each request extends the
-    // last; when the tool list changes (here plan mode drops write and
-    // edit), the server reads everything again, so old results are cleared
-    // then, for free, down to the clearing target.
-    let mut replies = reads(6);
-    replies.push(text("read them"));
-    replies.push(text("still here"));
-    replies.push(text("planned"));
-    let f = Fixture::new(replies);
-    write_files(&f.cwd, 6, 200);
-    let mut a = clearing_on(f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372));
-    assert_eq!(a.run("read the files").await.stop, Stop::Done);
-    assert_eq!(a.run("go on").await.stop, Stop::Done);
-    assert!(
-        !kinds(&a).iter().any(|k| k.starts_with("cleared")),
-        "{:?}",
-        kinds(&a)
-    );
-    a.set_plan_mode(true).unwrap();
-    assert_eq!(a.run("plan the next step").await.stop, Stop::Done);
-    let k = kinds(&a);
-    let cleared: Vec<&String> = k.iter().filter(|k| k.starts_with("cleared")).collect();
-    assert_eq!(cleared.len(), 1, "{k:?}");
-    let note = a
-        .session()
-        .entries()
-        .iter()
-        .find_map(|e| match &e.body {
-            EntryBody::Custom { custom_type, data } if custom_type == "clearing" => {
-                Some(data.clone())
-            }
-            _ => None,
-        })
-        .unwrap();
-    assert_eq!(note, json!({"reason": "cache_break", "from_message": 0}));
-    // The request after the change has the notes; the one before, the files.
-    let reqs = f.server.chat_requests();
-    let sent = |r: &Value| r["messages"].to_string();
-    assert!(sent(&reqs[reqs.len() - 1]).contains("Result cleared to save context: read f0.txt"));
-    assert!(sent(&reqs[reqs.len() - 2]).contains("file 0 line 000"));
-}
-
-#[tokio::test]
-async fn old_results_in_the_tail_are_cleared_after_a_summary() {
-    // The summary replaces the start of the context, so the server reads
-    // the kept tail again: its older results are cleared then, for free.
-    // A long summary leaves the context well above the clearing target.
-    let summary = format!("{SUMMARY}\n{}", "detail ".repeat(450));
-    let mut replies: Vec<Reply> = (0..5)
-        .map(|i| call("read", json!({"path": format!("f{i}.txt")})))
-        .collect();
-    replies.push(read_at("f5.txt", 9500));
-    replies.push(text(&summary));
-    replies.push(text("done"));
-    let f = Fixture::new(replies);
-    write_files(&f.cwd, 6, 100);
-    let mut a = clearing_on(f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372));
-    prefill(&mut a, 30);
-    let out = a.run("go on").await;
-    assert_eq!(out.stop, Stop::Done, "{:?} {:?}", out.stop, kinds(&a));
-    let k = kinds(&a);
-    let at = k.iter().position(|k| k == "compaction").unwrap();
-    assert!(
-        k.get(at + 1).is_some_and(|x| x.starts_with("cleared")),
-        "{k:?}"
-    );
-    let reqs = f.server.chat_requests();
-    let after = reqs.last().unwrap()["messages"].to_string();
-    assert!(
-        after.contains("Result cleared to save context: read f"),
-        "{after}"
-    );
-    // The last three results stay whole.
-    assert!(after.contains("file 5 line 000") && after.contains("file 3 line 000"));
-}
-
-#[tokio::test]
-async fn by_default_past_the_trigger_it_summarizes_instead_of_clearing() {
-    // The run that clears 4 results when clearing is on (above): by
-    // default the model keeps what it read until a summary takes its
-    // place (2026-11-05: a 27B looped after its reads were cleared).
+async fn past_the_trigger_it_summarizes_and_clears_nothing() {
+    // The model keeps what it read until a summary takes its place
+    // (2026-11-05: a 27B looped after its reads were cleared).
     let mut replies = reads(7);
     replies.push(text(SUMMARY));
     replies.push(call("read", json!({"path": "f7.txt"})));
     replies.push(text("done"));
     let f = Fixture::new(replies);
     write_files(&f.cwd, 8, 250);
-    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    let mut a = f.agent_sized(Budgets::default(), core_tools(), 16_384, 7372);
     let out = a.run("read the files").await;
     assert_eq!(out.stop, Stop::Done, "{:?} {:?}", out.stop, kinds(&a));
     let k = kinds(&a);
@@ -1162,53 +958,6 @@ async fn by_default_past_the_trigger_it_summarizes_instead_of_clearing() {
     for r in f.server.chat_requests() {
         assert!(!r["messages"].to_string().contains("Result cleared"));
     }
-}
-
-#[tokio::test]
-async fn by_default_a_cache_break_clears_nothing() {
-    let mut replies = reads(6);
-    replies.push(text("read them"));
-    replies.push(text("planned"));
-    let f = Fixture::new(replies);
-    write_files(&f.cwd, 6, 200);
-    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
-    assert_eq!(a.run("read the files").await.stop, Stop::Done);
-    a.set_plan_mode(true).unwrap();
-    assert_eq!(a.run("plan the next step").await.stop, Stop::Done);
-    assert!(
-        !kinds(&a).iter().any(|k| k.starts_with("cleared")),
-        "{:?}",
-        kinds(&a)
-    );
-    let reqs = f.server.chat_requests();
-    assert!(
-        reqs.last().unwrap()["messages"]
-            .to_string()
-            .contains("file 0 line 000")
-    );
-}
-
-#[tokio::test]
-async fn by_default_results_are_still_cleared_when_a_summary_fails() {
-    // Both ways of asking for a summary fail; clearing is then the only
-    // way to make room, so it runs even though it is off.
-    let mut replies = reads(7);
-    replies.push(call("read", json!({"path": "x"})));
-    replies.push(text(""));
-    replies.push(call("read", json!({"path": "f7.txt"})));
-    replies.push(text("done"));
-    let f = Fixture::new(replies);
-    write_files(&f.cwd, 8, 250);
-    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
-    let out = a.run("read the files").await;
-    assert_eq!(out.stop, Stop::Done, "{:?} {:?}", out.stop, kinds(&a));
-    let k = kinds(&a);
-    let failed = k.iter().position(|x| x == "guard compaction_failed");
-    let cleared = k.iter().position(|x| x.starts_with("cleared"));
-    assert!(
-        matches!((failed, cleared), (Some(f), Some(c)) if f < c),
-        "{k:?}"
-    );
 }
 
 #[tokio::test]
@@ -1225,7 +974,7 @@ async fn a_later_summary_can_correct_the_earlier_ones() {
         text("done"),
     ]);
     write_files(&f.cwd, 2, 200);
-    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    let mut a = f.agent_sized(Budgets::default(), core_tools(), 16_384, 7372);
     prefill(&mut a, 30);
     let out = a.run("go on").await;
     assert_eq!(out.stop, Stop::Done, "{:?} {:?}", out.stop, kinds(&a));
@@ -1558,179 +1307,12 @@ async fn post_edit_check_once_per_turn_with_edits() {
     assert_eq!(recorded, 2);
 }
 
-/// D-34: the todo list lives in the session and follows the branch.
-#[tokio::test]
-async fn todo_list_follows_the_branch() {
-    let f = Fixture::new(vec![
-        Reply::Chat(ScriptedReply {
-            tool_calls: vec![
-                (
-                    "todo".into(),
-                    json!({"action": "add", "text": "a"}).to_string(),
-                ),
-                (
-                    "todos".into(),
-                    json!({"action": "add", "text": "b"}).to_string(),
-                ),
-                (
-                    "todo".into(),
-                    json!({"action": "toggle", "id": "1"}).to_string(),
-                ),
-            ],
-            ..Default::default()
-        }),
-        text("planned"),
-        call("todo", json!({"action": "list"})),
-        text("listed"),
-        call("todo", json!({"action": "list"})),
-        text("empty"),
-    ]);
-    let mut tools = core_tools(false);
-    tools.push(psi_tools::Tool::Todo);
-    let mut a = f.agent_with(Budgets::default(), tools);
-    a.run("plan").await;
-    let first_prompt = a
-        .session()
-        .entries()
-        .iter()
-        .find(|e| {
-            matches!(
-                &e.body,
-                EntryBody::Message {
-                    role: psi_session::Role::User,
-                    ..
-                }
-            )
-        })
-        .and_then(|e| e.parent_id.clone())
-        .unwrap();
-    a.run("list them").await;
-    let r = tool_results(&a);
-    assert_eq!(r[0].0, "Added #1: a");
-    assert_eq!(r[1].0, "Added #2: b", "the alias resolves to todo");
-    assert_eq!(r[2].0, "#1 is done: a");
-    assert_eq!(r[3], ("[x] #1: a\n[ ] #2: b".into(), false));
-    // The todo calls didn't make checkpoints or ask.
-    assert!(
-        !a.session().entries().iter().any(
-            |e| matches!(&e.body, EntryBody::Checkpoint { trigger: Some(t), .. } if t == "tool")
-        )
-    );
-    // Back before the first prompt: no todos on that branch.
-    a.session_mut().set_leaf(&first_prompt).unwrap();
-    a.run("again").await;
-    assert_eq!(tool_results(&a).last().unwrap().0, "No todos.");
-}
-
-/// D-34: plan mode offers no write or edit, runs only read-only bash, adds
-/// its context, and takes the plan from the answer; carrying it out tracks
-/// [DONE:n] markers.
-#[tokio::test]
-async fn plan_mode_then_carry_out_the_plan() {
-    let f = Fixture::new(vec![
-        Reply::Chat(ScriptedReply {
-            tool_calls: vec![
-                (
-                    "write".into(),
-                    json!({"path": "a.txt", "text": "x"}).to_string(),
-                ),
-                ("bash".into(), json!({"command": "ls; rm -f b"}).to_string()),
-                ("bash".into(), json!({"command": "ls | sort"}).to_string()),
-            ],
-            ..Default::default()
-        }),
-        text("Looked.\n\nPlan:\n1. Create `a.txt`\n2. Check it\n"),
-        call("write", json!({"path": "a.txt", "text": "x\n"})),
-        text("Created it. [DONE:1]"),
-        text("Checked. [DONE:2]"),
-    ]);
-    std::fs::write(f.cwd.join("b"), "keep").unwrap();
-    let mut a = f.agent(Budgets::default());
-    a.set_plan_mode(true).unwrap();
-    let out = a.run("add a.txt").await;
-    assert_eq!(out.stop, Stop::Done);
-    let r = tool_results(&a);
-    assert_eq!(
-        r[0],
-        (
-            "write is off in plan mode. Put the change in your plan instead.".into(),
-            true
-        )
-    );
-    assert!(
-        r[1].1 && r[1].0.contains("rm isn't on the read-only list"),
-        "{}",
-        r[1].0
-    );
-    assert!(!r[2].1);
-    assert!(f.cwd.join("b").exists(), "the refused rm never ran");
-    let reqs = f.server.chat_requests();
-    let tools: Vec<&str> = reqs[0]["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|t| t["function"]["name"].as_str().unwrap())
-        .collect();
-    assert_eq!(tools, ["read", "bash"]);
-    let user = reqs[0]["messages"][1]["content"].as_str().unwrap();
-    assert!(
-        user.starts_with("add a.txt\n\n[Plan mode] Explore and plan only"),
-        "{user}"
-    );
-    let steps: Vec<&str> = a.plan().steps.iter().map(|s| s.text.as_str()).collect();
-    assert_eq!(steps, ["Create a.txt", "Check it"]);
-
-    let prompt = a.start_plan().unwrap();
-    assert!(prompt.contains("\n1. Create a.txt\n2. Check it\n"));
-    a.run(&prompt).await;
-    assert_eq!(std::fs::read_to_string(f.cwd.join("a.txt")).unwrap(), "x\n");
-    assert!(a.plan().executing);
-    assert_eq!(a.plan().done_count(), 1);
-    let reqs = f.server.chat_requests();
-    assert_eq!(
-        reqs[2]["tools"].as_array().unwrap().len(),
-        4,
-        "write and edit are back"
-    );
-    a.run("check it").await;
-    assert_eq!(a.plan().done_count(), 2);
-    assert!(!a.plan().executing, "all steps done");
-    // The state is in the session: a reopened branch has it.
-    let snapshot = a.plan().clone();
-    a.restore_plan();
-    assert_eq!(*a.plan(), snapshot);
-}
-
-/// Turning plan mode off by hand tells the model with the next prompt.
-#[tokio::test]
-async fn plan_mode_off_says_so_once() {
-    let f = Fixture::new(vec![text("p"), text("q"), text("r")]);
-    let mut a = f.agent(Budgets::default());
-    a.set_plan_mode(true).unwrap();
-    a.run("one").await;
-    a.set_plan_mode(false).unwrap();
-    a.run("two").await;
-    a.run("three").await;
-    let reqs = f.server.chat_requests();
-    let last = |i: usize| {
-        reqs[i]["messages"].as_array().unwrap().last().unwrap()["content"]
-            .as_str()
-            .unwrap()
-            .to_owned()
-    };
-    assert_eq!(
-        last(1),
-        "two\n\n[Plan mode is off: all tools are available again.]"
-    );
-    assert_eq!(last(2), "three");
-}
-
 #[tokio::test]
 async fn compact_by_hand_puts_back_the_harness_state() {
     let f = Fixture::new(vec![text(SUMMARY), text("done")]);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let mut a = f
-        .agent_sized(Budgets::default(), core_tools(false), 16_384, 7372)
+        .agent_sized(Budgets::default(), core_tools(), 16_384, 7372)
         .with_events(tx);
     prefill(&mut a, 30);
     let s = a.session_mut();
@@ -1757,12 +1339,7 @@ async fn compact_by_hand_puts_back_the_harness_state() {
         is_error: false,
     })
     .unwrap();
-    s.append(EntryBody::Custom {
-        custom_type: "todo".into(),
-        data: json!({"todos": [{"id": 1, "text": "port the lexer", "done": false}], "next_id": 2}),
-    })
-    .unwrap();
-    // The write and the todo fall before the cut: a long tail after them.
+    // The write falls before the cut: a long tail after it.
     prefill(&mut a, 25);
     let msg = a.compact_now(Some("the parser")).await.unwrap();
     assert!(msg.starts_with("compacted: about"), "{msg}");
@@ -1790,7 +1367,6 @@ async fn compact_by_hand_puts_back_the_harness_state() {
         "{opening}"
     );
     assert!(opening.contains("Files changed: parser.rs"));
-    assert!(opening.contains("Todo list:\n[ ] #1: port the lexer"));
     // The state comes after the summary, so the summary stays a stable prefix.
     assert!(opening.find(SUMMARY).unwrap() < opening.find("[Recorded").unwrap());
 }
@@ -1798,7 +1374,7 @@ async fn compact_by_hand_puts_back_the_harness_state() {
 #[tokio::test]
 async fn a_short_conversation_has_nothing_to_compact() {
     let f = Fixture::new(vec![]);
-    let mut a = f.agent_sized(Budgets::default(), core_tools(false), 16_384, 7372);
+    let mut a = f.agent_sized(Budgets::default(), core_tools(), 16_384, 7372);
     prefill(&mut a, 3);
     let msg = a.compact_now(None).await.unwrap();
     assert!(msg.starts_with("nothing to compact"), "{msg}");

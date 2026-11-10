@@ -39,13 +39,13 @@ pub enum EntryBody {
         #[serde(default)]
         is_error: bool,
     },
-    /// Extension or harness data, not sent to the model.
+    /// Harness data, not sent to the model.
     Custom {
         custom_type: String,
         #[serde(default)]
         data: Value,
     },
-    /// An extension message that is sent to the model.
+    /// A harness message that is sent to the model.
     CustomMessage {
         custom_type: String,
         content: Vec<Block>,

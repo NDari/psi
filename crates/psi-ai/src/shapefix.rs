@@ -58,10 +58,6 @@ const NAME_ALIASES: &[(&str, &[&str])] = &[
             "runshell",
         ],
     ),
-    ("grep", &["search", "rg", "ripgrep", "searchfiles"]),
-    ("find", &["glob", "findfiles"]),
-    ("ls", &["list", "listdir", "listfiles", "dir"]),
-    ("todo", &["todos", "todowrite", "todolist", "tasks", "task"]),
 ];
 
 /// Argument names models use, by canonical parameter.

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use psi_agent::recovery;
-use psi_agent::{Agent, AgentEvent, RunOutcome, Stop};
+use psi_agent::{Agent, AgentEvent, RunOutcome};
 use psi_safety::checkpoint::Checkpoints;
 use psi_safety::policy::Mode;
 use psi_session::{Entry, EntryBody, Role, SessionFile, text_of};
@@ -32,8 +32,6 @@ pub enum Cmd {
         files: bool,
     },
     Diff,
-    /// /mcp: the MCP servers and their tools.
-    Mcp,
     Mode(Mode),
     Label {
         id: String,
@@ -42,16 +40,10 @@ pub enum Cmd {
     New,
     Resume(PathBuf),
     /// A new session from the history before one of the user's prompts
-    /// (/fork, pi parity); the prompt goes back into the editor.
+    /// (/fork); the prompt goes back into the editor.
     Fork(String),
     /// The whole session, for /tree, /rewind, /stats and /inspect.
     Entries,
-    /// Load the extensions again.
-    Reload,
-    /// Turn plan mode on or off (/plan).
-    Plan,
-    /// Leave plan mode and carry out the proposed plan.
-    ExecutePlan,
     /// Summarize the earlier conversation now (/compact), with what to
     /// focus on.
     Compact(String),
@@ -66,7 +58,6 @@ pub struct Worker {
     pub cwd: PathBuf,
     /// Opens the checkpoints for a session file (a new one for /new and /resume).
     pub open_checkpoints: OpenCheckpoints,
-    pub ext_sources: crate::run_mode::ExtSources,
 }
 
 impl Worker {
@@ -93,11 +84,6 @@ impl Worker {
                 Cmd::Undo => self.undo(),
                 Cmd::Goto { id, files } => self.goto(&id, files),
                 Cmd::Diff => self.diff(),
-                Cmd::Mcp => {
-                    let r = psi_cli::mcp::report(self.agent.mcp());
-                    // The UI indents the first line.
-                    UiMsg::Info(r.replace('\n', "\n  "))
-                }
                 Cmd::Mode(m) => {
                     self.agent.safety_mut().policy.mode = m;
                     UiMsg::Info(format!("mode: {}", m.as_str()))
@@ -126,27 +112,6 @@ impl Worker {
                     Err(e) => UiMsg::Error(format!("cannot open {}: {e}", p.display())),
                 },
                 Cmd::Fork(id) => self.fork(&id),
-                Cmd::Reload => self.reload(&ui).await,
-                Cmd::Plan => {
-                    let on = !self.agent.plan().enabled;
-                    match self.agent.set_plan_mode(on) {
-                        Ok(()) if on => UiMsg::Info(
-                            "plan mode: read-only tools; the model answers with a numbered plan (/plan again to leave)".into(),
-                        ),
-                        Ok(()) => UiMsg::Info("plan mode off: all tools are available".into()),
-                        Err(e) => UiMsg::Error(e),
-                    }
-                }
-                // The UI shows a run as started, so a failure ends it.
-                Cmd::ExecutePlan => match self.agent.start_plan() {
-                    Ok(p) => UiMsg::RunDone(self.agent.run(&p).await),
-                    Err(e) => UiMsg::RunDone(RunOutcome {
-                        stop: Stop::Failed(e),
-                        text: String::new(),
-                        turns: 0,
-                        tool_calls: 0,
-                    }),
-                },
                 Cmd::Compact(focus) => {
                     let focus = (!focus.is_empty()).then_some(focus.as_str());
                     UiMsg::Compacted(self.agent.compact_now(focus).await)
@@ -162,68 +127,6 @@ impl Worker {
             }
             if ui.send(reply).is_err() {
                 break;
-            }
-        }
-    }
-
-    async fn reload(&mut self, ui: &UnboundedSender<UiMsg>) -> UiMsg {
-        if !self.project_still_trusted(ui).await {
-            return UiMsg::Info(format!(
-                "not reloaded: {} changed and isn't trusted",
-                self.cwd.join(".psi").display()
-            ));
-        }
-        let ext = self.agent.extensions().clone();
-        let (found, mut errors) = self.ext_sources.find();
-        let ext2 = ext.clone();
-        match tokio::task::spawn_blocking(move || ext2.reload(&found)).await {
-            Ok(e) => errors.extend(e),
-            Err(e) => errors.push(e.to_string()),
-        }
-        self.agent.refresh_extensions();
-        let file = self.agent.session().path().display().to_string();
-        ext.notify("session_start", serde_json::json!({"session_file": file}))
-            .await;
-        let n = ext.actors().len() + ext.scripts().len();
-        if errors.is_empty() {
-            UiMsg::Info(format!("reloaded {n} extension(s)"))
-        } else {
-            UiMsg::Error(format!("reloaded {n} extension(s); {}", errors.join("; ")))
-        }
-    }
-
-    /// Before /reload loads the project's `.psi` again: whether it matches
-    /// what the user trusted, or the user trusts it now (§9.3: again
-    /// whenever it changes on disk). Bash, an approved write or a checkout
-    /// may have changed it mid-session, and an extension runs as the user.
-    /// (`&mut self` keeps the future Send: Worker is Send, not Sync.)
-    async fn project_still_trusted(&mut self, ui: &UnboundedSender<UiMsg>) -> bool {
-        // Not trusted at startup: the project's .psi isn't loaded at all.
-        if self.ext_sources.project.is_none() {
-            return true;
-        }
-        let Some(print) = psi_cli::trust::snapshot(&self.cwd) else {
-            return true;
-        };
-        let Some(home) = self.ext_sources.home.as_deref() else {
-            return false;
-        };
-        if psi_cli::trust::is_trusted(home, &self.cwd, &print) {
-            return true;
-        }
-        let mut what = psi_cli::trust::describe(&self.cwd);
-        for c in psi_cli::trust::changes(home, &self.cwd, &print) {
-            what.push_str(&format!("\n{c}"));
-        }
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        if ui.send(UiMsg::Trust(what, tx)).is_err() || !rx.await.unwrap_or(false) {
-            return false;
-        }
-        match psi_cli::trust::trust(home, &self.cwd, &print) {
-            Ok(()) => true,
-            Err(e) => {
-                tracing::warn!("could not record trust: {e:#}");
-                true
             }
         }
     }

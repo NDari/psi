@@ -1,15 +1,11 @@
-//! Keybindings (psi-plan.md §11.4, pi parity): actions with pi's ids, each
-//! bound to one or more keys like `ctrl+a` or `alt+enter`. A user file maps
-//! ids to a key or a list of keys; a list replaces the defaults, `[]`
-//! unbinds.
+//! Keybindings: actions, each bound to one or more keys like `ctrl+a` or
+//! `alt+enter`.
 
 use std::collections::BTreeMap;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use serde_json::Value;
 
-/// The actions Psi has, pi's id first. Pi's other ids are accepted and do
-/// nothing.
+/// The actions Psi has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Action {
     CursorUp,
@@ -31,7 +27,6 @@ pub enum Action {
     Clear,
     Exit,
     FollowUp,
-    PlanToggle,
     ExternalEditor,
     HistorySearch,
     Stash,
@@ -151,12 +146,6 @@ const ALL: &[(Action, &str, &[&str], &str)] = &[
         "app.message.followUp",
         &["alt+enter"],
         "queue a follow-up for when the run ends",
-    ),
-    (
-        Action::PlanToggle,
-        "app.plan.toggle",
-        &["ctrl+alt+p"],
-        "plan mode on or off",
     ),
     (
         Action::ExternalEditor,
@@ -284,47 +273,6 @@ impl Default for Keymap {
 }
 
 impl Keymap {
-    /// The defaults with a user file's bindings on top. Returns the
-    /// problems found too; a bad entry keeps that action's defaults.
-    pub fn from_json(v: &Value) -> (Self, Vec<String>) {
-        let mut km = Keymap::default();
-        let mut problems = Vec::new();
-        let Some(obj) = v.as_object() else {
-            problems.push("keybindings.json must be an object of action ids".into());
-            return (km, problems);
-        };
-        for (id, val) in obj {
-            if id == "$schema" {
-                continue;
-            }
-            let Some((action, ..)) = ALL.iter().find(|(_, i, _, _)| i == id) else {
-                if !id.starts_with("tui.") && !id.starts_with("app.") {
-                    problems.push(format!("keybindings.json: unknown action '{id}'"));
-                }
-                continue;
-            };
-            let specs: Vec<&str> = match val {
-                Value::String(s) => vec![s.as_str()],
-                Value::Array(a) => a.iter().filter_map(Value::as_str).collect(),
-                _ => {
-                    problems.push(format!(
-                        "keybindings.json: {id} needs a key or a list of keys"
-                    ));
-                    continue;
-                }
-            };
-            let parsed: Result<Vec<Key>, String> = specs.iter().map(|s| Key::parse(s)).collect();
-            match parsed {
-                Ok(mut keys) => {
-                    keys.dedup();
-                    km.bindings.insert(*action, keys);
-                }
-                Err(e) => problems.push(format!("keybindings.json: {id}: {e}")),
-            }
-        }
-        (km, problems)
-    }
-
     pub fn is(&self, action: Action, ev: &KeyEvent) -> bool {
         self.bindings
             .get(&action)
@@ -384,7 +332,6 @@ fn key_label(k: &Key) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     fn ev(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
         KeyEvent::new(code, mods)
@@ -414,29 +361,5 @@ mod tests {
         assert!(Key::parse("hyper+a").is_err());
         assert!(Key::parse("f13").is_err());
         assert!(Key::parse("ctrl+").is_err());
-    }
-
-    #[test]
-    fn user_file_replaces_defaults() {
-        let (km, problems) = Keymap::from_json(&json!({
-            "$schema": "x",
-            "app.interrupt": ["ctrl+g", "escape"],
-            "tui.editor.cursorLeft": [],
-            "app.model.select": "ctrl+l",
-            "app.exit": "ctrl+ctrl+q",
-            "nonsense": "a",
-        }));
-        assert!(km.is(
-            Action::Interrupt,
-            &ev(KeyCode::Char('g'), KeyModifiers::CONTROL)
-        ));
-        assert!(km.is(Action::Interrupt, &ev(KeyCode::Esc, KeyModifiers::NONE)));
-        assert!(!km.is(Action::CursorLeft, &ev(KeyCode::Left, KeyModifiers::NONE)));
-        // A bad entry keeps the defaults.
-        assert!(km.is(Action::Exit, &ev(KeyCode::Char('d'), KeyModifiers::CONTROL)));
-        assert_eq!(problems.len(), 2, "{problems:?}");
-        assert!(problems[0].contains("app.exit"));
-        assert!(problems[1].contains("unknown action 'nonsense'"));
-        assert_eq!(km.first(Action::Interrupt).as_deref(), Some("Ctrl+g"));
     }
 }

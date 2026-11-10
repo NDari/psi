@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::engine::ArgValueCandidates;
 use psi_cli::config::{self, SettingsPaths};
-use psi_lab::eval::{self, Agent, RunConfig, Selection};
+use psi_lab::eval::{self, RunConfig, Selection};
 use psi_lab::inspect;
 use serde_json::{Map, Value};
 use tracing_subscriber::EnvFilter;
@@ -58,21 +58,9 @@ struct Cli {
     #[arg(long, value_enum)]
     network: Option<OnOff>,
 
-    /// Load an extension (a .lua file, a directory with init.lua, or a script tool directory).
-    #[arg(long = "extension", value_name = "PATH")]
-    extensions: Vec<PathBuf>,
-
-    /// Set an extension's flag.
-    #[arg(long = "ext-flag", value_name = "NAME=VALUE")]
-    ext_flags: Vec<String>,
-
-    /// Trust this project's .psi settings and extensions without asking (headless runs skip them otherwise).
+    /// Trust this project's .psi settings without asking (headless runs skip them otherwise).
     #[arg(long)]
     trust_project: bool,
-
-    /// Start in plan mode: read-only exploration that ends with a numbered plan.
-    #[arg(long)]
-    plan: bool,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -119,62 +107,10 @@ enum Command {
     /// Serve a recorded run's model responses like llama-server (for tests).
     #[command(hide = true)]
     ReplayServer(ReplayServerArgs),
-    /// Extension author tools: lint and test an extension.
-    #[command(subcommand)]
-    Ext(ExtCommand),
-    /// MCP servers from ~/.psi/mcp.json and .psi/mcp.json.
-    #[command(subcommand)]
-    Mcp(McpCommand),
-    /// Add a package (a local directory, or git:host/user/repo[@ref]) with its extensions, skills, prompts and themes.
-    Install {
-        source: String,
-        /// In this project's .psi/settings.jsonc instead of ~/.psi.
-        #[arg(short = 'l', long)]
-        local: bool,
-    },
-    /// Remove a package; a git clone is deleted.
-    #[command(alias = "uninstall")]
-    Remove {
-        source: String,
-        #[arg(short = 'l', long)]
-        local: bool,
-    },
-    /// Fetch git packages again: pinned ones to their ref, the rest to their branch.
-    Update { source: Option<String> },
-    /// List the installed packages.
-    List,
     /// Short answers about psi's features, for you and the model.
     Help {
         #[arg(add = ArgValueCandidates::new(complete::topics))]
         topic: Option<String>,
-        /// For `psi help api`: a function, event part or type.
-        name: Option<String>,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum McpCommand {
-    /// Connect to every enabled server and show its state, tools and their
-    /// size in tokens; exits 1 when one failed or an entry is invalid.
-    List,
-}
-
-#[derive(Debug, Subcommand)]
-enum ExtCommand {
-    /// Lint an extension: manifest, syntax, API use, a dry load, and
-    /// lua-language-server when installed.
-    Check { path: PathBuf },
-    /// Run an extension's *_test.lua files (a directory of extensions runs them all).
-    Test {
-        path: PathBuf,
-        /// Show what passing tests logged too (what they print always shows).
-        #[arg(long)]
-        verbose: bool,
-    },
-    /// List the example extensions, or print one with its tests.
-    Example {
-        #[arg(add = ArgValueCandidates::new(complete::examples))]
-        name: Option<String>,
     },
 }
 
@@ -215,12 +151,8 @@ enum EvalCommand {
         /// quick, all, or task names separated by commas.
         #[arg(long, default_value = "all", add = ArgValueCandidates::new(complete::tasks))]
         tasks: String,
-        /// The psi binary graders may run (default: this one). It must run
-        /// in the Debian image: `just eval-build` makes a static one.
-        #[arg(long, value_name = "PATH")]
-        psi_binary: Option<PathBuf>,
     },
-    /// One trial of each task with an agent. A single run proves the
+    /// One trial of each task. A single run proves the
     /// pipeline works; it is not a measure of quality or speed. Exits
     /// non-zero if any trial is a harness failure.
     Run {
@@ -229,8 +161,6 @@ enum EvalCommand {
         /// quick, all, or task names separated by commas.
         #[arg(long, default_value = "quick", add = ArgValueCandidates::new(complete::tasks))]
         tasks: String,
-        #[arg(long, value_enum, default_value = "psi")]
-        agent: AgentArg,
         /// llama-server's port on 127.0.0.1.
         #[arg(long, default_value_t = 9931)]
         port: u16,
@@ -254,8 +184,8 @@ enum EvalCommand {
         /// the Debian image: `just eval-build` makes a static one.
         #[arg(long, value_name = "PATH")]
         psi_binary: Option<PathBuf>,
-        /// A directory copied into each psi trial's ~/.psi (settings.jsonc,
-        /// skills/, prompts/): a variant, like a battery turned on.
+        /// A directory copied into each psi trial's ~/.psi (settings.jsonc):
+        /// a variant, like a battery turned on.
         #[arg(long, value_name = "DIR")]
         psi_config: Option<PathBuf>,
     },
@@ -265,18 +195,12 @@ enum EvalCommand {
 
 #[derive(Debug, Args)]
 struct EvalCommon {
-    /// The evals directory (Containerfile, code/, pi/).
+    /// The evals directory (Containerfile, code/).
     #[arg(long, default_value = "evals")]
     evals: PathBuf,
     /// Where results go (default: ~/.psi/evals/<UTC time>[-label]).
     #[arg(long)]
     results: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum AgentArg {
-    Psi,
-    Pi,
 }
 
 #[derive(Debug, Args)]
@@ -330,27 +254,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Some(Command::Inspect(args)) => inspect_command(args),
         Some(Command::Replay(args)) => runtime()?.block_on(replay_command(args)),
         Some(Command::ReplayServer(args)) => replay_server_command(args),
-        Some(Command::Ext(cmd)) => ext_command(cmd),
-        Some(Command::Mcp(McpCommand::List)) => {
-            let cwd = std::env::current_dir().context("reading the working directory")?;
-            let home = std::env::home_dir();
-            let trusted = project_trusted(home.as_deref(), &cwd, false, false)?;
-            let (text, ok) =
-                runtime()?.block_on(psi_cli::mcp::list(home.as_deref(), &cwd, trusted));
-            println!("{text}");
-            Ok(if ok {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::FAILURE
-            })
-        }
-        Some(
-            cmd @ (Command::Install { .. }
-            | Command::Remove { .. }
-            | Command::Update { .. }
-            | Command::List),
-        ) => package_command(cmd),
-        Some(Command::Help { topic, name }) => help_command(topic.as_deref(), name.as_deref()),
+        Some(Command::Help { topic }) => help_command(topic.as_deref()),
         None => {
             let cwd = std::env::current_dir().context("reading the working directory")?;
             let home = std::env::home_dir();
@@ -377,10 +281,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 settings,
                 allow: cli.allow,
                 mode_flag: cli.mode.is_some(),
-                extensions: cli.extensions,
-                ext_flags: cli.ext_flags,
                 project_trusted: trusted,
-                plan: cli.plan,
             };
             if interactive {
                 if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
@@ -433,121 +334,11 @@ fn project_trusted(home: Option<&Path>, cwd: &Path, interactive: bool, flag: boo
     Ok(false)
 }
 
-fn ext_command(cmd: ExtCommand) -> Result<ExitCode> {
-    match cmd {
-        ExtCommand::Example { name: None } => {
-            print!("{}", psi_cli::examples::list());
-            Ok(ExitCode::SUCCESS)
-        }
-        ExtCommand::Example { name: Some(name) } => match psi_cli::examples::show(&name) {
-            Some(text) => {
-                print!("{text}");
-                Ok(ExitCode::SUCCESS)
-            }
-            None => bail!("no example named {name}\n{}", psi_cli::examples::list()),
-        },
-        ExtCommand::Check { path } => {
-            let report = psi_ext::check::check(&path);
-            print!("{}", report.render());
-            Ok(if report.errors() == 0 {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::FAILURE
-            })
-        }
-        ExtCommand::Test { path, verbose } => {
-            let runs = if path.is_dir() && !path.join("init.lua").is_file() {
-                psi_ext::testing::run_all(&path)
-            } else {
-                vec![(path.clone(), psi_ext::testing::run(&path))]
-            };
-            if runs.is_empty() {
-                bail!("{}: no extensions with *_test.lua files", path.display());
-            }
-            let mut ok = true;
-            for (p, r) in &runs {
-                if runs.len() > 1 {
-                    println!("== {}", p.display());
-                }
-                print!("{}", r.render(verbose));
-                ok &= r.passed();
-            }
-            Ok(if ok {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::FAILURE
-            })
-        }
-    }
-}
-
-fn package_command(cmd: Command) -> Result<ExitCode> {
-    use psi_cli::packages::{self, Paths, Scope};
-    let paths = Paths {
-        home: std::env::home_dir().context("no home directory")?,
-        cwd: std::env::current_dir().context("reading the working directory")?,
-    };
-    let scope = |local: bool| if local { Scope::Project } else { Scope::User };
-    match cmd {
-        Command::Install { source, local } => {
-            println!("{}", packages::install(&paths, scope(local), &source)?)
-        }
-        Command::Remove { source, local } => {
-            println!("{}", packages::remove(&paths, scope(local), &source)?)
-        }
-        Command::Update { source } => {
-            // No question here: trusting is for a session's start (§9.3).
-            let trusted = psi_cli::trust::snapshot(&paths.cwd)
-                .is_none_or(|print| psi_cli::trust::is_trusted(&paths.home, &paths.cwd, &print));
-            let done = packages::update(&paths, source.as_deref(), trusted)?;
-            if done.is_empty() {
-                println!("no git packages to update");
-            }
-            for d in done {
-                println!("{d}");
-            }
-        }
-        _ => {
-            let mut any = false;
-            for (scope, title) in [(Scope::User, "user"), (Scope::Project, "project")] {
-                let list = packages::listed(&paths, scope)?;
-                if list.is_empty() {
-                    continue;
-                }
-                any = true;
-                println!("{title} packages ({}):", paths.settings(scope).display());
-                for p in list {
-                    println!("  {p}");
-                }
-            }
-            if !any {
-                println!("no packages installed");
-            }
-        }
-    }
-    Ok(ExitCode::SUCCESS)
-}
-
-fn help_command(topic: Option<&str>, name: Option<&str>) -> Result<ExitCode> {
+fn help_command(topic: Option<&str>) -> Result<ExitCode> {
     use psi_cli::help;
-    match (topic, name) {
-        (Some("api"), None) => print!("{}", help::api_index()),
-        (Some("api"), Some(n)) => match help::api_entry(n) {
-            Ok(text) => print!("{text}"),
-            Err(e) => {
-                print!("{e}");
-                return Ok(ExitCode::FAILURE);
-            }
-        },
-        (_, Some(n)) => {
-            println!(
-                "psi help {} takes no '{n}': only psi help api takes a name.",
-                topic.unwrap_or("")
-            );
-            return Ok(ExitCode::FAILURE);
-        }
-        (None | Some("topics"), None) => print!("{}", help::topics()),
-        (Some(t), None) => match help::topic(t) {
+    match topic {
+        None | Some("topics") => print!("{}", help::topics()),
+        Some(t) => match help::topic(t) {
             Some(text) => print!("{text}"),
             None => {
                 print!("no topic '{t}'. {}", help::topics());
@@ -580,8 +371,7 @@ fn wire_path(p: &Path) -> PathBuf {
 async fn replay_command(args: ReplayArgs) -> Result<ExitCode> {
     let wire = wire_path(&args.path);
     let body = psi_lab::replay::request_at(&wire, args.at)?;
-    let profile =
-        run_mode::pick_profile(std::env::home_dir().as_deref(), args.model.as_deref(), &[])?;
+    let profile = run_mode::pick_profile(std::env::home_dir().as_deref(), args.model.as_deref())?;
     let client = psi_ai::Client::new(&profile.base_url).with_headers(&profile.headers);
     let (actions, dist) = psi_lab::replay::replay(&client, body, args.samples).await?;
     if args.samples <= 1 {
@@ -668,20 +458,12 @@ fn check_evals_dir(dir: &Path) -> Result<()> {
 
 fn eval_command(cmd: EvalCommand) -> Result<ExitCode> {
     match cmd {
-        EvalCommand::Check {
-            common,
-            tasks,
-            psi_binary,
-        } => {
+        EvalCommand::Check { common, tasks } => {
             check_evals_dir(&common.evals)?;
             let results = results_dir(common.results, Some("check"))?;
-            let psi = psi_binary
-                .map(|p| std::path::absolute(&p).unwrap_or(p))
-                .or_else(|| std::env::current_exe().ok());
             let report = eval::check_graders(
                 &common.evals,
                 &results,
-                psi.as_deref(),
                 &Selection::parse(&tasks),
                 &mut progress,
             )?;
@@ -700,7 +482,6 @@ fn eval_command(cmd: EvalCommand) -> Result<ExitCode> {
         EvalCommand::Run {
             common,
             tasks,
-            agent,
             port,
             steps,
             timeout,
@@ -711,15 +492,10 @@ fn eval_command(cmd: EvalCommand) -> Result<ExitCode> {
             psi_config,
         } => {
             check_evals_dir(&common.evals)?;
-            let agent = match agent {
-                AgentArg::Psi => Agent::Psi,
-                AgentArg::Pi => Agent::Pi,
-            };
-            let suffix = label.unwrap_or_else(|| agent.as_str().to_owned());
+            let suffix = label.unwrap_or_else(|| "psi".to_owned());
             let cfg = RunConfig {
                 evals_dir: common.evals,
                 results_dir: results_dir(common.results, Some(&suffix))?,
-                agent,
                 selection: Selection::parse(&tasks),
                 port,
                 steps,

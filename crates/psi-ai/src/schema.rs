@@ -8,7 +8,6 @@ pub enum ParamKind {
     String,
     Integer,
     Boolean,
-    /// Extension tools only (core tools keep to the three above).
     Number,
     Array,
     Object,

@@ -6,7 +6,7 @@
 
 use std::collections::VecDeque;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -96,26 +96,16 @@ fn quiet_answer(command: &str, out: ToolOutput) -> ToolOutput {
     let Some(before) = out.text.strip_suffix(MARK).filter(|_| out.is_error) else {
         return out;
     };
-    if before != "(no output)" && !psi_safety::read_only::last_always_runs(command) {
+    if before != "(no output)" && !psi_safety::last_command::last_always_runs(command) {
         return out;
     }
-    let Some(prog) = psi_safety::read_only::last_program(command) else {
+    let Some(prog) = psi_safety::last_command::last_program(command) else {
         return out;
     };
     match QUIET_ANSWERS.iter().find(|(p, _)| *p == prog) {
         Some((p, what)) => ToolOutput::ok(format!("{before}\n[exit code 1: {p} says {what}]")),
         None => out,
     }
-}
-
-/// A script tool (D-22): `argv` inside the same boundary as bash, with the
-/// arguments as JSON on stdin; its output is the result.
-pub async fn run_script(argv: &[String], args: &Value, ctx: &ToolCtx) -> ToolOutput {
-    if argv.is_empty() {
-        return ToolOutput::err("The script tool has no command.");
-    }
-    let input = serde_json::to_vec(args).unwrap_or_default();
-    exec(argv, Some(input), DEFAULT_TIMEOUT_S as u64, ctx, false).await
 }
 
 async fn exec(
@@ -271,120 +261,6 @@ fn command(argv: &[String], cwd: &Path, ctx: &ToolCtx, outside: bool) -> tokio::
     cmd
 }
 
-/// How an extension's command runs (`psi.exec`, D-45).
-#[derive(Debug, Clone)]
-pub struct Capture {
-    pub cwd: PathBuf,
-    /// Added to bash's environment.
-    pub env: Vec<(String, String)>,
-    pub stdin: Option<Vec<u8>>,
-    pub timeout: Duration,
-    /// Per stream; the rest is read and dropped.
-    pub max_bytes: usize,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Captured {
-    /// `None` when it was stopped.
-    pub code: Option<i32>,
-    pub stdout: Vec<u8>,
-    pub stderr: Vec<u8>,
-    /// Stopped by the timeout, an abort or a signal.
-    pub killed: bool,
-    pub truncated: bool,
-}
-
-/// Runs `argv` with stdout and stderr kept apart, inside the same boundary
-/// as bash unless `outside`. The error is why it couldn't start.
-pub async fn capture(
-    argv: &[String],
-    c: Capture,
-    ctx: &ToolCtx,
-    outside: bool,
-) -> Result<Captured, String> {
-    if argv.is_empty() {
-        return Err("no command".into());
-    }
-    std::fs::create_dir_all(&ctx.tmpdir)
-        .map_err(|e| format!("cannot create TMPDIR {}: {e}", ctx.tmpdir.display()))?;
-    let mut cmd = command(argv, &c.cwd, ctx, outside);
-    let stdin = if c.stdin.is_some() {
-        Stdio::piped()
-    } else {
-        Stdio::null()
-    };
-    cmd.stdin(stdin)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    for (k, v) in &c.env {
-        cmd.env(k, v);
-    }
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("cannot start {}: {e}", argv[0]))?;
-    if let (Some(bytes), Some(mut w)) = (c.stdin, child.stdin.take()) {
-        tokio::spawn(async move {
-            use tokio::io::AsyncWriteExt;
-            let _ = w.write_all(&bytes).await;
-        });
-    }
-    let pgid = child.id();
-    let out = tokio::spawn(read_capped(child.stdout.take(), c.max_bytes));
-    let err = tokio::spawn(read_capped(child.stderr.take(), c.max_bytes));
-    let status = tokio::select! {
-        s = child.wait() => s.ok(),
-        () = tokio::time::sleep(c.timeout) => None,
-        () = ctx.cancel.cancelled() => None,
-    };
-    if status.is_none() {
-        kill_group(pgid);
-        let _ = child.wait().await;
-    }
-    let collect = async { (out.await.unwrap_or_default(), err.await.unwrap_or_default()) };
-    tokio::pin!(collect);
-    // Something it left running in the background may hold the pipes.
-    let ((stdout, t1), (stderr, t2)) =
-        match tokio::time::timeout(Duration::from_millis(200), &mut collect).await {
-            Ok(r) => r,
-            Err(_) => {
-                kill_group(pgid);
-                tokio::time::timeout(Duration::from_secs(2), &mut collect)
-                    .await
-                    .unwrap_or_default()
-            }
-        };
-    let code = status.and_then(|s| s.code());
-    Ok(Captured {
-        code,
-        stdout,
-        stderr,
-        killed: code.is_none(),
-        truncated: t1 || t2,
-    })
-}
-
-/// Up to `max` bytes of a pipe, reading on to the end; true when cut.
-async fn read_capped<R: tokio::io::AsyncRead + Unpin>(r: Option<R>, max: usize) -> (Vec<u8>, bool) {
-    use tokio::io::AsyncReadExt;
-    let Some(mut r) = r else {
-        return (Vec::new(), false);
-    };
-    let mut out = Vec::new();
-    let mut cut = false;
-    let mut chunk = [0u8; 8192];
-    loop {
-        match r.read(&mut chunk).await {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                let room = max.saturating_sub(out.len());
-                out.extend_from_slice(&chunk[..n.min(room)]);
-                cut |= n > room;
-            }
-        }
-    }
-    (out, cut)
-}
-
 /// Where the kept start of the output ends, for the dropped-bytes notice.
 fn head_cut(text: &str) -> usize {
     let mut i = KEEP_HEAD.min(text.len());
@@ -463,86 +339,6 @@ mod tests {
             a["timeout"] = json!(t);
         }
         run(a.as_object().unwrap().clone(), &c, false).await
-    }
-
-    fn argv(a: &[&str]) -> Vec<String> {
-        a.iter().map(|s| (*s).to_owned()).collect()
-    }
-
-    fn opts(cwd: &Path) -> Capture {
-        Capture {
-            cwd: cwd.to_owned(),
-            env: vec![("PSI_X".into(), "x".into())],
-            stdin: None,
-            timeout: Duration::from_secs(10),
-            max_bytes: 1 << 20,
-        }
-    }
-
-    #[tokio::test]
-    async fn capture_keeps_streams_apart() {
-        let d = tempfile::tempdir().unwrap();
-        let c = ToolCtx::new(d.path(), &d.path().join("tmp"), 10_000);
-        let sh = |script: &str| argv(&["sh", "-c", script]);
-        let r = capture(
-            &sh("echo out; echo err >&2; echo $PSI_X; exit 3"),
-            opts(d.path()),
-            &c,
-            false,
-        )
-        .await
-        .unwrap();
-        assert_eq!(r.stdout, b"out\nx\n");
-        assert_eq!(r.stderr, b"err\n");
-        assert_eq!((r.code, r.killed, r.truncated), (Some(3), false, false));
-
-        let mut o = opts(d.path());
-        o.stdin = Some(b"a\0b".to_vec());
-        o.max_bytes = 2;
-        let r = capture(&argv(&["cat"]), o, &c, false).await.unwrap();
-        assert_eq!((r.stdout.as_slice(), r.truncated), (&b"a\0"[..], true));
-
-        std::fs::create_dir(d.path().join("sub")).unwrap();
-        let r = capture(&argv(&["pwd"]), opts(&d.path().join("sub")), &c, false)
-            .await
-            .unwrap();
-        assert!(
-            String::from_utf8_lossy(&r.stdout)
-                .trim_end()
-                .ends_with("/sub")
-        );
-
-        let err = capture(&argv(&["no-such-program-psi"]), opts(d.path()), &c, false)
-            .await
-            .unwrap_err();
-        assert!(err.starts_with("cannot start no-such-program-psi"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn capture_stops_on_timeout_and_abort() {
-        let d = tempfile::tempdir().unwrap();
-        let c = ToolCtx::new(d.path(), &d.path().join("tmp"), 10_000);
-        let start = Instant::now();
-        let mut o = opts(d.path());
-        o.timeout = Duration::from_millis(300);
-        let r = capture(&argv(&["sh", "-c", "echo hi; sleep 30"]), o, &c, false)
-            .await
-            .unwrap();
-        assert!(start.elapsed() < Duration::from_secs(5));
-        assert_eq!(
-            (r.code, r.killed, r.stdout.as_slice()),
-            (None, true, &b"hi\n"[..])
-        );
-
-        let cancel = c.cancel.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            cancel.cancel();
-        });
-        let r = capture(&argv(&["sleep", "30"]), opts(d.path()), &c, false)
-            .await
-            .unwrap();
-        assert!(r.killed && start.elapsed() < Duration::from_secs(8));
     }
 
     #[tokio::test]

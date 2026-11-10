@@ -3,19 +3,16 @@
 //! budget stops it.
 
 pub mod approval;
+mod call;
 mod compact;
 mod events;
-pub mod ext;
 mod generating;
 pub mod guards;
 mod messages;
-pub mod plan;
 pub mod post_edit;
 pub mod prompt;
 pub mod recovery;
 mod run;
-pub mod services;
-pub mod subagent;
 
 pub use compact::{CompactionSettings, SummaryForm};
 pub use events::AgentEvent;

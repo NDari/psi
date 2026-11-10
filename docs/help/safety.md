@@ -13,5 +13,5 @@ What asks, what can be undone, and the sandbox.
   files there last between calls; on macOS /tmp is shared. A blocked write offers to rerun outside the sandbox or to make the
   directory writable. network: off cuts bash off.
 - Headless runs (-p) never ask: what would ask is denied, unless --allow <entry> allows it.
-- File-tool writes into .psi/ directories (psi's own settings and extensions) ask first. A
-  project's .psi loads once you trust it, and /reload asks again when it has changed since.
+- File-tool writes into .psi/ directories (psi's own settings) ask first. A
+  project's .psi loads once you trust it.

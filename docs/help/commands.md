@@ -9,17 +9,15 @@ Slash commands and keys in the interactive mode.
 - /help, /inspect, /diff and /show open in $PAGER (less if unset).
 - /copy: the last answer to the clipboard; /copy code: its last code block (OSC 52;
   in tmux, set -g allow-passthrough on).
-- /mode auto|strict, /plan, /todos, /mcp, /theme, /label <text>, /new, /resume, /fork, /reload, /quit.
-- /<template> args runs a prompt template; /skill:<name> args puts a skill in the conversation.
+- /mode auto|strict, /label <text>, /new, /resume, /fork, /quit.
 
 Keys: Enter sends (while a run is going, it steers it), Alt+Enter queues a follow-up,
 Shift+Enter (or Ctrl+J, which works in any terminal) is a new line, Esc aborts, Ctrl+C clears (twice quits), Ctrl+D quits,
-Ctrl+Alt+P toggles plan mode, Ctrl+G edits the prompt in $VISUAL or $EDITOR,
+Ctrl+G edits the prompt in $VISUAL or $EDITOR,
 Ctrl+R searches earlier prompts, Ctrl+S puts the draft aside (again brings it back).
 A paste over 10 lines or 1,000 characters shows as [Pasted text #1 +N lines] and is
 sent whole; invisible characters (Unicode tags, bidi controls) are removed from pastes. @path adds a file reference; !cmd runs a command
-yourself and gives its output to the model (!!cmd keeps it out). Rebind keys in
-~/.psi/keybindings.json (psi help keybindings).
+yourself and gives its output to the model (!!cmd keeps it out).
 
 Status line: context used (yellow from 70%, red from 90%), tok/s, prompt read speed,
 cache reuse, time to first token; the spinner shows llama-server reading a long prompt,

@@ -607,10 +607,9 @@ fn cut(text: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapter::pi::convert;
     use serde_json::json;
 
-    const FIXTURE: &str = include_str!("../tests/fixtures/pi-run.jsonl");
+    const FIXTURE: &str = include_str!("../tests/fixtures/recorded-run.jsonl");
 
     fn call(name: &str, args: Value, is_error: bool) -> Call {
         Call {
@@ -662,10 +661,10 @@ mod tests {
     }
 
     #[test]
-    fn timeline_of_a_real_pi_run() {
-        let run = convert(FIXTURE.as_bytes()).unwrap();
+    fn timeline_of_a_recorded_run() {
+        let entries = psi_session::read_entries(FIXTURE.as_bytes()).unwrap();
         let t = timeline(&Record {
-            entries: run.entries,
+            entries,
             result: None,
         });
         assert_eq!(t.cwd.as_deref(), Some("/work/project"));
@@ -716,9 +715,9 @@ mod tests {
 
     #[test]
     fn step_filter_shows_one_step() {
-        let run = convert(FIXTURE.as_bytes()).unwrap();
+        let entries = psi_session::read_entries(FIXTURE.as_bytes()).unwrap();
         let t = timeline(&Record {
-            entries: run.entries,
+            entries,
             result: None,
         });
         let one = Filter {
@@ -732,7 +731,7 @@ mod tests {
 
     #[test]
     fn labels_show_where_written_and_in_filtered_views() {
-        let mut entries = convert(FIXTURE.as_bytes()).unwrap().entries;
+        let mut entries = psi_session::read_entries(FIXTURE.as_bytes()).unwrap();
         // After the first step's result, as a /label during the run writes it.
         let at = entries
             .iter()

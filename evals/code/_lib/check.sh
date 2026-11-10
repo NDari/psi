@@ -37,25 +37,3 @@ check_output() {
 unittests() {
   timeout 120 python3 /evallib/unittest_check.py "$@" 2>/dev/null || true
 }
-
-# exttests DIR TEST...: run hidden *_test.lua files with `psi ext test`
-# against the extension in DIR (its own *_test.lua files left out), one
-# line per test case. A case that never ran (the extension failed to load)
-# prints nothing, which counts as failed; psi's own messages are kept as
-# "note:" lines.
-exttests() {
-  local dir=$1 tmp
-  shift
-  tmp=$(mktemp -d)
-  if [ -d "$dir" ]; then
-    cp -r "$dir"/. "$tmp"/
-    find "$tmp" -name '*_test.lua' -delete
-  fi
-  cp "$@" "$tmp"/
-  timeout 120 psi ext test "$tmp" 2>&1 | awk '
-    /^ok    / { sub(/^ok    [^:]*: /, ""); print "PASS " $0; next }
-    /^FAIL  / { sub(/^FAIL  [^:]*: /, ""); name = $0; getline why; sub(/^ +/, "", why); print "FAIL " name ": " substr(why, 1, 200); next }
-    { print "note: " substr($0, 1, 200) }
-  '
-  rm -rf "$tmp"
-}

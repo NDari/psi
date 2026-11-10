@@ -1,6 +1,6 @@
 //! Shell completion values that come from the disk (clap_complete's
 //! dynamic completion, `COMPLETE=fish psi | source`): help topics, model
-//! profiles, this directory's sessions, eval tasks and the examples.
+//! profiles, this directory's sessions, and eval tasks.
 //! Each runs when the shell asks, so it stays cheap and never fails.
 
 use std::ffi::OsString;
@@ -21,12 +21,9 @@ fn candidate(value: impl Into<OsString>, help: &str) -> CompletionCandidate {
 
 /// `psi help <topic>`.
 pub fn topics() -> Vec<CompletionCandidate> {
-    std::iter::once(candidate("api", psi_cli::help::API_SUMMARY))
-        .chain(
-            psi_cli::help::TOPICS
-                .iter()
-                .map(|(name, text)| candidate(name, text.lines().next().unwrap_or(""))),
-        )
+    psi_cli::help::TOPICS
+        .iter()
+        .map(|(name, text)| candidate(name, text.lines().next().unwrap_or("")))
         .collect()
 }
 
@@ -100,14 +97,6 @@ pub fn tasks() -> Vec<CompletionCandidate> {
     out
 }
 
-/// `psi ext example <name>`.
-pub fn examples() -> Vec<CompletionCandidate> {
-    psi_cli::examples::EXAMPLES
-        .iter()
-        .map(|e| candidate(e.name, e.shows))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,11 +108,10 @@ mod tests {
     }
 
     #[test]
-    fn topics_and_examples_come_with_their_summaries() {
+    fn topics_come_with_their_summaries() {
         let t = topics();
-        assert!(values(&t).contains(&"extensions".to_owned()));
+        assert!(values(&t).contains(&"safety".to_owned()));
         assert!(t.iter().all(|c| c.get_help().is_some()));
-        assert!(values(&examples()).contains(&"changes".to_owned()));
     }
 
     #[test]

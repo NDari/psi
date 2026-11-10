@@ -123,15 +123,14 @@ pub async fn replay(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapter::pi::convert;
     use psi_ai::replay::ReplayServer;
 
-    const FIXTURE: &str = include_str!("../tests/fixtures/pi-run.jsonl");
+    const FIXTURE: &str = include_str!("../tests/fixtures/recorded-run.jsonl");
 
     #[test]
-    fn a_pi_run_becomes_a_script() {
-        let run = convert(FIXTURE.as_bytes()).unwrap();
-        let script = script_from_entries(&run.entries);
+    fn a_recorded_run_becomes_a_script() {
+        let entries = psi_session::read_entries(FIXTURE.as_bytes()).unwrap();
+        let script = script_from_entries(&entries);
         assert_eq!(
             script.len(),
             2,

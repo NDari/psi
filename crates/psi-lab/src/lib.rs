@@ -2,7 +2,6 @@
 //!
 //! Library code never prints; long runs report progress through a callback.
 
-pub mod adapter;
 mod error;
 pub mod eval;
 mod fsutil;

@@ -156,7 +156,7 @@ impl Fx {
             enable_thinking: None,
             budgets,
             system_prompt: "sys".into(),
-            tools: core_tools(false),
+            tools: core_tools(),
             home: Some(self.home.clone()),
         };
         Agent::new(Client::new(&server.base_url()), session, cfg, ctx).with_safety(safety)
@@ -483,17 +483,16 @@ async fn a_budget_pauses_in_the_tui_and_going_on_gives_as_much_again() {
 
 #[tokio::test]
 async fn an_approved_write_into_psi_config_goes_through() {
-    // Building an extension the user asked for (2026-11-03): the user
-    // approves each file, and a later edit of it asks again.
+    // The user approves each file, and a later edit of it asks again.
     let fx = Fx::new();
     let server = ReplayServer::start(vec![
         call(
             "write",
-            json!({"path": ".psi/extensions/x/init.lua", "text": "return {}\n"}),
+            json!({"path": ".psi/settings.jsonc", "text": "{}\n"}),
         ),
         call(
             "edit",
-            json!({"path": ".psi/extensions/x/init.lua", "old_text": "{}", "new_text": "{ name = 'x' }"}),
+            json!({"path": ".psi/settings.jsonc", "old_text": "{}", "new_text": "{ \"a\": 1 }"}),
         ),
         text("ok"),
     ])
@@ -517,15 +516,12 @@ async fn an_approved_write_into_psi_config_goes_through() {
         w.lock().unwrap().push(p.to_path_buf());
     }));
     a.run("go").await;
-    let file = fx.root.join(".psi/extensions/x/init.lua");
-    assert_eq!(std::fs::read_to_string(&file).unwrap(), "return {}\n");
+    let file = fx.root.join(".psi/settings.jsonc");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "{}\n");
     // Only the write that went through, not the denied edit.
     assert_eq!(*written.lock().unwrap(), std::slice::from_ref(&file));
-    // The write that went through says it loads on /reload; the denied
-    // edit doesn't.
     let r = results(&a);
-    assert!(r[0].0.ends_with("tell the user to run it."), "{r:?}");
-    assert!(r[1].1 && !r[1].0.contains("/reload"), "{r:?}");
+    assert!(!r[0].1 && r[1].1, "{r:?}");
     let asked = approver.asked.lock().unwrap();
     assert_eq!(asked.len(), 2);
     assert!(

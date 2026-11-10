@@ -5,9 +5,7 @@ pub mod bash;
 mod edit;
 mod files;
 mod read;
-mod search;
 mod text;
-pub mod todo;
 mod write;
 
 use std::path::{Path, PathBuf};
@@ -19,7 +17,6 @@ use serde_json::{Map, Value};
 use tokio_util::sync::CancellationToken;
 
 pub use files::FileTracker;
-pub use todo::TodoList;
 
 /// What a tool needs from the session.
 #[derive(Debug, Clone)]
@@ -34,8 +31,6 @@ pub struct ToolCtx {
     pub cancel: CancellationToken,
     /// The boundary bash runs inside; `None` runs it directly (§8.4).
     pub sandbox: Option<Arc<Sandbox>>,
-    /// The todo tool's list, rebuilt from the branch at each run.
-    pub todos: Arc<Mutex<TodoList>>,
 }
 
 impl ToolCtx {
@@ -47,7 +42,6 @@ impl ToolCtx {
             tmpdir: tmpdir.to_owned(),
             cancel: CancellationToken::new(),
             sandbox: None,
-            todos: Arc::new(Mutex::new(TodoList::default())),
         }
     }
 
@@ -99,21 +93,11 @@ pub enum Tool {
     Write,
     Edit,
     Bash,
-    Grep,
-    Find,
-    Ls,
-    /// The task list (D-34); offered when the `todo` setting is on.
-    Todo,
-    // Extension and script tools are psi_agent::ext::Callable::Ext.
 }
 
-/// The tools a session offers: pi's four, plus grep/find/ls when enabled (D-17).
-pub fn core_tools(grep_find_ls: bool) -> Vec<Tool> {
-    let mut t = vec![Tool::Read, Tool::Write, Tool::Edit, Tool::Bash];
-    if grep_find_ls {
-        t.extend([Tool::Grep, Tool::Find, Tool::Ls]);
-    }
-    t
+/// The tools a session offers.
+pub fn core_tools() -> Vec<Tool> {
+    vec![Tool::Read, Tool::Write, Tool::Edit, Tool::Bash]
 }
 
 impl Tool {
@@ -123,26 +107,13 @@ impl Tool {
             Tool::Write => "write",
             Tool::Edit => "edit",
             Tool::Bash => "bash",
-            Tool::Grep => "grep",
-            Tool::Find => "find",
-            Tool::Ls => "ls",
-            Tool::Todo => "todo",
         }
     }
 
     pub fn from_name(name: &str) -> Option<Self> {
-        [
-            Tool::Read,
-            Tool::Write,
-            Tool::Edit,
-            Tool::Bash,
-            Tool::Grep,
-            Tool::Find,
-            Tool::Ls,
-            Tool::Todo,
-        ]
-        .into_iter()
-        .find(|t| t.name() == name)
+        [Tool::Read, Tool::Write, Tool::Edit, Tool::Bash]
+            .into_iter()
+            .find(|t| t.name() == name)
     }
 
     pub fn schema(self) -> ToolSchema {
@@ -151,16 +122,12 @@ impl Tool {
             Tool::Write => write::schema(),
             Tool::Edit => edit::schema(),
             Tool::Bash => bash::schema(),
-            Tool::Grep => search::grep_schema(),
-            Tool::Find => search::find_schema(),
-            Tool::Ls => search::ls_schema(),
-            Tool::Todo => todo::schema(),
         }
     }
 
     /// Read-only calls in one response may run in parallel (§5).
     pub fn read_only(self) -> bool {
-        matches!(self, Tool::Read | Tool::Grep | Tool::Find | Tool::Ls)
+        matches!(self, Tool::Read)
     }
 
     /// The file a mutating call changes, so calls on one path run in order.
@@ -181,10 +148,6 @@ impl Tool {
             Tool::Read => read::run,
             Tool::Write => write::run,
             Tool::Edit => edit::run,
-            Tool::Grep => search::grep,
-            Tool::Find => search::find,
-            Tool::Ls => search::ls,
-            Tool::Todo => todo::run,
         };
         let (args, ctx) = (args.clone(), ctx.clone());
         tokio::task::spawn_blocking(move || f(&args, &ctx))

@@ -19,8 +19,6 @@ pub struct ModelProfile {
     /// "endpoint" (the server's tokenizer) or "estimate" (D-20).
     #[serde(default = "default_tokenizer")]
     pub tokenizer: String,
-    #[serde(default)]
-    pub tools: ToolsConfig,
     /// Request headers, such as `Authorization` for a registered provider.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub headers: Vec<(String, String)>,
@@ -65,13 +63,6 @@ pub struct Reasoning {
     pub enable_thinking: Option<bool>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct ToolsConfig {
-    /// The optional grep, find and ls tools (D-17, H-10).
-    #[serde(default)]
-    pub grep_find_ls: bool,
-}
-
 fn default_provider() -> String {
     "openai-compat".into()
 }
@@ -96,7 +87,6 @@ impl ModelProfile {
             max_output: default_max_output(),
             reasoning: Reasoning::default(),
             tokenizer: default_tokenizer(),
-            tools: ToolsConfig::default(),
             headers: Vec::new(),
         }
     }

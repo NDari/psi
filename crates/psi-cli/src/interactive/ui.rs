@@ -8,10 +8,8 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use psi_agent::approval::{Approval, ApprovalRequest, BlockedChoice, BlockedRequest};
-use psi_agent::plan::PlanState;
 use psi_agent::recovery::Change;
 use psi_agent::{AgentEvent, Queues, RunOutcome, Stop};
-use psi_ext::{ExtManager, Request as ExtRequest};
 use psi_safety::policy::Mode;
 use psi_session::{Entry, EntryBody, Role, text_of};
 use psi_tui::term::{Activity, Term, title_for};
@@ -22,7 +20,6 @@ use psi_tui::{
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -41,9 +38,6 @@ pub enum UiMsg {
     Approve(ApprovalRequest, oneshot::Sender<Approval>),
     Blocked(BlockedRequest, oneshot::Sender<BlockedChoice>),
     Pause(String, oneshot::Sender<bool>),
-    /// /reload found the project's `.psi` changed since it was trusted:
-    /// what it holds, and whether to load it.
-    Trust(String, oneshot::Sender<bool>),
     RunDone(RunOutcome),
     /// The model server is up (the TUI started without one).
     Connected {
@@ -55,14 +49,6 @@ pub enum UiMsg {
     Error(String),
     /// The reply to /compact.
     Compacted(Result<String, String>),
-    /// The `input` event's answer: the text to send on, or None when a
-    /// handler consumed it.
-    Input {
-        text: Option<String>,
-        follow_up: bool,
-        /// From an extension: a prompt only (see `submit_from`).
-        plain: bool,
-    },
     Restored {
         what: String,
         written: usize,
@@ -88,36 +74,7 @@ pub enum UiMsg {
         output: String,
         to_context: bool,
     },
-    /// An extension's request (§9.7).
-    Ext(String, ExtRequest),
 }
-
-/// An extension's dialog under the input box.
-enum ExtModal {
-    Confirm {
-        ext: String,
-        title: String,
-        message: String,
-        reply: oneshot::Sender<bool>,
-    },
-    Input {
-        ext: String,
-        title: String,
-        text: String,
-        reply: oneshot::Sender<Option<String>>,
-    },
-    /// A custom component, drawn by the extension each frame under a
-    /// deadline; the last frame stays when it is late.
-    Custom {
-        ext: String,
-        id: u64,
-        reply: oneshot::Sender<Option<Value>>,
-        last: Vec<Line>,
-    },
-}
-
-/// How long a frame waits for an extension's component or renderer.
-const EXT_FRAME: Duration = Duration::from_millis(8);
 
 /// The slash commands, for completion and /help.
 pub const COMMANDS: &[(&str, &str)] = &[
@@ -145,10 +102,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "/copy",
         "copy the last answer to the clipboard; /copy code: its last code block",
     ),
-    ("/todos", "the todo list on this branch"),
     ("/mode", "auto or strict: /mode strict"),
-    ("/plan", "plan mode on or off: read-only, ends with a plan"),
-    ("/theme", "list the themes, or switch: /theme <name>"),
     (
         "/label",
         "mark this point for a later review, also while the model works: /label <text>",
@@ -160,8 +114,6 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "a new session from before an earlier prompt, to edit and resend it",
     ),
     ("/inspect", "the session as an inspection timeline"),
-    ("/mcp", "the MCP servers: state, tools and their size"),
-    ("/reload", "load the extensions again"),
     ("/quit", "leave psi"),
 ];
 
@@ -212,13 +164,6 @@ struct Card {
 }
 
 enum Picker {
-    /// An extension's ui.select.
-    Select {
-        title: String,
-        items: Vec<String>,
-        sel: usize,
-        reply: oneshot::Sender<Option<String>>,
-    },
     /// Pick an entry; `files` restores files too (/rewind).
     Goto {
         items: Vec<(String, String)>,
@@ -234,10 +179,6 @@ enum Picker {
         items: Vec<(String, String)>,
         sel: usize,
     },
-    /// What to do with a proposed plan.
-    Plan {
-        sel: usize,
-    },
     /// Ctrl+R: earlier prompts, newest first, filtered by `query`.
     History {
         query: String,
@@ -245,8 +186,6 @@ enum Picker {
         sel: usize,
     },
 }
-
-const PLAN_CHOICES: [&str; 3] = ["Carry out the plan", "Stay in plan mode", "Refine the plan"];
 
 /// What a committed tool call was, for /show.
 struct Shown {
@@ -293,7 +232,6 @@ pub struct App<W: Write> {
     ask: Ask,
     blocked: Option<(BlockedRequest, oneshot::Sender<BlockedChoice>)>,
     pause: Option<(String, oneshot::Sender<bool>)>,
-    trust: Option<(String, oneshot::Sender<bool>)>,
     picker: Option<Picker>,
     pending_entries: Option<&'static str>,
     completer: Completer,
@@ -308,17 +246,7 @@ pub struct App<W: Write> {
     session_path: PathBuf,
     label_text: Option<String>,
     debug: bool,
-    ext: Arc<ExtManager>,
-    rt: tokio::runtime::Handle,
     ui_tx: UnboundedSender<UiMsg>,
-    ext_modal: Option<ExtModal>,
-    ext_status: BTreeMap<String, String>,
-    widgets: BTreeMap<String, Vec<Line>>,
-    resources: Arc<psi_cli::resources::Resources>,
-    /// Plan mode as the agent last recorded it.
-    plan: PlanState,
-    /// A plan was proposed during this run: offer it when the run ends.
-    plan_proposed: bool,
     keymap: Keymap,
     /// A draft put aside with Ctrl+S.
     stash: Option<String>,
@@ -347,10 +275,7 @@ pub struct AppParts<W: Write> {
     /// The session file in use, left out of /resume.
     pub session_path: PathBuf,
     pub history: Vec<String>,
-    pub ext: Arc<ExtManager>,
-    pub rt: tokio::runtime::Handle,
     pub ui_tx: UnboundedSender<UiMsg>,
-    pub resources: Arc<psi_cli::resources::Resources>,
     pub keymap: Keymap,
     pub term: Term,
     pub notify: Notify,
@@ -362,14 +287,7 @@ impl<W: Write> App<W> {
         let mut editor = Editor::new();
         editor.set_history(p.history);
         editor.set_keymap(p.keymap.clone());
-        let mut completer = p.completer;
-        completer.extra = p
-            .ext
-            .commands()
-            .into_iter()
-            .map(|(n, d, _)| (format!("/{n}"), d))
-            .collect();
-        completer.extra.extend(p.resources.commands());
+        let completer = p.completer;
         // The input box stays at the bottom of the screen (§11.2).
         let mut r = Renderer::new(p.out, p.width, p.height);
         r.set_pinned(true);
@@ -390,7 +308,6 @@ impl<W: Write> App<W> {
             },
             blocked: None,
             pause: None,
-            trust: None,
             picker: None,
             pending_entries: None,
             completer,
@@ -404,15 +321,7 @@ impl<W: Write> App<W> {
             sessions_dir: p.sessions_dir,
             session_path: p.session_path,
             label_text: None,
-            ext: p.ext,
-            rt: p.rt,
             ui_tx: p.ui_tx,
-            ext_modal: None,
-            ext_status: BTreeMap::new(),
-            widgets: BTreeMap::new(),
-            resources: p.resources,
-            plan: PlanState::default(),
-            plan_proposed: false,
             keymap: p.keymap,
             stash: None,
             pastes: Pastes::default(),
@@ -452,15 +361,7 @@ impl<W: Write> App<W> {
     }
 
     fn activity(&self) -> Activity {
-        let waiting = self.card.is_some()
-            || self.blocked.is_some()
-            || self.pause.is_some()
-            || self.trust.is_some()
-            || self.ext_modal.is_some()
-            || matches!(
-                self.picker,
-                Some(Picker::Select { .. } | Picker::Plan { .. })
-            );
+        let waiting = self.card.is_some() || self.blocked.is_some() || self.pause.is_some();
         if waiting {
             Activity::Waiting
         } else if self.running.is_some() {
@@ -633,37 +534,8 @@ impl<W: Write> App<W> {
             }
             return;
         }
-        if self.trust.is_some() {
-            if let Some(i) = self.ask_key(&k)
-                && let Some((_, tx)) = self.trust.take()
-            {
-                let _ = tx.send(i == 0);
-                self.reset_ask();
-            }
-            return;
-        }
-        if self.ext_modal.is_some() {
-            return self.modal_key(k);
-        }
-        if let Some(name) = key_name(&k)
-            && self.ext.shortcuts().iter().any(|(s, _)| *s == name)
-        {
-            let (ext, tx) = (self.ext.clone(), self.ui_tx.clone());
-            self.rt.spawn(async move {
-                if let Err(e) = ext.run_shortcut(&name).await {
-                    let _ = tx.send(UiMsg::Error(e));
-                }
-            });
-            return;
-        }
         if self.picker.is_some() {
             return self.picker_key(k);
-        }
-        if self.keymap.is(Action::PlanToggle, &k) {
-            if self.running.is_some() {
-                return self.error("/plan waits until the run ends (Esc aborts it)");
-            }
-            return self.send(Cmd::Plan);
         }
         if self.keymap.is(Action::ExternalEditor, &k) {
             return self.external_editor();
@@ -942,12 +814,6 @@ impl<W: Write> App<W> {
         if self.pause.is_some() {
             return Some((own(&["Continue", "Stop the run"]), 1));
         }
-        if self.trust.is_some() {
-            return Some((own(&["Load it", "Don't reload"]), 1));
-        }
-        if let Some(ExtModal::Confirm { .. }) = &self.ext_modal {
-            return Some((own(&["Yes", "No"]), 1));
-        }
         None
     }
 
@@ -987,8 +853,6 @@ impl<W: Write> App<W> {
         let (n, sel) = match p {
             Picker::Goto { items, sel, .. } | Picker::Fork { items, sel } => (items.len(), sel),
             Picker::Resume { items, sel } => (items.len(), sel),
-            Picker::Select { items, sel, .. } => (items.len(), sel),
-            Picker::Plan { sel } => (PLAN_CHOICES.len(), sel),
             Picker::History { items, sel, .. } => (items.len(), sel),
         };
         match k.code {
@@ -1018,20 +882,6 @@ impl<W: Write> App<W> {
                         self.send(Cmd::Fork(id.clone()));
                     }
                 }
-                Some(Picker::Select {
-                    items, sel, reply, ..
-                }) => {
-                    let _ = reply.send(items.get(sel).cloned());
-                }
-                Some(Picker::Plan { sel }) => match sel {
-                    0 => {
-                        self.commit_user("Carry out the plan");
-                        self.running = Some(Running::new(false));
-                        self.send(Cmd::ExecutePlan);
-                    }
-                    1 => self.info("  still in plan mode"),
-                    _ => self.info("  say what to change; plan mode stays on"),
-                },
                 Some(Picker::History { .. }) | None => {}
             },
             _ => {}
@@ -1148,57 +998,9 @@ impl<W: Write> App<W> {
         self.completer.close();
     }
 
-    /// Esc on a picker: an extension's select answers nil.
+    /// Esc on a picker.
     fn close_picker(&mut self) {
-        if let Some(Picker::Select { reply, .. }) = self.picker.take() {
-            let _ = reply.send(None);
-        }
-    }
-
-    fn modal_key(&mut self, k: KeyEvent) {
-        let Some(m) = &mut self.ext_modal else { return };
-        match m {
-            ExtModal::Confirm { .. } => {
-                let Some(i) = self.ask_key(&k) else { return };
-                if let Some(ExtModal::Confirm { reply, .. }) = self.ext_modal.take() {
-                    let _ = reply.send(i == 0);
-                }
-                self.reset_ask();
-            }
-            ExtModal::Input { text, .. } => match k.code {
-                KeyCode::Enter | KeyCode::Esc => {
-                    if let Some(ExtModal::Input { text, reply, .. }) = self.ext_modal.take() {
-                        let _ = reply.send((k.code == KeyCode::Enter).then_some(text));
-                    }
-                }
-                KeyCode::Backspace => {
-                    text.pop();
-                }
-                KeyCode::Char(c) => text.push(c),
-                _ => {}
-            },
-            ExtModal::Custom { ext, id, .. } => {
-                let name = key_name(&k).or_else(|| match k.code {
-                    KeyCode::Char(c) => Some(c.to_string()),
-                    _ => None,
-                });
-                let Some(name) = name else { return };
-                let out = self
-                    .ext
-                    .component_input(ext, *id, &name, Duration::from_secs(1));
-                // A nil answer keeps it open; Esc with no answer closes it.
-                let close = match out {
-                    Some(v) => Some(Some(v)),
-                    None if k.code == KeyCode::Esc => Some(None),
-                    None => None,
-                };
-                if let Some(v) = close
-                    && let Some(ExtModal::Custom { reply, .. }) = self.ext_modal.take()
-                {
-                    let _ = reply.send(v);
-                }
-            }
-        }
+        self.picker = None;
     }
 
     fn abort(&mut self) {
@@ -1208,78 +1010,23 @@ impl<W: Write> App<W> {
         self.info("  aborting…");
     }
 
+    /// Commands and `!bash` first; anything else goes to the agent.
     fn submit(&mut self, text: String, follow_up: bool) {
-        self.submit_from(text, follow_up, "interactive");
-    }
-
-    /// Commands and `!bash` first; then the `input` event (pi parity),
-    /// whose handlers may change or consume the text; then skills,
-    /// prompt templates and the agent (`after_input`).
-    /// Text from the user, or from an extension's `psi.send_user_message`.
-    /// An extension's is only ever a prompt: its `/` and `!` don't run
-    /// commands or shell, which would bypass the policy (D-45).
-    fn submit_from(&mut self, text: String, follow_up: bool, source: &'static str) {
         let t = text.trim().to_owned();
         if t.is_empty() {
             return;
         }
-        let plain = source == "extension";
-        if !plain
-            && let Some(cmd) = t.strip_prefix('/')
+        if let Some(cmd) = t.strip_prefix('/')
             && !cmd.split_whitespace().next().unwrap_or("").contains('/')
         {
-            let name = cmd.split_whitespace().next().unwrap_or("");
-            let builtin = COMMANDS.iter().any(|(c, _)| &c[1..] == name)
-                || ["?", "exit", "q"].contains(&name)
-                || self.ext.commands().iter().any(|(n, _, _)| n == name);
-            if builtin {
-                return self.slash(cmd);
-            }
+            return self.slash(cmd);
         }
-        if !plain && let Some(c) = t.strip_prefix('!') {
+        if let Some(c) = t.strip_prefix('!') {
             let (command, to_context) = match c.strip_prefix('!') {
                 Some(rest) => (rest.trim().to_owned(), false),
                 None => (c.trim().to_owned(), true),
             };
             return self.user_bash(command, to_context);
-        }
-        if self.ext.listens("input") {
-            let (ext, tx) = (self.ext.clone(), self.ui_tx.clone());
-            self.rt.spawn(async move {
-                let out = ext
-                    .chain("input", serde_json::json!({"text": t, "source": source}))
-                    .await;
-                let text = if out["handled"] == serde_json::Value::Bool(true) {
-                    None
-                } else {
-                    Some(out["text"].as_str().unwrap_or(&t).to_owned())
-                };
-                let _ = tx.send(UiMsg::Input {
-                    text,
-                    follow_up,
-                    plain,
-                });
-            });
-            return;
-        }
-        self.after_input(t, follow_up, plain);
-    }
-
-    fn after_input(&mut self, t: String, follow_up: bool, plain: bool) {
-        if !plain
-            && let Some(cmd) = t.strip_prefix('/')
-            && !cmd.split_whitespace().next().unwrap_or("").contains('/')
-        {
-            // Skills and prompt templates (D-35); built-ins won above.
-            match self.resources.expand(&t) {
-                Ok(Some(e)) => {
-                    let text = e.text.clone();
-                    self.info(&format!("  {}", e.note));
-                    return self.send_prompt(text, follow_up);
-                }
-                Ok(None) => return self.slash(cmd),
-                Err(e) => return self.error(&e),
-            }
         }
         self.send_prompt(t, follow_up);
     }
@@ -1338,7 +1085,6 @@ impl<W: Write> App<W> {
     }
 
     fn commit_user(&mut self, t: &str) {
-        let t = &shown_user_text(t);
         let mut lines = vec![Line::default()];
         for l in t.lines() {
             let mut line = Line::default();
@@ -1419,7 +1165,7 @@ impl<W: Write> App<W> {
         let busy = self.running.is_some();
         let needs_idle = matches!(
             name,
-            "undo" | "rewind" | "tree" | "new" | "resume" | "mode" | "plan" | "compact"
+            "undo" | "rewind" | "tree" | "new" | "resume" | "mode" | "compact"
         );
         if busy && needs_idle {
             return self.error(&format!("/{name} waits until the run ends (Esc aborts it)"));
@@ -1430,18 +1176,6 @@ impl<W: Write> App<W> {
                 for (c, d) in COMMANDS {
                     let mut l = Line::default();
                     l.push(format!("  {c:<10}"), theme::style(Token::Accent));
-                    l.push(d, dim());
-                    lines.push(l);
-                }
-                for (c, d, ext) in self.ext.commands() {
-                    let mut l = Line::default();
-                    l.push(format!("  /{c:<9}"), theme::style(Token::Accent));
-                    l.push(format!("{d} ({ext})"), dim());
-                    lines.push(l);
-                }
-                for (k, d) in self.ext.shortcuts() {
-                    let mut l = Line::default();
-                    l.push(format!("  {k:<12}"), theme::style(Token::Accent));
                     l.push(d, dim());
                     lines.push(l);
                 }
@@ -1470,14 +1204,12 @@ impl<W: Write> App<W> {
             }
             "diff" => self.send(Cmd::Diff),
             "copy" => self.copy(arg),
-            "mcp" => self.send(Cmd::Mcp),
-            "rewind" | "tree" | "fork" | "stats" | "inspect" | "todos" => {
+            "rewind" | "tree" | "fork" | "stats" | "inspect" => {
                 self.pending_entries = Some(match name {
                     "rewind" => "rewind",
                     "tree" => "tree",
                     "fork" => "fork",
                     "stats" => "stats",
-                    "todos" => "todos",
                     _ => "inspect",
                 });
                 self.send(Cmd::Entries);
@@ -1552,35 +1284,6 @@ impl<W: Write> App<W> {
                 self.send(Cmd::Entries);
             }
             "new" => self.send(Cmd::New),
-            "reload" => self.send(Cmd::Reload),
-            "plan" => self.send(Cmd::Plan),
-            "theme" => {
-                if arg.is_empty() {
-                    let mut names = vec!["default".to_owned()];
-                    names.extend(self.resources.themes.iter().map(|t| t.name.clone()));
-                    let now = theme::current_name();
-                    let list: Vec<String> = names
-                        .iter()
-                        .map(|n| {
-                            if *n == now {
-                                format!("{n} (now)")
-                            } else {
-                                n.clone()
-                            }
-                        })
-                        .collect();
-                    return self.info(&format!("  themes: {}", list.join(", ")));
-                }
-                match self.resources.theme(arg) {
-                    Some(t) => {
-                        theme::set(t);
-                        self.info(&format!(
-                            "  theme {arg} for this session; set \"theme\" in settings.jsonc to keep it"
-                        ));
-                    }
-                    None => self.error(&format!("no theme named '{arg}'; /theme lists them")),
-                }
-            }
             "resume" => {
                 let mut files = psi_session::SessionFile::list(&self.sessions_dir);
                 files.reverse();
@@ -1594,15 +1297,6 @@ impl<W: Write> App<W> {
                 self.picker = Some(Picker::Resume {
                     items: files,
                     sel: 0,
-                });
-            }
-            other if self.ext.commands().iter().any(|(n, _, _)| n == other) => {
-                let (ext, tx) = (self.ext.clone(), self.ui_tx.clone());
-                let (name, args) = (other.to_owned(), arg.to_owned());
-                self.rt.spawn(async move {
-                    if let Err(e) = ext.run_command(&name, &args).await {
-                        let _ = tx.send(UiMsg::Error(format!("/{name}: {e}")));
-                    }
                 });
             }
             other => self.error(&format!("no command /{other}; /help lists them")),
@@ -1633,12 +1327,6 @@ impl<W: Write> App<W> {
                 self.pause = Some((reason, tx));
                 self.reset_ask();
                 self.bell("paused: waiting for you");
-            }
-            UiMsg::Trust(what, tx) => {
-                self.flush_text();
-                self.trust = Some((what, tx));
-                self.reset_ask();
-                self.bell("/reload is waiting for you");
             }
             UiMsg::Connected {
                 n_ctx,
@@ -1673,9 +1361,7 @@ impl<W: Write> App<W> {
                     )]),
                     Stop::Failed(r) => self.error(&format!("  failed: {r}")),
                 }
-                self.offer_plan();
                 let what = match &out.stop {
-                    Stop::Done if self.picker.is_some() => "a plan is ready".to_owned(),
                     Stop::Done => "done".to_owned(),
                     Stop::Aborted => "aborted".to_owned(),
                     Stop::Budget(r) | Stop::Guard(r) => format!("stopped: {r}"),
@@ -1695,15 +1381,6 @@ impl<W: Write> App<W> {
                 }
             }
             UiMsg::Error(s) => self.error(&format!("  {s}")),
-            UiMsg::Input {
-                text,
-                follow_up,
-                plain,
-            } => {
-                if let Some(t) = text {
-                    self.after_input(t, follow_up, plain);
-                }
-            }
             UiMsg::Restored {
                 what,
                 written,
@@ -1742,14 +1419,11 @@ impl<W: Write> App<W> {
                 self.shown.clear();
                 self.info(&format!("  {what}: {}", path.display()));
                 self.session_path = path;
-                // The agent takes plan mode from the new session; so does the screen.
-                self.set_plan(PlanState::default());
                 let _ = self.replay(&entries);
                 if let Some(t) = prefill {
                     self.editor.set_text(&t);
                 }
             }
-            UiMsg::Ext(ext, req) => self.on_ext(ext, req),
             UiMsg::UserBash {
                 command,
                 output,
@@ -1777,111 +1451,10 @@ impl<W: Write> App<W> {
         }
     }
 
-    fn on_ext(&mut self, ext: String, req: ExtRequest) {
-        let asking = format!("{ext} is asking");
-        match req {
-            ExtRequest::Notify { message, level } => {
-                let style = match level.as_str() {
-                    "error" => theme::style(Token::Error),
-                    "warning" => theme::style(Token::Warning),
-                    _ => dim(),
-                };
-                self.commit(vec![Line::styled(format!("  [{ext}] {message}"), style)]);
-            }
-            ExtRequest::Confirm {
-                title,
-                message,
-                reply,
-            } => {
-                self.flush_text();
-                self.ext_modal = Some(ExtModal::Confirm {
-                    ext,
-                    title,
-                    message,
-                    reply,
-                });
-                self.reset_ask();
-                self.bell(&asking);
-            }
-            ExtRequest::Input { title, reply, .. } => {
-                self.flush_text();
-                self.ext_modal = Some(ExtModal::Input {
-                    ext,
-                    title,
-                    text: String::new(),
-                    reply,
-                });
-                self.bell(&asking);
-            }
-            ExtRequest::Select {
-                title,
-                options,
-                reply,
-            } => {
-                self.flush_text();
-                self.picker = Some(Picker::Select {
-                    title,
-                    items: options,
-                    sel: 0,
-                    reply,
-                });
-                self.bell(&asking);
-            }
-            ExtRequest::Custom { id, reply } => {
-                self.flush_text();
-                self.ext_modal = Some(ExtModal::Custom {
-                    ext,
-                    id,
-                    reply,
-                    last: Vec::new(),
-                });
-            }
-            ExtRequest::Status { key, text } => match text {
-                Some(t) => {
-                    self.ext_status.insert(key, t);
-                }
-                None => {
-                    self.ext_status.remove(&key);
-                }
-            },
-            ExtRequest::Widget { slot, lines } => match lines {
-                Some(l) => {
-                    self.widgets
-                        .insert(slot, l.iter().map(|x| Line::from_ansi(x)).collect());
-                }
-                None => {
-                    self.widgets.remove(&slot);
-                }
-            },
-            ExtRequest::SendUserMessage { text, follow_up } => {
-                if self.running.is_some() {
-                    let q = if follow_up {
-                        &self.queues.follow_up
-                    } else {
-                        &self.queues.steering
-                    };
-                    if let Ok(mut q) = q.lock() {
-                        q.push_back(text.clone());
-                    }
-                    self.queued.push_back((text, follow_up));
-                } else {
-                    self.submit_from(text, false, "extension");
-                }
-            }
-            _ => {}
-        }
-    }
-
     /// A resumed session: its messages, committed again.
     pub fn replay(&mut self, entries: &[Entry]) -> std::io::Result<()> {
         let leaf = entries.last().map(|e| e.id.clone());
-        let mut plan = None;
         for e in psi_session::branch(entries, leaf.as_deref()) {
-            if let EntryBody::Custom { custom_type, data } = &e.body
-                && custom_type == "plan"
-            {
-                plan = Some(PlanState::from_json(data));
-            }
             // The tool calls too, so a resumed session shows who did what.
             for (id, name, args) in e.tool_calls() {
                 self.calls_by_id
@@ -1923,9 +1496,6 @@ impl<W: Write> App<W> {
                     _ => {}
                 }
             }
-        }
-        if let Some(p) = plan {
-            self.set_plan(p);
         }
         self.draw()
     }
@@ -2001,40 +1571,6 @@ impl<W: Write> App<W> {
                 if let (Some(id), Some(t)) = (leaf, self.label_text.take()) {
                     self.send(Cmd::Label { id, label: Some(t) });
                 }
-            }
-            "todos" => {
-                let list = branch
-                    .iter()
-                    .rev()
-                    .find_map(|e| match &e.body {
-                        EntryBody::Custom { custom_type, data } if custom_type == "todo" => {
-                            Some(psi_tools::TodoList::from_json(data))
-                        }
-                        _ => None,
-                    })
-                    .unwrap_or_default();
-                let done = list.items.iter().filter(|t| t.done).count();
-                let mut lines = vec![Line::default()];
-                if list.items.is_empty() {
-                    lines.push(Line::styled("  no todos on this branch", dim()));
-                } else {
-                    lines.push(Line::styled(
-                        format!("  todos: {done}/{} done", list.items.len()),
-                        dim(),
-                    ));
-                    for t in &list.items {
-                        let mut l = Line::default();
-                        if t.done {
-                            l.push("  ✓ ", theme::style(Token::Success));
-                            l.push(format!("#{} {}", t.id, t.text), dim());
-                        } else {
-                            l.push("  ○ ", dim());
-                            l.push(format!("#{} {}", t.id, t.text), Style::default());
-                        }
-                        lines.push(l);
-                    }
-                }
-                self.commit(lines);
             }
             "stats" => {
                 let lines = stats(&branch);
@@ -2122,14 +1658,6 @@ impl<W: Write> App<W> {
                 }
             }
             AgentEvent::TurnEnd { .. } => self.flush_text(),
-            AgentEvent::Subagent { agent, event } => {
-                if let AgentEvent::ToolStart { name, args, .. } = *event {
-                    self.flush_text();
-                    let w = self.width();
-                    let line = format!("    {agent} › {name} {}", view::call_summary(&name, &args));
-                    self.commit(vec![Line::styled(view::cut(&line, w), dim())]);
-                }
-            }
             AgentEvent::Compacting { tokens } => {
                 self.flush_text();
                 if let Some(r) = &mut self.running {
@@ -2182,12 +1710,7 @@ impl<W: Write> App<W> {
             is_error,
         });
         let n = self.shown.len();
-        let call = serde_json::json!({"name": tool_name, "args": args,
-                                      "result": result, "is_error": is_error});
-        match self.ext.render_tool(tool_name, call, w, EXT_FRAME) {
-            Some(lines) => self.commit(lines.iter().map(|l| Line::from_ansi(l)).collect()),
-            None => self.commit(call_block(n, tool_name, &args, result, is_error, w)),
-        }
+        self.commit(call_block(n, tool_name, &args, result, is_error, w));
     }
 
     fn on_entry(&mut self, e: &Entry) {
@@ -2257,15 +1780,6 @@ impl<W: Write> App<W> {
                     _ => None,
                 };
             }
-            EntryBody::Custom { custom_type, data } if custom_type == "plan" => {
-                let p = PlanState::from_json(data);
-                self.plan_proposed = p.enabled && !p.steps.is_empty();
-                self.set_plan(p);
-                // The run's end and this entry come by different channels.
-                if self.running.is_none() {
-                    self.offer_plan();
-                }
-            }
             EntryBody::Checkpoint { .. } => self.status.checkpoints += 1,
             EntryBody::GuardEvent { guard, message, .. } => {
                 self.commit(vec![Line::styled(
@@ -2303,57 +1817,6 @@ impl<W: Write> App<W> {
             }
             _ => {}
         }
-    }
-
-    /// After a run in plan mode that proposed a plan: show it and ask what next.
-    fn offer_plan(&mut self) {
-        if !std::mem::take(&mut self.plan_proposed) || !self.plan.enabled {
-            return;
-        }
-        let mut lines = vec![
-            Line::default(),
-            Line::styled(
-                format!("  plan: {} steps", self.plan.steps.len()),
-                theme::style(Token::Accent).bold(),
-            ),
-        ];
-        for (i, st) in self.plan.steps.iter().enumerate() {
-            lines.push(Line::raw(format!("  {}. {}", i + 1, st.text)));
-        }
-        self.commit(lines);
-        self.picker = Some(Picker::Plan { sel: 0 });
-    }
-
-    /// The status label and the steps widget follow the plan state.
-    fn set_plan(&mut self, p: PlanState) {
-        self.status.plan = if p.enabled {
-            Some("plan".into())
-        } else if p.executing {
-            Some(format!("plan {}/{}", p.done_count(), p.steps.len()))
-        } else {
-            None
-        };
-        if p.executing {
-            let lines = p
-                .steps
-                .iter()
-                .map(|st| {
-                    let mut l = Line::default();
-                    if st.done {
-                        l.push("  ✓ ", theme::style(Token::Success));
-                        l.push(&st.text, dim());
-                    } else {
-                        l.push("  ○ ", dim());
-                        l.push(&st.text, Style::default());
-                    }
-                    l
-                })
-                .collect();
-            self.widgets.insert("~plan".into(), lines);
-        } else {
-            self.widgets.remove("~plan");
-        }
-        self.plan = p;
     }
 
     /// The live region: streaming text, running calls, queued messages,
@@ -2401,13 +1864,7 @@ impl<W: Write> App<W> {
                 dim(),
             ));
         }
-        for lines in self.widgets.values() {
-            live.extend(lines.iter().map(|l| l.truncate(w)));
-        }
-        let mut status = status_line(&self.status, w);
-        for (k, v) in &self.ext_status {
-            status.push(format!("  {k}: {v}"), dim());
-        }
+        let status = status_line(&self.status, w);
         // A line above and below the input box, then cards and lists,
         // then the stats at the very bottom, as in pi.
         let border = Line::styled("─".repeat(w), theme::style(Token::BorderMuted));
@@ -2417,8 +1874,6 @@ impl<W: Write> App<W> {
         live.extend(rows);
         live.push(border);
         let mut cursor = Some((top + cr, cc));
-        // The answers of whichever card is drawn below (the same order).
-        let (choices, sel) = (self.card_choices(), self.ask.sel);
         if let Some(c) = &self.card {
             live.extend(approval_card(&c.req, c.typing.as_deref(), self.ask.sel, w));
             cursor = None;
@@ -2446,55 +1901,6 @@ impl<W: Write> App<W> {
                 live.extend(view::choices(&items, self.ask.sel, safe, y));
             }
             cursor = None;
-        } else if let Some((what, _)) = &self.trust {
-            let y = theme::style(Token::Warning);
-            let mut lines = what.lines();
-            let first = lines.next().unwrap_or_default();
-            live.push(Line::styled(format!("┌ /reload: {first}"), y));
-            live.push(Line::styled(
-                "│ new or changed since you last trusted it:",
-                Style::default(),
-            ));
-            for l in lines {
-                let l = view::cut(l, w.saturating_sub(6));
-                live.push(Line::styled(format!("│   {l}"), Style::default()));
-            }
-            if let Some((items, safe)) = self.card_choices() {
-                live.extend(view::choices(&items, self.ask.sel, safe, y));
-            }
-            cursor = None;
-        } else if let Some(m) = &mut self.ext_modal {
-            let y = theme::style(Token::Warning);
-            match m {
-                ExtModal::Confirm {
-                    ext,
-                    title,
-                    message,
-                    ..
-                } => {
-                    live.push(Line::styled(format!("┌ {ext}: {title}"), y.bold()));
-                    for l in message.lines().take(6) {
-                        live.push(Line::styled(format!("│ {l}"), Style::default()));
-                    }
-                    if let Some((items, safe)) = choices {
-                        live.extend(view::choices(&items, sel, safe, y));
-                    }
-                }
-                ExtModal::Input {
-                    ext, title, text, ..
-                } => {
-                    live.push(Line::styled(format!("┌ {ext}: {title}"), y.bold()));
-                    live.push(Line::styled(format!("│ {text}▏"), Style::default()));
-                    live.push(Line::styled("└ Enter send · Esc cancel", y));
-                }
-                ExtModal::Custom { ext, id, last, .. } => {
-                    if let Some(lines) = self.ext.component_render(ext, *id, w, EXT_FRAME) {
-                        *last = lines.iter().map(|l| Line::from_ansi(l)).collect();
-                    }
-                    live.extend(last.iter().map(|l| l.truncate(w)));
-                }
-            }
-            cursor = None;
         } else if let Some(p) = &self.picker {
             let (items, sel): (Vec<String>, usize) = match p {
                 Picker::Goto { items, sel, .. } | Picker::Fork { items, sel } => {
@@ -2511,16 +1917,6 @@ impl<W: Write> App<W> {
                         .collect(),
                     *sel,
                 ),
-                Picker::Select {
-                    title, items, sel, ..
-                } => {
-                    live.push(Line::styled(format!("  {title}"), Style::default().bold()));
-                    (items.clone(), *sel)
-                }
-                Picker::Plan { sel } => {
-                    live.push(Line::styled("  what next?", Style::default().bold()));
-                    (PLAN_CHOICES.iter().map(|c| (*c).to_owned()).collect(), *sel)
-                }
                 Picker::History { query, items, sel } => {
                     live.push(Line::styled(
                         format!("  history: {query}▏"),
@@ -2570,54 +1966,6 @@ impl<W: Write> App<W> {
         }
         self.r.draw(&live, cursor)
     }
-}
-
-/// A key as extensions name it: "ctrl+t", "alt+x", "f5", "enter", "up".
-/// A plain character is typing, not a shortcut, so it has no name here.
-/// A `/skill:name` message is long; the screen shows its name and what
-/// followed it.
-fn shown_user_text(t: &str) -> String {
-    let Some(rest) = t.strip_prefix("<skill name=\"") else {
-        return t.to_owned();
-    };
-    let Some((name, _)) = rest.split_once('"') else {
-        return t.to_owned();
-    };
-    match rest.split_once("\n</skill>") {
-        Some((_, after)) if !after.trim().is_empty() => {
-            format!("[skill {name}] {}", after.trim())
-        }
-        Some(_) => format!("[skill {name}]"),
-        None => t.to_owned(),
-    }
-}
-
-pub fn key_name(k: &KeyEvent) -> Option<String> {
-    let base = match k.code {
-        KeyCode::Char(c) => c.to_ascii_lowercase().to_string(),
-        KeyCode::F(n) => format!("f{n}"),
-        KeyCode::Enter => "enter".into(),
-        KeyCode::Esc => "escape".into(),
-        KeyCode::Up => "up".into(),
-        KeyCode::Down => "down".into(),
-        KeyCode::Left => "left".into(),
-        KeyCode::Right => "right".into(),
-        KeyCode::Tab => "tab".into(),
-        KeyCode::Backspace => "backspace".into(),
-        _ => return None,
-    };
-    let mut name = String::new();
-    if k.modifiers.contains(KeyModifiers::CONTROL) {
-        name.push_str("ctrl+");
-    }
-    if k.modifiers.contains(KeyModifiers::ALT) {
-        name.push_str("alt+");
-    }
-    if name.is_empty() && matches!(k.code, KeyCode::Char(_)) {
-        return None;
-    }
-    name.push_str(&base);
-    Some(name)
 }
 
 /// /stats: tokens, timing, guards and asks on the branch.

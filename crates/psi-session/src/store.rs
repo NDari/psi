@@ -38,8 +38,7 @@ impl SessionFile {
         Self::create_at(&dir.join(name))
     }
 
-    /// A new, empty session at `path` (a sub-agent's, next to its
-    /// parent's), creating its directory.
+    /// A new, empty session at `path`, creating its directory.
     pub fn create_at(path: &Path) -> Result<Self, SessionError> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;

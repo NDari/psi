@@ -1,6 +1,5 @@
 // The batteries variant (evals/variants/README.md).
 {
-  "todo": true,
   // Python tasks have tests/; shell tasks are .sh scripts in the top directory.
   "post_edit_check": {
     // tests/ without __init__.py needs discover -s (python3 -m unittest alone finds nothing).

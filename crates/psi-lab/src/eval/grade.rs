@@ -21,17 +21,10 @@ impl Grade {
 
 /// Grades the project `src` (without its `.git`) in a fresh container with
 /// no network: the copy at `/grade`, the task's `hidden/` at `/hidden` and
-/// `lib_dir` at `/evallib`, and `psi` on the PATH when given (the extension
-/// tasks grade with `psi ext test`). Output goes to `out/checks.txt`, ending
+/// `lib_dir` at `/evallib`. Output goes to `out/checks.txt`, ending
 /// with "checks: N passed of TOTAL". A check that never printed counts as
 /// failed.
-pub fn grade(
-    task: &Task,
-    lib_dir: &Path,
-    psi: Option<&Path>,
-    src: &Path,
-    out: &Path,
-) -> Result<Grade> {
+pub fn grade(task: &Task, lib_dir: &Path, src: &Path, out: &Path) -> Result<Grade> {
     let project = out.join("project");
     let home = out.join("home");
     fsutil::create_dir_all(&home)?;
@@ -39,14 +32,10 @@ pub fn grade(
     fsutil::copy_dir(src, &project, &[".git"])?;
     let checks = out.join("checks.txt");
     let stderr = out.join("checks.stderr");
-    let mut c = Container::new("none", &home)
+    let code = Container::new("none", &home)
         .mount(&project, "/grade", false)
         .mount(&task.dir.join("hidden"), "/hidden", true)
-        .mount(lib_dir, "/evallib", true);
-    if let Some(p) = psi {
-        c = c.mount(p, "/usr/local/bin/psi", true);
-    }
-    let code = c
+        .mount(lib_dir, "/evallib", true)
         .workdir("/grade")
         .cmd(["timeout", "-k", "10", "300", "bash", "/hidden/check.sh"])
         .run(&checks, &stderr)?;

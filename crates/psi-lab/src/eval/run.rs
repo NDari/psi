@@ -13,28 +13,16 @@ use super::trial::{TrialCtx, run_trial};
 use crate::error::other;
 use crate::{Result, fsutil};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Agent {
-    Pi,
-    Psi,
-}
-
-impl Agent {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Agent::Pi => "pi",
-            Agent::Psi => "psi",
-        }
-    }
-}
+/// The `agent` field of a run's records. Records written while pi could
+/// also be run say "pi" there.
+pub(crate) const AGENT: &str = "psi";
 
 #[derive(Debug, Clone)]
 pub struct RunConfig {
-    /// The `evals/` directory: `Containerfile`, `code/`, `pi/`.
+    /// The `evals/` directory: `Containerfile`, `code/`.
     pub evals_dir: PathBuf,
     /// Where this run's records go; must not hold an earlier run.
     pub results_dir: PathBuf,
-    pub agent: Agent,
     pub selection: Selection,
     /// llama-server's port on 127.0.0.1.
     pub port: u16,
@@ -46,8 +34,8 @@ pub struct RunConfig {
     pub n_ctx: Option<u64>,
     /// The psi binary for psi trials (the one running `psi eval`).
     pub psi_binary: Option<PathBuf>,
-    /// Copied into each psi trial's `~/.psi` (settings, skills, prompts):
-    /// a variant, such as a battery turned on.
+    /// Copied into each psi trial's `~/.psi` (settings): a variant, such
+    /// as a battery turned on.
     pub psi_config: Option<PathBuf>,
 }
 
@@ -83,12 +71,10 @@ pub fn run(cfg: &RunConfig, progress: &mut dyn FnMut(&str)) -> Result<Vec<TrialR
     let network = format!("pasta:--splice-only,-T,{}", cfg.port);
     let net = network_check(&network, cfg.port, &cfg.results_dir)?;
     progress(&format!("network: {}", net.join("; ")));
-    if cfg.agent == Agent::Psi {
-        binary_check(cfg.psi_binary.as_deref(), &cfg.results_dir)?;
-    }
+    binary_check(cfg.psi_binary.as_deref(), &cfg.results_dir)?;
 
     let meta = RunMeta {
-        agent: cfg.agent.as_str().into(),
+        agent: AGENT.into(),
         psi_version: env!("CARGO_PKG_VERSION").into(),
         started_ms: psi_session::time::now_ms(),
         tasks: tasks.iter().map(|t| t.name.clone()).collect(),
@@ -127,7 +113,7 @@ pub fn run(cfg: &RunConfig, progress: &mut dyn FnMut(&str)) -> Result<Vec<TrialR
     let mut results = Vec::new();
     for task in &tasks {
         progress(&format!("{}: running", task.name));
-        let r = run_trial(&ctx, task, cfg.agent);
+        let r = run_trial(&ctx, task);
         let mut line = format!(
             "{}: {} (checks {}/{}, {} steps)",
             r.task,
@@ -240,11 +226,9 @@ impl CheckReport {
 }
 
 /// Grades each task's `repo/` with `reference/` overlaid, and the bare `repo/`.
-/// `psi` is mounted for graders that run it (it must run in the image).
 pub fn check_graders(
     evals_dir: &Path,
     results_dir: &Path,
-    psi: Option<&Path>,
     selection: &Selection,
     progress: &mut dyn FnMut(&str),
 ) -> Result<CheckReport> {
@@ -259,8 +243,8 @@ pub fn check_graders(
         let src = out.join("reference-src");
         fsutil::copy_dir(&task.dir.join("repo"), &src, &[])?;
         fsutil::copy_dir(&task.dir.join("reference"), &src, &[])?;
-        let reference = grade(task, &lib, psi, &src, &out.join("reference"))?;
-        let blank = grade(task, &lib, psi, &task.dir.join("repo"), &out.join("blank"))?;
+        let reference = grade(task, &lib, &src, &out.join("reference"))?;
+        let blank = grade(task, &lib, &task.dir.join("repo"), &out.join("blank"))?;
         let row = CheckRow {
             task: task.name.clone(),
             reference,

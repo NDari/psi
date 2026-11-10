@@ -147,7 +147,7 @@ fn history_arguments(raw: Option<&str>, parsed: &serde_json::Value) -> String {
 
 /// What stands in for the entries before the cut: the summaries, oldest
 /// first, a note if turns were dropped without one, the harness's own
-/// record (files, todo, plan), and the last user message before the cut,
+/// record (files, the last check), and the last user message before the cut,
 /// unless the kept part starts with a user message.
 fn opening_text(chain: &Chain, before: &[&Entry], first_kept: Option<&&Entry>) -> String {
     let mut parts: Vec<String> = chain

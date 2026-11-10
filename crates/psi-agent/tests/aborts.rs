@@ -1,28 +1,25 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)] // Test code.
 //! Esc at every stage of a run (unhappy paths, batch 2): while the answer
-//! streams, while a tool runs, while summarizing, inside a sub-agent,
-//! during a retry's pause, while an approval waits, during an MCP call.
+//! streams, while a tool runs, while summarizing,
+//! during a retry's pause, while an approval waits.
 //! Each run must stop promptly with `Stop::Aborted`, leave a session that
 //! opens, and the next run must work as if nothing happened.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::future::BoxFuture;
 use psi_agent::approval::{Approval, ApprovalRequest, Approver, BlockedChoice, BlockedRequest};
-use psi_agent::subagent::built_in;
 use psi_agent::{Agent, AgentConfig, AgentEvent, Budgets, RunOutcome, Safety, Stop};
 use psi_ai::Client;
 use psi_ai::replay::{ReplayServer, Reply, ScriptedReply};
-use psi_ext::{ExtManager, Limits, Shared, Source};
-use psi_mcp::testing::{config, fake_manager};
 use psi_safety::always_ask::Rules;
 use psi_safety::policy::{Mode, Policy};
 use psi_session::{EntryBody, SessionFile, StopReason, text_of};
 use psi_tools::{ToolCtx, core_tools};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 /// Waits for an answer that never comes (a user who hasn't decided).
@@ -76,7 +73,7 @@ impl Fx {
             enable_thinking: None,
             budgets: Budgets::default(),
             system_prompt: "sys".into(),
-            tools: core_tools(false),
+            tools: core_tools(),
             home: Some(self.home.clone()),
         };
         let ctx = ToolCtx::new(&self.cwd, &self.home.join("tmp"), max_result);
@@ -308,32 +305,6 @@ async fn esc_while_summarizing_keeps_the_history() {
 }
 
 #[tokio::test]
-async fn esc_inside_a_sub_agent_stops_both() {
-    let fx = Fx::new(vec![
-        call("agent", json!({"agent": "worker", "task": "Wait."})),
-        call("bash", json!({"command": "echo $$ > pid; exec sleep 30"})),
-        text("ok"),
-    ]);
-    let a = fx
-        .agent(32_768, 20_000)
-        .with_safety(fx.safety(Arc::new(Undecided)))
-        .with_subagents(built_in());
-    let (out, after, mut a) = esc_on(a, "go", |e| {
-        matches!(e, AgentEvent::Subagent { event, .. } if matches!(**event, AgentEvent::ToolStart { .. }))
-    })
-    .await;
-    stopped(&out, after, &a);
-    let r = results(&a);
-    assert!(r[0].1 && r[0].0.contains("stopped by the user"), "{r:?}");
-    if let Ok(pid) = std::fs::read_to_string(fx.cwd.join("pid")) {
-        assert!(gone(&pid), "the sub-agent's command was left running");
-    }
-    // No parent request after the abort; the next run works.
-    assert_eq!(fx.server.chat_requests().len(), 2);
-    assert_eq!(a.run("again").await.stop, Stop::Done);
-}
-
-#[tokio::test]
 async fn esc_during_a_retrys_pause() {
     let fx = Fx::new(vec![
         Reply::Error {
@@ -369,72 +340,4 @@ async fn esc_while_an_approval_waits() {
         )
     );
     assert_eq!(a.run("again").await.stop, Stop::Done);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn esc_during_an_mcp_call() {
-    let fx = Fx::new(vec![call("mcp__slow__wait", json!({})), text("ok")]);
-    let tools = json!([{"name": "wait", "annotations": {"readOnlyHint": true},
-        "inputSchema": {"type": "object", "properties": {}}}]);
-    let mcp = fake_manager(
-        config("slow"),
-        tools,
-        Arc::new(|_: &str, _: &Map<String, Value>| {
-            std::thread::sleep(Duration::from_secs(2));
-            json!({"content": [{"type": "text", "text": "late"}]})
-        }),
-    )
-    .await;
-    let a = fx.agent(32_768, 20_000).with_mcp(mcp);
-    let (out, after, mut a) = esc_on(a, "go", |e| matches!(e, AgentEvent::ToolStart { .. })).await;
-    stopped(&out, after, &a);
-    assert!(after < Duration::from_secs(1), "{after:?}");
-    assert_eq!(results(&a)[0], ("[aborted]".into(), true));
-    assert_eq!(a.run("again").await.stop, Stop::Done);
-}
-
-/// An extension tool that runs bash through `ctx.execute_tool`.
-const EXT: &str = r#"
-return {
-  name = "runner", version = "1", description = "runs bash",
-  setup = function(psi)
-    psi.register_tool{
-      name = "echo_hi", description = "Say hi through bash", params = {},
-      execute = function(args, ctx)
-        local r = ctx.execute_tool("bash", { command = "echo hi" })
-        return r.text
-      end,
-    }
-  end,
-}
-"#;
-
-#[tokio::test(flavor = "multi_thread")]
-async fn extension_tools_run_bash_after_an_abort() {
-    let fx = Fx::new(vec![
-        Reply::hang("x"),
-        call("echo_hi", json!({})),
-        text("ok"),
-    ]);
-    let exts = fx.home.join("exts");
-    std::fs::create_dir_all(&exts).unwrap();
-    std::fs::write(exts.join("runner.lua"), EXT).unwrap();
-    let shared = Arc::new(RwLock::new(Shared {
-        cwd: fx.cwd.display().to_string(),
-        mode: "test".into(),
-        ..Shared::default()
-    }));
-    let (ui, _ui_rx) = tokio::sync::mpsc::unbounded_channel();
-    let sources = vec![Source::Lua(exts.join("runner.lua"))];
-    let (ext, errors) = tokio::task::spawn_blocking(move || {
-        ExtManager::start(&sources, shared, Limits::default(), ui)
-    })
-    .await
-    .unwrap();
-    assert!(errors.is_empty(), "{errors:?}");
-    let a = fx.agent(32_768, 20_000).with_extensions(ext);
-    let (out, after, mut a) = esc_on(a, "go", |e| matches!(e, AgentEvent::TextDelta { .. })).await;
-    stopped(&out, after, &a);
-    assert_eq!(a.run("again").await.stop, Stop::Done);
-    assert_eq!(results(&a)[0], ("hi".into(), false), "{:?}", results(&a));
 }

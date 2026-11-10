@@ -69,7 +69,7 @@ impl Editor {
         }
     }
 
-    /// The keys the editor's actions use (keybindings.json).
+    /// The keys the editor's actions use.
     pub fn set_keymap(&mut self, keymap: Keymap) {
         self.keymap = keymap;
     }

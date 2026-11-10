@@ -43,7 +43,6 @@ pub(crate) struct Container {
     pub home: PathBuf,
     /// (host path, container path, read-only)
     pub mounts: Vec<(PathBuf, String, bool)>,
-    pub env: Vec<(String, String)>,
     pub workdir: Option<String>,
     pub cmd: Vec<String>,
 }
@@ -54,7 +53,6 @@ impl Container {
             network: network.to_owned(),
             home: absolute(home),
             mounts: Vec::new(),
-            env: Vec::new(),
             workdir: None,
             cmd: Vec::new(),
         }
@@ -63,11 +61,6 @@ impl Container {
     pub fn mount(mut self, host: &Path, container: &str, read_only: bool) -> Self {
         self.mounts
             .push((absolute(host), container.to_owned(), read_only));
-        self
-    }
-
-    pub fn env(mut self, k: &str, v: &str) -> Self {
-        self.env.push((k.to_owned(), v.to_owned()));
         self
     }
 
@@ -99,10 +92,6 @@ impl Container {
             a.push("-v".into());
             let suffix = if *ro { ":ro" } else { "" };
             a.push(format!("{}:{ctr}{suffix}", host.display()));
-        }
-        for (k, v) in &self.env {
-            a.push("-e".into());
-            a.push(format!("{k}={v}"));
         }
         if let Some(w) = &self.workdir {
             a.push("-w".into());
@@ -141,18 +130,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn args_put_mounts_env_and_workdir_before_the_image() {
+    fn args_put_mounts_and_workdir_before_the_image() {
         let c = Container::new("none", Path::new("/h"))
             .mount(Path::new("/p"), "/grade", false)
             .mount(Path::new("/x"), "/hidden", true)
-            .env("A", "1")
             .workdir("/grade")
             .cmd(["bash", "/hidden/check.sh"]);
         let a = c.args().join(" ");
         assert_eq!(
             a,
             "run --rm --userns=keep-id --network none -v /h:/home/eval -e HOME=/home/eval \
-             -e TERM=dumb -v /p:/grade -v /x:/hidden:ro -e A=1 -w /grade \
+             -e TERM=dumb -v /p:/grade -v /x:/hidden:ro -w /grade \
              localhost/psi-eval:latest bash /hidden/check.sh"
         );
     }

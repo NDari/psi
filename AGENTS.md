@@ -4,7 +4,7 @@ This file is for agents developing Psi itself. It is not what Psi's own models s
 
 ## What Psi is
 
-A pi-style coding agent harness in Rust + mlua, built for its owner as a daily replacement for pi, tuned for local models that make mistakes. `psi-plan.md` is the spec.
+One person's coding agent for a local model, written in Rust. `design-going-forward.md` says what Psi is for, what stays, what goes and in what order; read it first. `psi-plan.md` is the old spec, kept as history: where the two disagree, `design-going-forward.md` wins.
 
 ## Spirit of the project
 
@@ -12,13 +12,13 @@ A pi-style coding agent harness in Rust + mlua, built for its owner as a daily r
 - **Small and working beats complete.** Build the least that makes a feature useful, then improve it from real use and eval runs.
 - **The harness absorbs model mistakes.** Accept a call whose meaning is clear, refuse with the exact fix, or hard-gate. Don't build features that only work if a small model chooses to use them.
 - **Keep model-facing text lean.** Every line of system prompt, tool description and tool result costs context. Tool results should say exactly what happened and what to do next.
-- **Pi is the behavioral reference.** Read its source (`earendil-works/pi`, MIT) to match behavior, but write our own prompts, docs and code.
+- **Parity with pi is not a goal.** Don't add or keep a feature because pi has it. Pi's source (`earendil-works/pi`, MIT) can still be read for ideas.
 - **Heimdall is a source of ideas, not data.** Its lessons can inform a design; its numbers and timings are not baselines.
 
 ## How to work
 
-- **The plan is the spec.** If a change contradicts `psi-plan.md`, stop and propose a plan edit first. Decisions are `D-xx` in §17; change one by adding a "Superseded" note with the reason.
-- **Work phase by phase** (§15). Don't build ahead; leave `// TODO(phase-N): ...` stubs where later work plugs in.
+- **`design-going-forward.md` is the direction.** If a change contradicts it, stop and propose an edit to it first. `D-xx` references in code and docs point to `psi-plan.md` §17, which is history now.
+- **Work in the order it gives** ("Order of work"), one step at a time. Don't build ahead, and don't follow the phases in `psi-plan.md` §15.
 - **Stay in scope.** Mention unrelated improvements; don't make them unasked.
 - **Bring in dependencies when they earn it.** No need to ask: if a well-known, maintained crate provides value and saves writing a lot of code, add it. The owner wants a good user experience and a batteries-included feel. Appendix A lists candidates; check the current version and maintenance first, and mention what you added in your summary.
 - **Don't run git write commands.** The owner commits.
@@ -47,7 +47,7 @@ If a check can't run, say what is unverified.
 ## Evals
 
 - Evals run locally against llama-server, each trial in a podman container. The container is the boundary; no inner sandbox.
-- They are for sanity checks, finding harness bugs ("the tool result misled the model") and directional comparisons with pi. Don't chase small score differences or statistical significance unless asked.
+- They are for sanity checks, finding harness bugs ("the tool result misled the model") and trying a new model. Don't chase small score differences or statistical significance unless asked.
 - **Baselines are one run and prove correctness only.** A pi baseline or a phase's Psi score is a single run (one trial per task) showing the design works end to end. Never use one to judge speed, timing or how well an agent or model does, and don't re-run it for more trials. The owner considers this very important.
 - **Run the eval sparingly** (D-32): when model-facing text changes, when a model changes, at the end of a phase, or to refresh replay fixtures. Everything else is covered by tests.
 - When a run looks wrong, read the transcript and the wire log before changing anything.

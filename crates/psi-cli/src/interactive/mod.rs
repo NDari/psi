@@ -54,29 +54,6 @@ fn save_history(path: &Path, h: &[String]) {
     }
 }
 
-/// `~/.psi/keybindings.json` over the defaults (pi parity); problems are
-/// startup warnings.
-fn load_keymap(home: Option<&Path>, warnings: &mut Vec<String>) -> Keymap {
-    let Some(path) = home.map(|h| h.join(".psi/keybindings.json")) else {
-        return Keymap::default();
-    };
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(_) => return Keymap::default(),
-    };
-    match psi_cli::config::parse_jsonc(&text, &path.display().to_string()) {
-        Ok(v) => {
-            let (km, problems) = Keymap::from_json(&v);
-            warnings.extend(problems);
-            km
-        }
-        Err(e) => {
-            warnings.push(format!("{e:#}; using the default keys"));
-            Keymap::default()
-        }
-    }
-}
-
 /// Puts the terminal back, also when psi panics.
 /// Whether an executable called `name` is on PATH.
 fn on_path(name: &str) -> bool {
@@ -238,20 +215,7 @@ pub fn run(args: RunArgs) -> Result<ExitCode> {
         sessions,
         warnings,
         info,
-        mut ext_requests,
-        ext_sources,
-        resources,
     } = rt.block_on(prepare(&args, approver))?;
-    let ext = agent.extensions().clone();
-    let plan_on = agent.plan().enabled;
-    let fwd = ui_tx.clone();
-    rt.spawn(async move {
-        while let Some((name, r)) = ext_requests.recv().await {
-            if fwd.send(ui::UiMsg::Ext(name, r)).is_err() {
-                break;
-            }
-        }
-    });
 
     let (ev_tx, ev_rx) = tokio::sync::mpsc::unbounded_channel();
     let agent = agent.with_events(ev_tx);
@@ -275,7 +239,6 @@ pub fn run(args: RunArgs) -> Result<ExitCode> {
         sessions_root: sessions.clone(),
         cwd: cwd.clone(),
         open_checkpoints,
-        ext_sources,
     };
     rt.spawn(worker.run(cmd_rx, ui_tx.clone()));
 
@@ -291,7 +254,6 @@ pub fn run(args: RunArgs) -> Result<ExitCode> {
         mode: info["mode"].as_str().unwrap_or("auto").into(),
         network: info["network"].as_str().unwrap_or("on").into(),
         unisolated: info["isolation"] == "unavailable",
-        plan: plan_on.then(|| "plan".to_owned()),
         ..Status::default()
     };
 
@@ -310,14 +272,7 @@ pub fn run(args: RunArgs) -> Result<ExitCode> {
     if let Some(w) = tmux_extended_keys(in_tmux, tmux_option) {
         warnings.push(w);
     }
-    let keymap = load_keymap(home.as_deref(), &mut warnings);
-    let wanted = args.settings["theme"].as_str().unwrap_or("default");
-    match resources.theme(wanted) {
-        Some(t) => theme::set(t),
-        None => warnings.push(format!(
-            "no theme named '{wanted}' (in ~/.psi/themes); using the default"
-        )),
-    }
+    let keymap = Keymap::default();
     let notify = Notify::from_setting(&args.settings["notify"]).unwrap_or_else(|e| {
         warnings.push(e);
         Notify::Auto
@@ -343,10 +298,7 @@ pub fn run(args: RunArgs) -> Result<ExitCode> {
         sessions_dir: sessions.join(psi_session::cwd_slug(&cwd)),
         session_path: session_path.clone(),
         history,
-        ext: ext.clone(),
-        rt: rt.handle().clone(),
         ui_tx,
-        resources,
         keymap,
         term: psi_tui::term::Term::detect(|k| std::env::var(k).ok()),
         notify,
@@ -376,12 +328,6 @@ pub fn run(args: RunArgs) -> Result<ExitCode> {
         save_history(p, &app.history());
     }
     drop(app);
-    let file = session_path.display().to_string();
-    rt.block_on(ext.notify(
-        "session_shutdown",
-        serde_json::json!({"session_file": file}),
-    ));
-    ext.shutdown();
     rt.shutdown_timeout(std::time::Duration::from_millis(500));
     let _ = std::fs::remove_dir_all(&tmpdir);
     result.context("the terminal failed")?;

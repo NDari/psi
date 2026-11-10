@@ -58,10 +58,6 @@ eval-binary := justfile_directory() / "target/x86_64-unknown-linux-musl/debug/ps
 eval-smoke: eval-build
     env PSI_EVAL_BINARY={{eval-binary}} cargo test -q -p psi-cli --test eval_smoke -- --ignored --test-threads 1
 
-# Regenerate docs/api.md and docs/api/psi.lua from the extension API definition
-api-docs:
-    env PSI_BLESS=1 cargo test -q -p psi-ext-api --test drift
-
 # Show a markdown file as Psi draws an answer (stdin when no file is given)
 md-preview *args:
     cargo run -q -p psi-tui --example md_preview -- {{args}}
@@ -69,14 +65,6 @@ md-preview *args:
 # Rewrite the markdown snapshots after a deliberate change to the look
 md-bless:
     env PSI_BLESS=1 cargo test -q -p psi-tui --test markdown_snapshots
-
-# Lint an extension
-ext-check path:
-    cargo run -q -p psi-cli -- ext check {{path}}
-
-# Run an extension's *_test.lua files (default: every example)
-ext-test path="examples/extensions":
-    cargo run -q -p psi-cli -- ext test {{path}}
 
 # Format the code
 fmt:
@@ -109,23 +97,12 @@ run-release *args:
     cargo run -q --release --manifest-path {{justfile_directory()}}/Cargo.toml -p psi-cli -- "$@"
 
 # Check every grader: the reference passes, the untouched repo fails
-eval-check *args: build eval-build
-    ./target/debug/psi eval check --psi-binary {{eval-binary}} {{args}}
+eval-check *args: build
+    ./target/debug/psi eval check {{args}}
 
 # One trial per quick-set task (needs llm-up); extra args go to psi eval run
 eval-run *args: build eval-build
     ./target/debug/psi eval run --port {{port}} --psi-binary {{eval-binary}} {{args}}
-
-# The extension-writing tasks (H-01); pick some with `just ext-tasks=ext_todo_scan eval-ext`
-ext-tasks := "ext_lockfile_guard,ext_trim_output,ext_todo_scan,ext_bookmarks"
-# Their step cap: passes took 7 to 16 steps, so 20 cuts the time failures waste (`just ext-steps=40 eval-ext`)
-ext-steps := "20"
-
-# The extension-writing eval (H-01): the ext_* tasks, with docs/extensions.md and docs/api.md in the model's context
-eval-ext *args: build eval-build
-    mkdir -p target/eval-ext-docs
-    cat docs/extensions.md docs/api.md > target/eval-ext-docs/AGENTS.md
-    ./target/debug/psi eval run --port {{port}} --psi-binary {{eval-binary}} --psi-config target/eval-ext-docs --tasks {{ext-tasks}} --steps {{ext-steps}} {{args}}
 
 # Show an eval trial or session as a timeline
 inspect path *args: build

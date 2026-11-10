@@ -1,5 +1,7 @@
 # Psi (ψ): Implementation Plan
 
+> **Superseded on 2026-11-09 by `design-going-forward.md`.** This document is kept as history. Where the two disagree, `design-going-forward.md` wins: parity with pi is no longer a goal, the phases in §15 are not the order of work, and several features described here are being cut. Don't follow this plan without checking that file first.
+
 > A pi-style coding agent harness in **Rust + mlua**, built first for its owner as a **replacement for pi**, tuned for **local models** that make mistakes.
 > Psi is the successor to Heimdall v1 (Go). The executable is `psi`.
 > Goal: give the model the freedom to do almost anything, **with intent**. Recovery comes first, and the few irreversible actions are gated.

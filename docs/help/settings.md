@@ -10,21 +10,12 @@ Keys:
 - cache_dirs: directories bash may write under the sandbox.
 - always_ask, always_ask_remove: commands that always ask, added or dropped.
 - post_edit_check: a command run after turns that edit files (psi help post-edit-check).
-- todo: true offers the model the todo tool (psi help todo).
-- subagents: true offers the model the agent tool (psi help agents).
 - compaction: {"tail": tokens kept verbatim after a summary (default "auto": 10K, less in
   small windows), "summary":
-  "structured" (default) or "free", "clear": true to replace old tool results with a
-  one-line note instead of summarizing, when that frees enough (default false; results
-  are still cleared when a summary can't make room)}. For experiments (H-07, H-11).
-- theme: a theme name (psi help themes).
+  "structured" (default) or "free"}. For experiments (H-07, H-11).
 - notify: "auto" (default), "bell" or "off". When a turn ends or something waits for you
   while the terminal is unfocused, auto rings the bell and sends a desktop notification.
   Psi also shows working or waiting in the title and the tab's progress indicator. In tmux,
   set -g focus-events on (to know about focus) and set -g allow-passthrough on.
-- skills, prompts: more directories of skills or prompt templates.
-- extensions: per extension, by name. {"<name>": {"unsandboxed": true}} lets its psi.exec
-  commands run outside the sandbox (they still ask for always-ask commands).
-- packages: installed packages (psi help packages).
 
 Models are in ~/.psi/models.jsonc (psi help models).

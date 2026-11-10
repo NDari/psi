@@ -52,7 +52,8 @@ fn eval_binary() -> String {
         .expect("set PSI_EVAL_BINARY to the static psi build; run with just eval-smoke")
 }
 
-fn run(agent: &str) {
+fn run() {
+    let agent = "psi";
     let server = ReplayServer::start(script()).unwrap();
     server.set_n_ctx(16384);
     let results = tempfile::tempdir().unwrap();
@@ -66,13 +67,9 @@ fn run(agent: &str) {
     .unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_psi"));
     cmd.args(["eval", "run"]);
-    if agent == "psi" {
-        cmd.arg("--psi-config").arg(&config);
-    }
+    cmd.arg("--psi-config").arg(&config);
     let out = cmd
         .args([
-            "--agent",
-            agent,
             "--tasks",
             "fix_invoice_rounding",
             "--timeout",
@@ -111,23 +108,14 @@ fn run(agent: &str) {
         .join("run/fix_invoice_rounding/trial-0/session.jsonl");
     let text = std::fs::read_to_string(session).unwrap();
     assert!(!text.is_empty(), "{agent}");
-    if agent == "psi" {
-        assert!(
-            text.contains(r#""custom_type":"post_edit_check""#)
-                && text.contains(r#""passed":true"#),
-            "the variant's post-edit check ran in the trial"
-        );
-    }
+    assert!(
+        text.contains(r#""custom_type":"post_edit_check""#) && text.contains(r#""passed":true"#),
+        "the variant's post-edit check ran in the trial"
+    );
 }
 
 #[test]
 #[ignore = "needs podman; run with just eval-smoke"]
 fn psi_trial_passes_through_the_whole_pipeline() {
-    run("psi");
-}
-
-#[test]
-#[ignore = "needs podman; run with just eval-smoke"]
-fn pi_trial_passes_through_the_whole_pipeline() {
-    run("pi");
+    run();
 }

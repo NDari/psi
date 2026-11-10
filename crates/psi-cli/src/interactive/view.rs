@@ -44,20 +44,6 @@ pub fn call_summary(name: &str, args: &Value) -> String {
             out
         }
         "write" | "edit" => s("path").to_owned(),
-        "agent" => format!("{}: {}", s("agent"), s("task").replace('\n', " ")),
-        "grep" => format!("{} {}", s("pattern"), s("path")).trim().to_owned(),
-        "find" | "ls" => format!("{} {}", s("pattern"), s("path")).trim().to_owned(),
-        "todo" => {
-            let id = args.get("id").map(|v| {
-                format!(
-                    "#{}",
-                    v.as_str().map(str::to_owned).unwrap_or(v.to_string())
-                )
-            });
-            format!("{} {}{}", s("action"), s("text"), id.unwrap_or_default())
-                .trim()
-                .to_owned()
-        }
         _ => serde_json::to_string(args).unwrap_or_default(),
     }
 }
@@ -281,8 +267,6 @@ pub struct Status {
     pub checkpoints: usize,
     pub unisolated: bool,
     pub busy: Option<String>,
-    /// "plan", or the steps done while a plan is carried out.
-    pub plan: Option<String>,
     /// The model server's address while it isn't up.
     pub offline: Option<String>,
 }
@@ -291,10 +275,6 @@ pub fn status_line(s: &Status, width: usize) -> Line {
     let mut l = Line::default();
     if let Some(b) = &s.busy {
         l.push(b, theme::style(Token::Warning));
-        l.push("  ", Style::default());
-    }
-    if let Some(p) = &s.plan {
-        l.push(p, theme::style(Token::Warning).bold());
         l.push("  ", Style::default());
     }
     l.push(&s.model, dim());
@@ -469,11 +449,10 @@ pub fn approval_card(
     let mut out = Vec::new();
     let mut top = Line::default();
     top.push("┌ ", border);
-    let title = match &req.agent {
-        Some(a) => format!("approve {tool} for {a}"),
-        None => format!("approve {tool}"),
-    };
-    top.push(title, theme::style(Token::Warning).bold());
+    top.push(
+        format!("approve {tool}"),
+        theme::style(Token::Warning).bold(),
+    );
     out.push(top);
     let body = |out: &mut Vec<Line>, label: &str, text: &str, style: Style| {
         for (i, t) in text.lines().take(4).enumerate() {

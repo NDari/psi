@@ -1,19 +1,14 @@
 //! Keeping the context in the window (psi-plan.md §7.4). Past the trigger,
-//! when the `clear` setting is on, old tool results are first replaced by a
-//! one-line note that says what they were and how to get them back (no
-//! model call). Otherwise, or when that can't free enough, the entries
-//! before a verbatim tail are summarized, and the
+//! the entries before a verbatim tail are summarized, and the
 //! summary joins a chain of earlier ones (D-40); the two oldest are merged
 //! when the chain grows too long.
-
-use std::collections::HashMap;
 
 use psi_ai::ChatMessage;
 use psi_session::{Block, Entry, EntryBody, Role, text_of};
 use serde_json::Value;
 
 /// The `compaction` setting: `{"tail": tokens | "auto", "summary":
-/// "structured" | "free", "clear": bool}`. Tail and summary exist to
+/// "structured" | "free"}`. Tail and summary exist to
 /// compare variants (H-07, H-11).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CompactionSettings {
@@ -21,11 +16,6 @@ pub struct CompactionSettings {
     /// (`tail_tokens`). 0 keeps only the last user message or step.
     pub tail: Option<u64>,
     pub summary: SummaryForm,
-    /// Clear old tool results instead of summarizing when that frees
-    /// enough, and where the cache breaks anyway. Off by default since
-    /// 2026-11-05 (§7.4): a 27B cleared what it had just read and looped.
-    /// When off, results are still cleared if a summary can't make room.
-    pub clear: bool,
 }
 
 /// How a summary is laid out.
@@ -40,7 +30,8 @@ pub enum SummaryForm {
 
 impl CompactionSettings {
     pub fn from_setting(v: &Value) -> Result<Self, String> {
-        const USAGE: &str = "compaction is {\"tail\": tokens or \"auto\", \"summary\": \"structured\" or \"free\", \"clear\": true or false}";
+        const USAGE: &str =
+            "compaction is {\"tail\": tokens or \"auto\", \"summary\": \"structured\" or \"free\"}";
         let o = match v {
             Value::Null => return Ok(Self::default()),
             Value::Object(o) => o,
@@ -56,32 +47,19 @@ impl CompactionSettings {
             Some(Some("free")) => SummaryForm::Free,
             _ => return Err(USAGE.into()),
         };
-        let clear = match o.get("clear") {
-            None | Some(Value::Null) => false,
-            Some(v) => v.as_bool().ok_or(USAGE)?,
-        };
-        Ok(Self {
-            tail,
-            summary,
-            clear,
-        })
+        Ok(Self { tail, summary })
     }
 }
 
 /// D-20: estimate conservatively when the server's count is not known.
 pub(crate) const CHARS_PER_TOKEN: u64 = 3;
-/// The most recent tool results are never cleared (Anthropic keeps 3),
-/// nor those of the last step, which the model hasn't read yet.
-const KEEP_RECENT: usize = 3;
-/// Results shorter than this stay: clearing them frees almost nothing.
-const MIN_CLEAR_CHARS: usize = 800;
 /// How much of a command or argument list a note repeats.
 const NOTE_ARGS: usize = 80;
 
-/// The context size (in tokens) at which old context is cleared: below
+/// The context size (in tokens) at which old context is summarized: below
 /// the room for one answer plus one tool result, and at most 70% of the
 /// window. Never below a quarter of the window, so small windows don't
-/// clear every turn.
+/// summarize every turn.
 pub(crate) fn trigger(n_ctx: u64, max_output: u64, max_result_tokens: u64) -> u64 {
     let reserve = max_output.max(4096) + max_result_tokens;
     (n_ctx * 7 / 10)
@@ -165,64 +143,6 @@ fn message_chars(m: &ChatMessage) -> usize {
     }
 }
 
-/// The old tool results to clear (their entry ids, from `sources`), oldest
-/// first, so that about `need` tokens are freed, and the estimate of what
-/// they free. `None` when they would free less than `min_batch`: each
-/// clearing breaks the prompt cache from the first cleared result on, so it
-/// is done in batches, never one small result at a time. Only results at
-/// message `from` or later are cleared: when the cache breaks there anyway,
-/// clearing after it costs nothing more.
-pub(crate) fn plan_clear(
-    messages: &[ChatMessage],
-    sources: &[Option<String>],
-    need: u64,
-    min_batch: u64,
-    from: usize,
-) -> Option<(Vec<String>, u64)> {
-    // (message index, entry id, tool, arguments, content), in order. Call
-    // ids may repeat across turns, so each result takes the latest call
-    // with its id.
-    let mut calls: HashMap<&str, (&str, &str)> = HashMap::new();
-    let mut results = Vec::new();
-    let mut unread_from = 0;
-    for (i, (m, src)) in messages.iter().zip(sources).enumerate() {
-        match m {
-            ChatMessage::Assistant { tool_calls, .. } => {
-                unread_from = results.len();
-                for c in tool_calls {
-                    calls.insert(&c.id, (&c.name, &c.arguments));
-                }
-            }
-            ChatMessage::Tool { call_id, content } => {
-                if let Some(id) = src {
-                    let (name, args) = calls
-                        .get(call_id.as_str())
-                        .copied()
-                        .unwrap_or(("tool", "{}"));
-                    results.push((i, id, name, args, content));
-                }
-            }
-            _ => {}
-        }
-    }
-    let old = results.len().saturating_sub(KEEP_RECENT).min(unread_from);
-    let mut ids = Vec::new();
-    let mut freed = 0;
-    for (_, id, name, args, content) in results[..old].iter().filter(|r| r.0 >= from) {
-        if freed >= need {
-            break;
-        }
-        // A cleared result is a short note, so it is never cleared again.
-        if content.len() < MIN_CLEAR_CHARS {
-            continue;
-        }
-        let note = cleared_note(name, args, content);
-        freed += (content.len() - note.len().min(content.len())) as u64 / CHARS_PER_TOKEN;
-        ids.push((*id).clone());
-    }
-    (freed >= min_batch && !ids.is_empty()).then_some((ids, freed))
-}
-
 /// The summaries that stand in for the entries before the cut, oldest
 /// first, and where the part sent as is starts.
 #[derive(Debug, Default)]
@@ -274,8 +194,8 @@ pub(crate) fn summary_chain<'a>(branch: &[&'a Entry]) -> Chain<'a> {
 }
 
 /// What the harness itself knows about the work before the cut (§7.4):
-/// the files read and changed (from the read, write and edit calls), the
-/// todo list and the steps of a plan being carried out. Sent after the
+/// the files read and changed (from the read, write and edit calls) and
+/// the last post-edit check. Sent after the
 /// summaries instead of trusting them to keep it. Taken as of the cut, so
 /// it changes only when a compaction does and the prompt cache holds.
 pub(crate) fn harness_state(before: &[&Entry]) -> Option<String> {
@@ -303,32 +223,8 @@ pub(crate) fn harness_state(before: &[&Entry]) -> Option<String> {
             parts.push(format!("{label}: {}", list.join(", ")));
         }
     }
-    let custom = |kind: &str| {
-        before.iter().rev().find_map(|e| match &e.body {
-            EntryBody::Custom { custom_type, data } if custom_type == kind => Some(data),
-            _ => None,
-        })
-    };
-    if let Some(d) = custom("todo") {
-        let todos = psi_tools::TodoList::from_json(d);
-        if !todos.items.is_empty() {
-            parts.push(format!("Todo list:\n{}", todos.render()));
-        }
-    }
     if let Some(c) = last_check(before) {
         parts.push(c);
-    }
-    if let Some(d) = custom("plan") {
-        let plan = crate::plan::PlanState::from_json(d);
-        if plan.executing && !plan.steps.is_empty() {
-            let steps: Vec<String> = plan
-                .steps
-                .iter()
-                .enumerate()
-                .map(|(i, s)| format!("[{}] {}. {}", if s.done { "x" } else { " " }, i + 1, s.text))
-                .collect();
-            parts.push(format!("Plan being carried out:\n{}", steps.join("\n")));
-        }
     }
     (!parts.is_empty()).then(|| format!("{STATE_HEADER}\n{}", parts.join("\n")))
 }
@@ -390,7 +286,7 @@ pub(crate) fn tail_tokens(trigger: u64, overhead: u64, set: Option<u64>) -> u64 
 /// trigger after `overhead` (system prompt, tools, summaries), less a tenth
 /// of the window for the rest of the context (the harness state, the
 /// restated request, the step's own calls), and at least one full result.
-/// Past it, results would be cleared or summarized before the model read
+/// Past it, results would be summarized before the model read
 /// them, and it would read them again (the 2026-11-01 re-read loop).
 pub(crate) fn step_budget(n_ctx: u64, trigger: u64, overhead: u64, result_tokens: u64) -> u64 {
     trigger
@@ -673,7 +569,6 @@ fn cut(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use psi_ai::RawToolCall;
 
     #[test]
     fn trigger_leaves_room_and_fires_in_small_windows() {
@@ -708,77 +603,6 @@ mod tests {
             cleared_note("grep", r#"{"pattern": "fn", "intent": "look"}"#, "x")
                 .contains(r#"grep {"pattern":"fn"}, 1 line"#)
         );
-    }
-
-    fn turn(id: &str, size: usize) -> Vec<ChatMessage> {
-        vec![
-            ChatMessage::Assistant {
-                text: String::new(),
-                tool_calls: vec![RawToolCall {
-                    id: id.into(),
-                    name: "read".into(),
-                    arguments: r#"{"path": "f"}"#.into(),
-                }],
-            },
-            ChatMessage::Tool {
-                call_id: id.into(),
-                content: "x".repeat(size),
-            },
-        ]
-    }
-
-    #[test]
-    fn clears_oldest_first_and_keeps_the_last_three() {
-        let mut m = vec![ChatMessage::User("task".into())];
-        let mut src = vec![None];
-        for (i, size) in [3000, 100, 3000, 3000, 3000, 3000, 3000].iter().enumerate() {
-            // The same call id every turn, as some servers send.
-            m.extend(turn("call_0", *size));
-            src.extend([None, Some(format!("e{i}"))]);
-        }
-        // Enough for one: the oldest large one.
-        let (ids, freed) = plan_clear(&m, &src, 500, 100, 0).unwrap();
-        assert_eq!(ids, ["e0"]);
-        assert!(freed > 900, "{freed}");
-        // Everything old: the short one and the last three stay.
-        let (ids, _) = plan_clear(&m, &src, 100_000, 100, 0).unwrap();
-        assert_eq!(ids, ["e0", "e2", "e3"]);
-        // Too little to be worth breaking the cache for.
-        assert_eq!(plan_clear(&m, &src, 100_000, 10_000, 0), None);
-        // Where the cache breaks at message 5 anyway, only results after
-        // it: e0 (message 2) stays.
-        let (ids, _) = plan_clear(&m, &src, 100_000, 100, 5).unwrap();
-        assert_eq!(ids, ["e2", "e3"]);
-    }
-
-    #[test]
-    fn the_last_steps_results_are_never_cleared() {
-        let mut m = vec![ChatMessage::User("task".into())];
-        let mut src = vec![None];
-        m.extend(turn("a", 3000));
-        src.extend([None, Some("e0".to_owned())]);
-        // One step of five reads: the model has read none of them yet.
-        let calls = (1..=5)
-            .map(|i| RawToolCall {
-                id: format!("c{i}"),
-                name: "read".into(),
-                arguments: r#"{"path": "f"}"#.into(),
-            })
-            .collect();
-        m.push(ChatMessage::Assistant {
-            text: String::new(),
-            tool_calls: calls,
-        });
-        src.push(None);
-        for i in 1..=5 {
-            m.push(ChatMessage::Tool {
-                call_id: format!("c{i}"),
-                content: "x".repeat(3000),
-            });
-            src.push(Some(format!("e{i}")));
-        }
-        let (ids, _) = plan_clear(&m, &src, 100_000, 100, 0).unwrap();
-        assert_eq!(ids, ["e0"]);
     }
 
     #[test]
@@ -882,9 +706,6 @@ mod tests {
         assert!(read(&json!({"tail": "big"})).is_err());
         assert!(read(&json!({"summary": "bullets"})).is_err());
         assert!(read(&json!(5)).is_err());
-        assert!(!read(&Value::Null).unwrap().clear);
-        assert!(read(&json!({"clear": true})).unwrap().clear);
-        assert!(read(&json!({"clear": "yes"})).is_err());
     }
 
     #[test]
@@ -1013,7 +834,7 @@ mod tests {
     }
 
     #[test]
-    fn harness_state_lists_files_todos_and_the_plan() {
+    fn harness_state_lists_files() {
         let es = entries(vec![
             msg(Role::User, "task"),
             step_with("read", "a.py"),
@@ -1021,30 +842,13 @@ mod tests {
             step_with("read", "b.py"),
             step_with("read", "a.py"),
             step_with("write", "c.py"),
-            EntryBody::Custom {
-                custom_type: "todo".into(),
-                data: psi_tools::TodoList::default().to_json(),
-            },
-            EntryBody::Custom {
-                custom_type: "todo".into(),
-                data: serde_json::json!({"todos": [{"id": 1, "text": "port", "done": true},
-                                                    {"id": 2, "text": "test", "done": false}],
-                                          "next_id": 3}),
-            },
-            EntryBody::Custom {
-                custom_type: "plan".into(),
-                data: serde_json::json!({"enabled": false, "executing": true,
-                    "steps": [{"text": "one", "done": true}, {"text": "two", "done": false}]}),
-            },
         ]);
         let refs: Vec<&Entry> = es.iter().collect();
         assert_eq!(
             harness_state(&refs).unwrap(),
             "[Recorded by the harness for the earlier conversation]\n\
              Files read: b.py, a.py\n\
-             Files changed: a.py, c.py\n\
-             Todo list:\n[x] #1: port\n[ ] #2: test\n\
-             Plan being carried out:\n[x] 1. one\n[ ] 2. two"
+             Files changed: a.py, c.py"
         );
         assert_eq!(harness_state(&refs[..1]), None);
     }

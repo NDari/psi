@@ -13,19 +13,10 @@ pub struct PromptFacts {
     pub checkpoints: bool,
 }
 
-/// A skill the system prompt lists (D-35): only its description goes in.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SkillEntry {
-    pub name: String,
-    pub description: String,
-    pub path: PathBuf,
-}
-
 pub fn system_prompt(
     tools: &[&str],
     cwd: &Path,
     context: &[(PathBuf, String)],
-    skills: &[SkillEntry],
     facts: PromptFacts,
 ) -> String {
     let mut s = format!(
@@ -44,24 +35,13 @@ How to work:
 - If you are stuck or unsure what the user wants, ask a short question instead of guessing.
 - When asked about psi itself, first run `psi help topics` and the relevant `psi help <topic>`, and answer from their output.
 ",
-        tools_line(tools, &[], &[]),
+        tools_line(tools),
         if facts.checkpoints {
             "- Your changes inside the workspace are checkpointed and can be undone, so act confidently there. Some actions (like git push or publishing) always need the user's approval.\n"
         } else {
             "- Some actions (like git push or publishing) always need the user's approval.\n"
         },
     );
-    if !skills.is_empty() {
-        s.push_str("\nSkills: before a task that matches a skill's description, read its file. Relative paths in a skill are relative to its directory.\n");
-        for k in skills {
-            let desc = k
-                .description
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
-            s.push_str(&format!("- {}: {} ({})\n", k.name, desc, k.path.display()));
-        }
-    }
     for (path, text) in context {
         s.push_str(&format!(
             "\nInstructions from {}:\n{}\n",
@@ -73,24 +53,16 @@ How to work:
     s
 }
 
-/// The `Tools:` line: the harness's own tools, then those extensions and
-/// MCP servers add, so the prompt names every tool the request offers
+/// The `Tools:` line, so the prompt names every tool the request offers
 /// (the cog trial's model never called `cog_run` when this line named only
 /// the core tools).
-pub fn tools_line<S: AsRef<str>>(own: &[S], extensions: &[S], mcp: &[S]) -> String {
+pub fn tools_line<S: AsRef<str>>(own: &[S]) -> String {
     let join = |v: &[S]| v.iter().map(AsRef::as_ref).collect::<Vec<_>>().join(", ");
-    let mut s = format!("Tools: {}", join(own));
-    if !extensions.is_empty() {
-        s.push_str(&format!("; from extensions: {}", join(extensions)));
-    }
-    if !mcp.is_empty() {
-        s.push_str(&format!("; from MCP servers: {}", join(mcp)));
-    }
-    s
+    format!("Tools: {}", join(own))
 }
 
 /// `prompt` with its `Tools:` line replaced by `line`; unchanged when it
-/// has none (a prompt an extension or a test built by hand).
+/// has none (a prompt a test built by hand).
 pub fn with_tools_line(prompt: &str, line: &str) -> String {
     let start = if prompt.starts_with("Tools: ") {
         0
@@ -153,7 +125,6 @@ mod tests {
             &["read", "bash"],
             Path::new("/w"),
             &[(PathBuf::from("/w/AGENTS.md"), "Use tabs.\n".into())],
-            &[],
             PromptFacts::default(),
         );
         assert!(p.contains("\nTools: read, bash\n"));
@@ -161,28 +132,19 @@ mod tests {
         assert!(p.ends_with("Current working directory: /w"));
         assert!(!p.contains("checkpointed") && !p.contains("/tmp"));
         let on = PromptFacts { checkpoints: true };
-        let p = system_prompt(&["bash"], Path::new("/w"), &[], &[], on);
+        let p = system_prompt(&["bash"], Path::new("/w"), &[], on);
         assert!(p.contains("checkpointed and can be undone"));
         assert!(p.contains("doesn't carry over.\n- Calls that only read"));
         assert!(p.contains("\n- When asked about psi itself, first run `psi help topics`"));
-        assert!(!p.contains("Skills:"));
     }
 
     #[test]
-    fn tools_line_names_extension_and_mcp_tools() {
-        let line = tools_line(
-            &["read", "bash", "agent"],
-            &["cog_run"],
-            &["mcp__gopls__go_search"],
-        );
-        assert_eq!(
-            line,
-            "Tools: read, bash, agent; from extensions: cog_run; from MCP servers: mcp__gopls__go_search"
-        );
+    fn the_tools_line_is_replaced() {
+        let line = tools_line(&["read", "bash", "edit"]);
+        assert_eq!(line, "Tools: read, bash, edit");
         let p = system_prompt(
             &["read", "bash"],
             Path::new("/w"),
-            &[],
             &[],
             PromptFacts::default(),
         );
@@ -190,26 +152,6 @@ mod tests {
         assert!(q.contains(&format!("\n\n{line}\n\nHow to work:")), "{q}");
         assert_eq!(with_tools_line(&q, "Tools: read, bash"), p);
         assert_eq!(with_tools_line("no line", &line), "no line");
-    }
-
-    #[test]
-    fn skills_are_listed_before_context() {
-        let skills = [SkillEntry {
-            name: "pdf".into(),
-            description: "Read PDFs.\nAlso tables.".into(),
-            path: PathBuf::from("/s/pdf/SKILL.md"),
-        }];
-        let ctx = [(PathBuf::from("/w/AGENTS.md"), "x".into())];
-        let p = system_prompt(
-            &["read"],
-            Path::new("/w"),
-            &ctx,
-            &skills,
-            PromptFacts::default(),
-        );
-        assert!(p.contains(
-            "\nSkills: before a task that matches a skill's description, read its file. Relative paths in a skill are relative to its directory.\n- pdf: Read PDFs. Also tables. (/s/pdf/SKILL.md)\n\nInstructions from /w/AGENTS.md"
-        ), "{p}");
     }
 
     #[test]

@@ -23,21 +23,16 @@ use tokio_util::sync::CancellationToken;
 use crate::approval::{
     Approval, ApprovalRequest, Approver, BlockedChoice, BlockedRequest, Headless,
 };
+use crate::call::decide;
 use crate::compact::CompactionSettings;
 use crate::events::AgentEvent;
-use crate::ext::{Callable, decide, invoke, schema_of, tool_runner};
 use crate::generating::Generating;
 use crate::guards::{GuardAction, Guards};
 use crate::messages::{build_messages, plan_drop};
-use crate::plan::{self, PlanState};
 use crate::post_edit::{self, PostEditCheck};
 use crate::prompt;
-use crate::subagent::{self, AgentDef};
-use psi_ext::{AgentRequest, ExtManager, Gate, ToolInfo};
-use psi_mcp::{McpManager, McpTool};
 
 mod fit;
-mod sub;
 
 /// Limits on one run (§5). Reaching one stops a headless run.
 #[derive(Debug, Clone)]
@@ -175,33 +170,12 @@ pub struct Agent {
     turn_changed: bool,
     /// The token that aborts the current run; a new one per run after an abort.
     abort: Arc<Mutex<CancellationToken>>,
-    ext: Arc<ExtManager>,
-    /// Extension tools and their schemas.
-    ext_tools: Vec<(ToolInfo, ToolSchema)>,
-    /// set_active_tools: the tool names offered, when an extension chose.
-    active: Option<Vec<String>>,
-    /// before_agent_start: text added to the system prompt for this run.
-    run_system: String,
     /// Run after a turn whose write or edit calls changed files (D-36).
     post_edit: Option<PostEditCheck>,
     /// What the server says it runs (model file, window, build), for the
     /// session record: requests only name the alias (`local`).
     server: Option<Value>,
     compaction: CompactionSettings,
-    /// Plan mode (D-34).
-    plan: PlanState,
-    /// Plan mode was turned off by hand: say so with the next prompt.
-    plan_off_note: bool,
-    /// The plan state changed before the session had its first entry.
-    plan_unrecorded: bool,
-    /// Sub-agents the `agent` tool offers (§10.1); empty: no tool.
-    subagents: Vec<AgentDef>,
-    /// This agent is a sub-agent with this name: one level only, and only
-    /// tool events reach extensions.
-    sub: Option<String>,
-    /// A sub-agent without write or edit: bash runs read-only commands and
-    /// extension tools that may change things are refused.
-    reads_only: bool,
     /// The last request sent, to check a summary request extends it (D-38).
     last_request: Option<ChatRequest>,
     /// The context size when summarizing last failed: no new try until it
@@ -212,60 +186,17 @@ pub struct Agent {
     /// Called with each file in a `.psi` folder that a write or edit
     /// changed (the user approved it: those writes always ask).
     on_config_write: Option<ConfigWriteHook>,
-    /// MCP servers (§10.2), and their tools as taken at the start of the
-    /// run: the list never changes inside a run (D-42).
-    mcp: Arc<McpManager>,
-    mcp_tools: Vec<Arc<McpTool>>,
-    /// The first run waited for the servers to connect.
-    mcp_waited: bool,
     /// The grants given at the start (`--allow`); `s` answers come on top
     /// and last until the session changes.
     base_grants: HashSet<String>,
-    /// `s` answers to extension commands (psi.exec), until the session changes.
-    ext_grants: Arc<Mutex<HashSet<String>>>,
 }
 
 /// A call after the shape-fix pipeline: the tool and its arguments, or the
 /// refusal sent back instead.
-type Planned = Result<(Callable, serde_json::Map<String, Value>), String>;
+type Planned = Result<(Tool, serde_json::Map<String, Value>), String>;
 
 /// See [`Agent::with_config_write`].
 pub type ConfigWriteHook = Arc<dyn Fn(&Path) + Send + Sync>;
-
-/// A call an extension's gate refused. It names the extension and says
-/// the call didn't run: in the cog trial a model took "Blocked: Do not edit
-/// docs/words.md ..." for the output of its `grep` and edited code to match,
-/// and earlier one got past the same gate on purpose.
-fn blocked_by_extension(by: &str, reason: &str) -> String {
-    format!(
-        "Blocked by the {by} extension (the call did not run): {reason}\nDon't work around the block; if it seems wrong, tell the user."
-    )
-}
-
-/// What a write into an extensions folder needs before it counts: the
-/// model built and fixed an extension in the cog trial and never said that
-/// it loads only on `/reload`.
-const RELOAD_NOTE: &str = "Extensions load on /reload; tell the user to run it.";
-
-/// Adds [`RELOAD_NOTE`] to each write or edit that changed a file in a
-/// `.psi/extensions` folder (the project's or `~/.psi`'s).
-fn reload_notes(planned: &[(RawToolCall, Planned)], outputs: &mut [ToolOutput]) {
-    for ((_, p), o) in planned.iter().zip(outputs.iter_mut()) {
-        let Ok((Callable::Core(Tool::Write | Tool::Edit), args)) = p else {
-            continue;
-        };
-        let path = args.get("path").and_then(Value::as_str).unwrap_or("");
-        let in_ext = Path::new(path)
-            .components()
-            .collect::<Vec<_>>()
-            .windows(2)
-            .any(|w| w[0].as_os_str() == ".psi" && w[1].as_os_str() == "extensions");
-        if in_ext && !o.is_error {
-            o.text.push_str("\n\n");
-            o.text.push_str(RELOAD_NOTE);
-        }
-    }
-}
 
 /// A call's identity for the guards: the tool and its arguments, without
 /// the free-text intent.
@@ -279,18 +210,6 @@ fn signature(call: &RawToolCall, p: &Planned) -> String {
         Err(_) => format!("{} {}", call.name, call.arguments),
     }
 }
-
-/// The extension events a sub-agent sends (§10.1).
-const SUB_EVENTS: [&str; 5] = [
-    "tool_call",
-    "tool_execution_update",
-    "tool_result",
-    "policy_decision",
-    "guard_event",
-];
-
-/// How long the first run waits for MCP servers still connecting.
-const MCP_WAIT: Duration = Duration::from_secs(10);
 
 /// The pause before the one retry of a request that may pass.
 const RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -311,28 +230,14 @@ impl Agent {
             capture_failing: false,
             turn_changed: false,
             abort: Arc::new(Mutex::new(CancellationToken::new())),
-            ext: ExtManager::empty(),
-            ext_tools: Vec::new(),
-            active: None,
-            run_system: String::new(),
             post_edit: None,
             server: None,
             compaction: CompactionSettings::default(),
-            plan: PlanState::default(),
-            plan_off_note: false,
-            plan_unrecorded: false,
-            subagents: Vec::new(),
-            sub: None,
-            reads_only: false,
             last_request: None,
             compact_failed_at: None,
             compacting: false,
             on_config_write: None,
-            mcp: McpManager::empty(),
-            mcp_tools: Vec::new(),
-            mcp_waited: false,
             base_grants: HashSet::new(),
-            ext_grants: Arc::default(),
         }
         .with_abort_token()
     }
@@ -350,207 +255,14 @@ impl Agent {
         self.abort.clone()
     }
 
-    /// Extensions: their tools join the core ones and their handlers see
-    /// the run's events (§9.4).
-    pub fn with_extensions(mut self, ext: Arc<ExtManager>) -> Self {
-        self.ext = ext;
-        self.refresh_extensions();
-        self
-    }
-
-    pub fn extensions(&self) -> &Arc<ExtManager> {
-        &self.ext
-    }
-
-    /// After /reload: the extension tools again, and the runner for
-    /// `psi.execute_tool`.
-    pub fn refresh_extensions(&mut self) {
-        let core: Vec<&str> = self.cfg.tools.iter().map(|t| t.name()).collect();
-        self.ext_tools = self
-            .ext
-            .tools()
-            .into_iter()
-            .filter(|t| !core.contains(&t.name.as_str()))
-            .map(|t| {
-                let s = schema_of(&t);
-                (t, s)
-            })
-            .collect();
-        // The runner and shared state are the main agent's.
-        if self.sub.is_some() {
-            return;
-        }
-        self.set_tool_runner();
-        let names = self.tool_names();
-        self.ext.update_shared(|s| s.active_tools = names);
-    }
-
-    /// `psi.execute_tool` runs with this agent's current cancel token and
-    /// policy: set again at each run, after an abort renewed the token or
-    /// `/mode` changed the policy.
-    fn set_tool_runner(&self) {
-        if self.sub.is_some() {
-            return;
-        }
-        self.ext.set_tool_runner(tool_runner(
-            self.ctx.clone(),
-            self.safety.policy.clone(),
-            self.safety.approver.clone(),
-            self.cfg.tools.clone(),
-            Arc::downgrade(&self.ext),
-        ));
-        self.ext
-            .set_services(Arc::new(crate::services::ExtServices {
-                ctx: self.ctx.clone(),
-                policy: self.safety.policy.clone(),
-                approver: self.safety.approver.clone(),
-                grants: self.safety.grants.clone(),
-                ext_grants: self.ext_grants.clone(),
-                ext: Arc::downgrade(&self.ext),
-            }));
-    }
-
-    /// The tools offered to the model, core first. Plan mode leaves out
-    /// write and edit (pi parity).
+    /// The tools offered to the model.
     fn tool_names(&self) -> Vec<String> {
-        let [own, ext, mcp] = self.tool_groups();
-        [own, ext, mcp].concat()
-    }
-
-    /// The offered tools by where they come from: Psi's own (with `agent`),
-    /// extensions', MCP servers'.
-    fn tool_groups(&self) -> [Vec<String>; 3] {
-        let planning = self.plan.enabled;
-        let keep = |n: &String| self.active.as_ref().is_none_or(|a| a.contains(n));
-        let own = self
-            .cfg
-            .tools
-            .iter()
-            .filter(|t| !(planning && matches!(t, Tool::Write | Tool::Edit)))
-            .map(|t| t.name().to_owned())
-            .chain(self.offers_agents().then(|| subagent::TOOL.to_owned()))
-            .filter(keep)
-            .collect();
-        let ext = self
-            .ext_tools
-            .iter()
-            .map(|(t, _)| t.name.clone())
-            .filter(keep)
-            .collect();
-        let mcp = self
-            .mcp_tools
-            .iter()
-            .map(|t| t.name.clone())
-            .filter(keep)
-            .collect();
-        [own, ext, mcp]
+        self.cfg.tools.iter().map(|t| t.name().to_owned()).collect()
     }
 
     /// Every schema the shape fixes may resolve to, offered or not.
     fn all_schemas(&self) -> Vec<ToolSchema> {
-        let mut v = self.schemas.clone();
-        v.extend(self.ext_tools.iter().map(|(_, s)| s.clone()));
-        if self.offers_agents() {
-            v.push(subagent::schema(&self.subagents));
-        }
-        v.extend(self.mcp_tools.iter().map(|t| t.schema.clone()));
-        v
-    }
-
-    /// The `agent` tool: sub-agents are set, and this isn't one (D-41).
-    fn offers_agents(&self) -> bool {
-        !self.subagents.is_empty() && self.sub.is_none()
-    }
-
-    /// MCP servers (§10.2): their tools join from the next run.
-    pub fn with_mcp(mut self, mcp: Arc<McpManager>) -> Self {
-        self.mcp = mcp;
-        self.mcp_waited = false;
-        self
-    }
-
-    pub fn mcp(&self) -> &Arc<McpManager> {
-        &self.mcp
-    }
-
-    /// The MCP tools for this run: the first run waits up to
-    /// [`MCP_WAIT`] for servers still connecting; a server that connects
-    /// later joins at the next run.
-    async fn refresh_mcp(&mut self) {
-        if self.mcp.is_empty() {
-            return;
-        }
-        let first = !self.mcp_waited;
-        if first {
-            self.mcp_waited = true;
-            self.mcp.wait(MCP_WAIT).await;
-        }
-        let core: Vec<&str> = self.cfg.tools.iter().map(|t| t.name()).collect();
-        let mut taken: Vec<&str> = core;
-        taken.extend(self.ext_tools.iter().map(|(t, _)| t.name.as_str()));
-        taken.push(subagent::TOOL);
-        self.mcp_tools = self.mcp.tools(&taken);
-        self.refresh_tool_names();
-        // Once, and only from the main agent.
-        if first && self.sub.is_none() {
-            for text in psi_mcp::notices(&self.mcp.status(&taken), self.cfg.n_ctx) {
-                self.emit(AgentEvent::Notice { text });
-            }
-        }
-    }
-
-    /// Sub-agents for the `agent` tool (§10.1).
-    pub fn with_subagents(mut self, defs: Vec<AgentDef>) -> Self {
-        self.subagents = defs;
-        self.refresh_tool_names();
-        self
-    }
-
-    /// What extensions asked for since the last step.
-    fn apply_ext_requests(&mut self) -> Result<(), String> {
-        // Requests are for the main agent; a sub-agent leaves them.
-        if self.sub.is_some() {
-            return Ok(());
-        }
-        for r in self.ext.take_agent_requests() {
-            match r {
-                AgentRequest::SendMessage { custom_type, text } => {
-                    self.add_context(&custom_type, &text)?
-                }
-                AgentRequest::AppendEntry { custom_type, data } => {
-                    self.record(EntryBody::Custom { custom_type, data })?;
-                }
-                AgentRequest::SetActiveTools(names) => {
-                    self.active = Some(names);
-                    let names = self.tool_names();
-                    self.ext.update_shared(|s| s.active_tools = names);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// The branch's custom entries and the session file, for extensions.
-    fn share_session(&self) {
-        if self.sub.is_some() {
-            return;
-        }
-        let entries: Vec<(String, Value)> = self
-            .session
-            .branch()
-            .iter()
-            .filter_map(|e| match &e.body {
-                EntryBody::Custom { custom_type, data } => {
-                    Some((custom_type.clone(), data.clone()))
-                }
-                _ => None,
-            })
-            .collect();
-        let file = self.session.path().display().to_string();
-        self.ext.update_shared(|s| {
-            s.entries = entries;
-            s.session_file = Some(file);
-        });
+        self.schemas.clone()
     }
 
     pub fn safety_mut(&mut self) -> &mut Safety {
@@ -558,7 +270,7 @@ impl Agent {
     }
 
     /// Text the model sees with the next request, as a `custom_message`
-    /// (the output of `!cmd`, extension messages).
+    /// (the output of `!cmd`).
     pub fn add_context(&mut self, custom_type: &str, text: &str) -> Result<(), String> {
         self.record(EntryBody::CustomMessage {
             custom_type: custom_type.into(),
@@ -576,91 +288,10 @@ impl Agent {
         // /fork drop the `s` answers (always-ask entries) and keep only
         // what --allow granted at the start.
         self.safety.grants = self.base_grants.clone();
-        if let Ok(mut g) = self.ext_grants.lock() {
-            g.clear();
-        }
         self.capture_failing = false;
-        self.restore_plan();
         if let Ok(mut f) = self.ctx.files.lock() {
             *f = psi_tools::FileTracker::default();
         }
-    }
-
-    pub fn plan(&self) -> &PlanState {
-        &self.plan
-    }
-
-    /// Turns plan mode on or off (/plan, --plan). Turning it on drops a plan
-    /// being carried out; turning it off tells the model with the next prompt.
-    pub fn set_plan_mode(&mut self, on: bool) -> Result<(), String> {
-        if self.plan.enabled == on {
-            return Ok(());
-        }
-        self.plan_off_note = !on;
-        self.plan.enabled = on;
-        if on {
-            self.plan.executing = false;
-            self.plan.steps.clear();
-        }
-        self.refresh_tool_names();
-        self.record_plan()
-    }
-
-    /// Leaves plan mode to carry out the proposed plan; returns the prompt
-    /// that starts it.
-    pub fn start_plan(&mut self) -> Result<String, String> {
-        if self.plan.steps.is_empty() {
-            return Err("there is no plan to carry out".into());
-        }
-        self.plan.enabled = false;
-        self.plan.executing = true;
-        self.plan_off_note = false;
-        for s in &mut self.plan.steps {
-            s.done = false;
-        }
-        self.refresh_tool_names();
-        self.record_plan()?;
-        Ok(plan::execute_prompt(&self.plan.steps))
-    }
-
-    /// Plan mode as the current branch last left it (/resume, -c).
-    pub fn restore_plan(&mut self) {
-        self.plan = self
-            .session
-            .branch()
-            .iter()
-            .rev()
-            .find_map(|e| match &e.body {
-                EntryBody::Custom { custom_type, data } if custom_type == "plan" => {
-                    Some(PlanState::from_json(data))
-                }
-                _ => None,
-            })
-            .unwrap_or_default();
-        self.refresh_tool_names();
-    }
-
-    fn record_plan(&mut self) -> Result<(), String> {
-        // session_info stays the first entry; the run records this after it.
-        if self.session.entries().is_empty() {
-            self.plan_unrecorded = true;
-            return Ok(());
-        }
-        self.plan_unrecorded = false;
-        let data = self.plan.to_json();
-        self.record(EntryBody::Custom {
-            custom_type: "plan".into(),
-            data,
-        })
-        .map(|_| ())
-    }
-
-    fn refresh_tool_names(&self) {
-        if self.sub.is_some() {
-            return;
-        }
-        let names = self.tool_names();
-        self.ext.update_shared(|s| s.active_tools = names);
     }
 
     /// The tail size and summary form compaction uses (the `compaction` setting).
@@ -760,46 +391,6 @@ impl Agent {
         }
     }
 
-    /// Whether extensions see this event: a sub-agent sends only its tool
-    /// events (§10.1), so handlers of the run's lifecycle see one run.
-    fn ext_sees(&self, event: &str) -> bool {
-        self.sub.is_none() || SUB_EVENTS.contains(&event)
-    }
-
-    /// A sub-agent's event payload carries its name as `agent`.
-    fn tag(&self, mut v: Value) -> Value {
-        if let (Some(a), Value::Object(m)) = (&self.sub, &mut v) {
-            m.insert("agent".into(), Value::String(a.clone()));
-        }
-        v
-    }
-
-    fn ext_listens(&self, event: &str) -> bool {
-        self.ext_sees(event) && self.ext.listens(event)
-    }
-
-    async fn ext_notify(&self, event: &str, payload: Value) {
-        if self.ext_sees(event) {
-            self.ext.notify(event, self.tag(payload)).await;
-        }
-    }
-
-    async fn ext_gate(&self, event: &str, payload: Value) -> Gate {
-        if self.ext_sees(event) {
-            self.ext.gate(event, self.tag(payload)).await
-        } else {
-            Gate::Allow(payload)
-        }
-    }
-
-    async fn ext_chain(&self, event: &str, payload: Value) -> Value {
-        if self.ext_sees(event) {
-            self.ext.chain(event, self.tag(payload)).await
-        } else {
-            payload
-        }
-    }
-
     fn record(&mut self, body: EntryBody) -> Result<Entry, String> {
         self.flush_labels()?;
         self.write(body)
@@ -830,28 +421,6 @@ impl Agent {
             .map_err(|e| format!("cannot write the session file {path}: {e}"))?
             .clone();
         self.emit(AgentEvent::Entry { entry: e.clone() });
-        let ev = match &e.body {
-            EntryBody::PolicyDecision {
-                tool_call_id,
-                decision,
-                reason,
-                ..
-            } => Some((
-                "policy_decision",
-                json!({"tool_call_id": tool_call_id, "decision": decision, "reason": reason}),
-            )),
-            EntryBody::GuardEvent { guard, message, .. } => {
-                Some(("guard_event", json!({"guard": guard, "message": message})))
-            }
-            _ => None,
-        };
-        if let Some((name, payload)) = ev
-            && self.ext_listens(name)
-        {
-            let ext = self.ext.clone();
-            let payload = self.tag(payload);
-            tokio::spawn(async move { ext.notify(name, payload).await });
-        }
         Ok(e)
     }
 
@@ -879,7 +448,6 @@ impl Agent {
     /// Runs the agent on one user input.
     pub async fn run(&mut self, input: &str) -> RunOutcome {
         self.renew_cancel();
-        self.set_tool_runner();
         self.emit(AgentEvent::RunStart {
             session: self.session.path().display().to_string(),
         });
@@ -893,24 +461,6 @@ impl Agent {
             Ok(s) => s,
             Err(e) => Stop::Failed(e),
         };
-        if self.plan.enabled && out.stop == Stop::Done {
-            let steps = plan::extract_steps(&out.text);
-            if !steps.is_empty() {
-                self.plan.steps = steps
-                    .into_iter()
-                    .map(|text| plan::Step { text, done: false })
-                    .collect();
-                if let Err(e) = self.record_plan() {
-                    out.stop = Stop::Failed(e);
-                }
-            }
-        }
-        self.run_system.clear();
-        self.ext_notify(
-            "agent_end",
-            json!({"stop": out.stop.name(), "text": out.text}),
-        )
-        .await;
         self.emit(AgentEvent::RunEnd {
             stop: out.stop.name().into(),
             reason: out.stop.reason().map(str::to_owned),
@@ -922,7 +472,6 @@ impl Agent {
     }
 
     async fn run_inner(&mut self, input: &str, out: &mut RunOutcome) -> Result<Stop, String> {
-        self.refresh_mcp().await;
         if self.session.entries().is_empty() {
             let mut data = json!({"agent": "psi", "version": env!("CARGO_PKG_VERSION"),
                                   "cwd": self.ctx.cwd, "model": self.cfg.model,
@@ -942,25 +491,9 @@ impl Agent {
                 data: s,
             })?;
         }
-        if self.plan_unrecorded {
-            self.record_plan()?;
-        }
         // At submit: this also captures the user's own edits (§7.2).
         self.capture("submit", None).await?;
-        self.restore_todos();
         self.record(Self::user_message(input))?;
-        if self.plan.enabled {
-            self.add_context("plan_mode", plan::PLAN_CONTEXT)?;
-        } else if std::mem::take(&mut self.plan_off_note) {
-            self.add_context("plan_mode", plan::PLAN_OFF)?;
-        }
-        self.share_session();
-        self.apply_ext_requests()?;
-        let start_ev = json!({"prompt": input, "system": ""});
-        let r = self.ext_chain("before_agent_start", start_ev).await;
-        self.run_system = r["system"].as_str().unwrap_or("").to_owned();
-        self.ext_notify("agent_start", json!({"prompt": input}))
-            .await;
         let start = Instant::now();
         let b = self.cfg.budgets.clone();
         // A limit the user goes past in the TUI moves on by the same amount.
@@ -997,9 +530,7 @@ impl Agent {
             }
             out.turns += 1;
             let turn = out.turns;
-            self.apply_ext_requests()?;
             self.emit(AgentEvent::TurnStart { turn });
-            self.ext_notify("turn_start", json!({"turn": turn})).await;
 
             if self.fit_context().await?
                 && let Some(GuardAction::Pause { guard, reason }) = guards.on_compaction()
@@ -1014,7 +545,7 @@ impl Agent {
                 }
                 guards.reset();
             }
-            let resp = match self.request(turn).await {
+            let resp = match self.request().await {
                 Ok(r) => r,
                 Err(AiError::ContextOverflow {
                     n_prompt_tokens,
@@ -1054,34 +585,11 @@ impl Agent {
             overflow_retries = 0;
             out.text = resp.text.clone();
             self.record_assistant(&resp)?;
-            if self.plan.executing && self.plan.mark_done(&resp.text) {
-                if self.plan.done_count() == self.plan.steps.len() {
-                    self.plan.executing = false;
-                }
-                self.record_plan()?;
-            }
-            if self.ext_listens("message_end") {
-                let calls: Vec<Value> = resp
-                    .tool_calls
-                    .iter()
-                    .map(|c| json!({"id": c.id, "name": c.name, "arguments": c.arguments}))
-                    .collect();
-                self.ext_notify(
-                    "message_end",
-                    json!({"text": resp.text, "tool_calls": calls}),
-                )
-                .await;
-            }
-            if self.ext_listens("model_stats") {
-                self.ext_notify("model_stats", self.model_stats(&resp))
-                    .await;
-            }
 
             if resp.tool_calls.is_empty() {
                 self.emit(AgentEvent::TurnEnd { turn });
-                self.ext_notify("turn_end", json!({"turn": turn})).await;
                 // Steering typed during the answer goes in now, as after a
-                // tool turn (pi parity); before, it waited and slipped into
+                // tool turn; before, it waited and slipped into
                 // the next run after its first tool call.
                 let steer = Queues::take(&self.queues.steering);
                 if !steer.is_empty() {
@@ -1137,7 +645,6 @@ impl Agent {
                 .await?;
             out.tool_calls += n;
             self.emit(AgentEvent::TurnEnd { turn });
-            self.ext_notify("turn_end", json!({"turn": turn})).await;
             if self.ctx.cancel.is_cancelled() {
                 return Ok(Stop::Aborted);
             }
@@ -1217,16 +724,10 @@ impl Agent {
     }
 
     fn system_prompt(&self) -> String {
-        let [own, ext, mcp] = self.tool_groups();
-        let base = prompt::with_tools_line(
+        prompt::with_tools_line(
             &self.cfg.system_prompt,
-            &prompt::tools_line(&own, &ext, &mcp),
-        );
-        if self.run_system.is_empty() {
-            base
-        } else {
-            format!("{base}\n\n{}", self.run_system)
-        }
+            &prompt::tools_line(&self.tool_names()),
+        )
     }
 
     /// The next request, from the session branch.
@@ -1248,26 +749,9 @@ impl Agent {
         }
     }
 
-    async fn request(&mut self, turn: u32) -> Result<Response, AiError> {
+    async fn request(&mut self) -> Result<Response, AiError> {
         let req = self.build_request();
         self.last_request = Some(req.clone());
-        if self.ext_listens("context") {
-            let m: Vec<Value> = req.messages.iter().map(|m| m.to_json()).collect();
-            self.ext_notify("context", json!({"messages": m})).await;
-        }
-        self.ext_notify("message_start", json!({"turn": turn}))
-            .await;
-        // Streamed text reaches extensions in order, through one task.
-        let updates = self.ext_listens("message_update").then(|| {
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-            let ext = self.ext.clone();
-            tokio::spawn(async move {
-                while let Some(t) = rx.recv().await {
-                    ext.notify("message_update", json!({"text": t})).await;
-                }
-            });
-            tx
-        });
         let events = self.events.clone();
         // Thinking and tool-call arguments, as sizes; a retry counts again
         // from nothing.
@@ -1281,9 +765,6 @@ impl Agent {
             }
             match d {
                 Delta::Text(t) => {
-                    if let Some(u) = &updates {
-                        let _ = u.send(t.clone());
-                    }
                     if let Some(tx) = &events {
                         let _ = tx.send(AgentEvent::TextDelta { text: t });
                     }
@@ -1336,26 +817,6 @@ impl Agent {
                 () = self.ctx.cancel.cancelled() => return Err(AiError::Aborted),
             }
         }
-    }
-
-    /// The `model_stats` payload: what one response cost and how fast it
-    /// came, for extensions' status line segments.
-    fn model_stats(&self, resp: &Response) -> Value {
-        let mut v = json!({"model": self.cfg.model, "context_window": self.cfg.n_ctx});
-        if let Some(u) = resp.usage {
-            v["context_tokens"] = json!(u.prompt_total() + u.output);
-            v["input_tokens"] = json!(u.input);
-            v["cached_tokens"] = json!(u.cache_read);
-            v["output_tokens"] = json!(u.output);
-        }
-        if let Some(t) = resp.timings {
-            v["tok_s"] = json!(t.predicted_per_second);
-            v["prompt_tok_s"] = json!(t.prompt_per_second);
-        }
-        if let Some(ms) = resp.first_token_ms {
-            v["first_token_ms"] = json!(ms);
-        }
-        v
     }
 
     fn record_assistant(&mut self, resp: &Response) -> Result<(), String> {
@@ -1445,40 +906,11 @@ impl Agent {
                             data: json!({"tool_call_id": call.id, "notes": f.notes}),
                         })?;
                     }
-                    let core = Tool::from_name(&f.name)
+                    match Tool::from_name(&f.name)
                         .filter(|t| self.cfg.tools.contains(t))
-                        .map(Callable::Core);
-                    let ext = || {
-                        self.ext_tools
-                            .iter()
-                            .find(|(t, _)| t.name == f.name)
-                            .map(|(t, _)| Callable::Ext(t.clone()))
-                    };
-                    let agent = || {
-                        (f.name == subagent::TOOL && self.offers_agents())
-                            .then_some(Callable::Agent)
-                    };
-                    let mcp = || {
-                        self.mcp_tools
-                            .iter()
-                            .find(|t| t.name == f.name)
-                            .map(|t| Callable::Mcp(t.clone(), self.mcp.clone()))
-                    };
-                    match core
-                        .or_else(ext)
-                        .or_else(agent)
-                        .or_else(mcp)
                         .filter(|c| offered.iter().any(|n| n == c.name()))
                     {
                         Some(c) => Ok((c, f.args)),
-                        None if self.plan.enabled
-                            && matches!(f.name.as_str(), "write" | "edit") =>
-                        {
-                            Err(format!(
-                                "{} is off in plan mode. Put the change in your plan instead.",
-                                f.name
-                            ))
-                        }
                         None => Err(format!("There is no tool named '{}'.", f.name)),
                     }
                 }
@@ -1495,39 +927,8 @@ impl Agent {
             planned.push((call.clone(), fixed));
         }
 
-        // tool_call: extensions may block a call or rewrite its arguments,
-        // before the policy sees it (§9.4); both are recorded.
-        if self.ext_listens("tool_call") {
-            for (call, p) in planned.iter_mut() {
-                let Ok((c, args)) = p else { continue };
-                let ev =
-                    json!({"id": call.id, "name": c.name(), "args": Value::Object(args.clone())});
-                match self.ext_gate("tool_call", ev).await {
-                    Gate::Block { by, reason } => {
-                        self.policy(&call.id, "blocked_by_extension", &reason)?;
-                        *p = Err(blocked_by_extension(&by, &reason));
-                    }
-                    Gate::Allow(ev) => {
-                        if let Some(Value::Object(new)) = ev.get("args")
-                            && new != args
-                        {
-                            self.record(EntryBody::PolicyDecision {
-                                tool_call_id: call.id.clone(),
-                                decision: "rewritten".into(),
-                                reason: "an extension rewrote the arguments".into(),
-                                rewrite: Some(Value::Object(new.clone())),
-                            })?;
-                            *args = new.clone();
-                        }
-                    }
-                }
-            }
-        }
-
         self.turn_changed = false;
-        // Read-only calls the policy lets through run side by side; one it
-        // asks about (an MCP server's `approval: "ask"`, an extension tool
-        // that always asks) goes through `run_one` like any other (§8.1).
+        // Read-only calls the policy lets through run side by side (§8.1).
         let mut side_by_side = Vec::with_capacity(planned.len());
         for (_, p) in &planned {
             side_by_side.push(match p {
@@ -1539,7 +940,6 @@ impl Agent {
                         &self.ctx,
                         None,
                         self.capture_failing,
-                        &self.ext,
                     )
                     .await
                         == Decision::Allow
@@ -1564,8 +964,6 @@ impl Agent {
                         name: c.name().into(),
                         args: Value::Object(args.clone()),
                     });
-                    let ev = json!({"id": call.id, "name": c.name(), "args": Value::Object(args.clone())});
-                    self.ext_notify("tool_execution_update", ev).await;
                 }
             }
             if let (call, Ok((c, args))) = &planned[i]
@@ -1575,10 +973,10 @@ impl Agent {
                 i = j;
                 continue;
             }
-            let (ctx, ext) = (&self.ctx, &*self.ext);
+            let ctx = &self.ctx;
             let futs = planned[i..j].iter().map(|(_, p)| async move {
                 match p {
-                    Ok((c, args)) => invoke(c, args, ctx, ext).await,
+                    Ok((c, args)) => c.run(args, ctx).await,
                     Err(msg) => ToolOutput::err(msg.clone()),
                 }
             });
@@ -1593,21 +991,6 @@ impl Agent {
             .into_iter()
             .map(|o| o.unwrap_or_else(|| ToolOutput::err("not run")))
             .collect();
-        // tool_result: extensions may change what the model sees.
-        if self.ext_listens("tool_result") {
-            for ((call, p), o) in planned.iter().zip(outputs.iter_mut()) {
-                let Ok((c, args)) = p else { continue };
-                let ev = json!({"id": call.id, "name": c.name(), "args": Value::Object(args.clone()),
-                                "text": o.text, "is_error": o.is_error});
-                let r = self.ext_chain("tool_result", ev).await;
-                if let Some(t) = r["text"].as_str() {
-                    o.text = t.to_owned();
-                }
-                if let Some(e) = r["is_error"].as_bool() {
-                    o.is_error = e;
-                }
-            }
-        }
         let held = self.limit_step(&planned, &mut outputs)?;
         let mut pause = None;
         let mut fired = Vec::new();
@@ -1632,9 +1015,10 @@ impl Agent {
         }
         // A file changed: the checkpoint saw it, or a write or edit worked
         // (with checkpoints off there is no capture to see it).
-        let wrote = planned.iter().zip(&outputs).any(|((_, p), o)| {
-            matches!(p, Ok((Callable::Core(Tool::Write | Tool::Edit), _))) && !o.is_error
-        });
+        let wrote = planned
+            .iter()
+            .zip(&outputs)
+            .any(|((_, p), o)| matches!(p, Ok((Tool::Write | Tool::Edit, _))) && !o.is_error);
         if let Some(action) = guards.on_turn_end(self.turn_changed || wrote)
             && let (Some((call, _)), Some(o)) = (planned.last(), outputs.last_mut())
         {
@@ -1661,10 +1045,9 @@ impl Agent {
             })?;
         }
         self.post_edit_check(&planned, &mut outputs).await?;
-        reload_notes(&planned, &mut outputs);
         if let Some(hook) = &self.on_config_write {
             for ((_, p), o) in planned.iter().zip(&outputs) {
-                if let Ok((Callable::Core(Tool::Write | Tool::Edit), args)) = p
+                if let Ok((Tool::Write | Tool::Edit, args)) = p
                     && !o.is_error
                 {
                     let path = Path::new(args.get("path").and_then(Value::as_str).unwrap_or(""));
@@ -1705,9 +1088,10 @@ impl Agent {
         let Some(check) = self.post_edit.clone() else {
             return Ok(());
         };
-        let last = planned.iter().zip(outputs.iter()).rposition(|((_, p), o)| {
-            !o.is_error && matches!(p, Ok((Callable::Core(Tool::Write | Tool::Edit), _)))
-        });
+        let last = planned
+            .iter()
+            .zip(outputs.iter())
+            .rposition(|((_, p), o)| !o.is_error && matches!(p, Ok((Tool::Write | Tool::Edit, _))));
         let Some(i) = last else { return Ok(()) };
         if self.ctx.cancel.is_cancelled() {
             return Ok(());
@@ -1736,19 +1120,10 @@ impl Agent {
     async fn run_one(
         &mut self,
         id: &str,
-        callable: &Callable,
+        callable: &Tool,
         args: &serde_json::Map<String, Value>,
         preceding: &str,
     ) -> Result<ToolOutput, String> {
-        if (self.plan.enabled || self.reads_only)
-            && let Some(why) = self.plan_refusal(callable, args)
-        {
-            self.policy(id, "refused", &why)?;
-            return Ok(ToolOutput::err(why));
-        }
-        if matches!(callable, Callable::Agent) {
-            return self.run_subagent(id, args).await;
-        }
         let decision = decide(
             &self.safety.policy,
             callable,
@@ -1756,7 +1131,6 @@ impl Agent {
             &self.ctx,
             self.safety.checkpoints.clone(),
             self.capture_failing,
-            &self.ext,
         )
         .await;
         match decision {
@@ -1780,7 +1154,6 @@ impl Agent {
                         preceding_text: preceding.into(),
                         reason: reason.clone(),
                         keys: keys.clone(),
-                        agent: self.sub.clone(),
                     };
                     let answer = tokio::select! {
                         a = self.safety.approver.approve(req) => a,
@@ -1808,22 +1181,8 @@ impl Agent {
             }
         }
 
-        let mut out = invoke(callable, args, &self.ctx, &self.ext).await;
-        if matches!(callable, Callable::Core(Tool::Todo)) {
-            // Only the list changed: keep a snapshot, no checkpoint.
-            let snap = self
-                .ctx
-                .todos
-                .lock()
-                .map(|l| l.to_json())
-                .unwrap_or_default();
-            self.record(EntryBody::Custom {
-                custom_type: "todo".into(),
-                data: snap,
-            })?;
-            return Ok(out);
-        }
-        if matches!(callable, Callable::Core(Tool::Bash))
+        let mut out = callable.run(args, &self.ctx).await;
+        if matches!(callable, Tool::Bash)
             && out.is_error
             && let Some(sb) = self.ctx.sandbox.clone()
             && let Some(path) = sb.blocked(&out.text)
@@ -1859,7 +1218,7 @@ impl Agent {
                 BlockedChoice::AddDir => match sb.add_dir(&dir, self.cfg.home.as_deref()) {
                     Ok(()) => {
                         self.policy(id, "dir_added", &dir.display().to_string())?;
-                        let again = invoke(callable, args, &self.ctx, &self.ext).await;
+                        let again = callable.run(args, &self.ctx).await;
                         out = ToolOutput {
                             text: format!(
                                 "[the user made {} writable for this session; it ran again]\n{}",
@@ -1884,72 +1243,6 @@ impl Agent {
             self.turn_changed = true;
         }
         Ok(out)
-    }
-
-    /// Why plan mode doesn't run a call: bash that isn't read-only, or an
-    /// extension tool that may change things.
-    /// A read-only sub-agent gets the same refusals, in its own words.
-    fn plan_refusal(
-        &self,
-        callable: &Callable,
-        args: &serde_json::Map<String, Value>,
-    ) -> Option<String> {
-        let (who, instead) = match (&self.sub, self.plan.enabled) {
-            (Some(name), false) => (
-                format!("{name} is a read-only agent"),
-                "Say in your answer what should change instead.",
-            ),
-            _ => (
-                "plan mode allows only reading".to_owned(),
-                "Put it in your plan instead.",
-            ),
-        };
-        match callable {
-            Callable::Core(Tool::Bash) => {
-                let cmd = args.get("command").and_then(Value::as_str).unwrap_or("");
-                psi_safety::read_only::check(cmd)
-                    .err()
-                    .map(|why| format!("Not run: {who}, and {why}. {instead}"))
-            }
-            Callable::Ext(i) if !i.read_only => Some(format!(
-                "Not run: {} may change things, and {who}. {instead}",
-                i.name
-            )),
-            Callable::Mcp(t, _) if !t.read_only => Some(format!(
-                "Not run: {} may change things (its server doesn't mark it read-only), and {who}. {instead}",
-                t.name
-            )),
-            Callable::Agent => {
-                let name = args.get("agent").and_then(Value::as_str).unwrap_or("");
-                let ro = self
-                    .subagents
-                    .iter()
-                    .find(|d| d.name == name)
-                    .is_none_or(|d| d.read_only(&self.cfg.tools));
-                (!ro).then(|| format!("Not run: {name} may change files, and {who}. Use a read-only agent such as scout, or {}", instead.to_lowercase()))
-            }
-            _ => None,
-        }
-    }
-
-    /// The todo list as the current branch last left it, so it follows
-    /// /tree, /rewind and /resume.
-    fn restore_todos(&mut self) {
-        let list = self
-            .session
-            .branch()
-            .iter()
-            .rev()
-            .find_map(|e| match &e.body {
-                EntryBody::Custom { custom_type, data } if custom_type == "todo" => {
-                    Some(psi_tools::TodoList::from_json(data))
-                }
-                _ => None,
-            })
-            .unwrap_or_default();
-        if let Ok(mut l) = self.ctx.todos.lock() {
-            *l = list;
-        }
     }
 
     /// The model's message for a denied call. Without a user, it says what
@@ -2035,18 +1328,6 @@ impl Agent {
     /// Context overflow (§4.2): drop the oldest turns so the request fits,
     /// and record it.
     async fn drop_old_turns(&mut self, n_prompt: u64, n_ctx: u64) -> Result<(), String> {
-        if let Gate::Block { reason: why, .. } = self
-            .ext
-            .gate(
-                "session_before_compact",
-                json!({"tokens": n_prompt, "reason": "overflow"}),
-            )
-            .await
-        {
-            return Err(format!(
-                "the request ({n_prompt} tokens) does not fit the context window ({n_ctx} tokens), and an extension stopped dropping old turns: {why}"
-            ));
-        }
         let keep = plan_drop(&self.session.branch(), n_prompt, n_ctx, self.cfg.max_output)
             .ok_or_else(|| format!("the request ({n_prompt} tokens) does not fit the context window ({n_ctx} tokens), even with only the last turn"))?;
         self.record(EntryBody::Compaction {

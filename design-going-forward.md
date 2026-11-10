@@ -146,6 +146,16 @@ Psi runs one small task at a time, in a fresh context, inside a boundary where n
 
 Each step ends with `just check` passing and a short note here of what was done.
 
+### Done
+
+- **Step 0 (2026-11-09).** `AGENTS.md` now names this file as the direction, drops pi as the reference and the phase-by-phase rule, and points at "Order of work". `psi-plan.md` opens with a note that this file wins.
+- **Step 1 (2026-11-09).** Cut, in this order, with `just check` passing after each: the pi adapter and `--agent pi`; MCP (`psi-mcp`); extensions (`psi-ext`, `psi-ext-api`, the examples, the API docs, the `ext_*` eval tasks, `/reload`); sub-agents; skills, prompt templates, theme files and packages; clearing old results; plan mode, the todo tool and the read-only bash checker; `keybindings.json` and the grep, find and ls tools. The Rust code went from about 53K to about 33K lines, and the workspace from 11 crates to 8. With each feature went its tests, help topics, settings and justfile recipes.
+  - Decided on the way: plan mode and todo went now, so there is no planning mode until step 3; open question 6 is answered (cut).
+  - Moved to step 2: the approval card and its paths (the ask list still asks), and the rest of project trust, which now covers only `.psi/settings.jsonc`.
+  - Changed behavior: when a summary fails or can't make room, old results are no longer cleared as a fallback; the request goes out and the overflow path drops old turns. Sessions recorded with cleared results, plans or todos still open.
+  - Model-facing text changed in one place: the step-budget refusal says "summarized" where it said "cleared". No eval was run.
+  - Left for later: `psi-ai`'s schema support for nested and untyped parameters (it served MCP and extension tools); `Tool`'s side-by-side reads now cover `read` only.
+
 ## Open questions
 
 1. **Gitignored files.** Checkpoints skip them, so a clobbered `.env` can't be undone. Suggested: checkpoint small ignored files too, outside the usual heavy directories (`target`, `node_modules`, `.venv`).

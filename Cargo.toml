@@ -9,11 +9,7 @@ license = "MIT"
 publish = false
 
 [workspace.dependencies]
-base64 = "0.23.1"
-chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
-full_moon = { version = "3.0.0", default-features = false, features = ["lua54"] }
 futures-util = "0.3.34"
-globset = "0.4.21"
 ignore = "0.4.34"
 # fzf-style fuzzy scoring for @ completion (Helix; Codex uses it too).
 nucleo-matcher = "0.3.1"
@@ -34,11 +30,8 @@ clap = { version = "4.6.7", features = ["derive"] }
 clap_complete = { version = "4.6.11", features = ["unstable-dynamic"] }
 crossterm = { version = "0.29.0", features = ["use-dev-tty"] } # level-triggered input: mio's edge-triggered source drops a key or a resize that arrive together
 jsonc-parser = { version = "0.34.0", features = ["serde", "cst"] }
-# Not `send`: each extension's Lua state lives on its own thread (D-13).
-mlua = { version = "0.12.2", features = ["lua54", "vendored", "async", "serialize"] }
 serde = { version = "1.0.229", features = ["derive"] }
 similar = { version = "3.2.1", features = ["inline"] }
-toml = "1.1.8"
 # preserve_order: tool schemas and examples keep their declared key order (H-05).
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 tempfile = "3.27.0"

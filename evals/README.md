@@ -2,7 +2,7 @@
 
 The coding eval (psi-plan.md §12.5). It exists for sanity checks, for
 finding harness bugs ("a tool result sent the model the wrong way") and
-for directional comparisons with pi. It is not a benchmark.
+for trying a new model. It is not a benchmark.
 
 **A baseline is one run, one trial per task.** It proves the design works
 end to end: trials run, records are captured, graders produce outcomes,
@@ -13,7 +13,7 @@ agent or model does, and don't re-run it for more trials.
 
 | Path | |
 |---|---|
-| `Containerfile` | The trial image (`localhost/psi-eval:latest`): Debian trixie, Python 3.13, git, make, gcc, ripgrep, Node.js and pi 1.4.0; pyright and an MCP language-server bridge for the `lsp` variant |
+| `Containerfile` | The trial image (`localhost/psi-eval:latest`): Debian trixie, Python 3.13, git, make, gcc, ripgrep |
 | `code/<task>/prompt.md` | The request, as a developer would write it |
 | `code/<task>/repo/` | The starting project |
 | `code/<task>/reference/` | A correct solution's files, overlaid on `repo/` |
@@ -21,7 +21,6 @@ agent or model does, and don't re-run it for more trials.
 | `code/<task>/hidden/total` | How many check lines `check.sh` prints |
 | `code/_lib/` | Helpers for the graders (`check`, `check_output`, `unittests`) |
 | `code/SET` | The quick set: what `psi eval run` runs by default |
-| `pi/step-cap.ts` | A pi extension that stops a trial after the step cap |
 
 The 40 coding tasks were ported from Heimdall. Names start with the kind of
 task: `fix_` (Python bug fixes), `feat_` (Python features), `sh_` (shell
@@ -39,26 +38,6 @@ second read) carries to the end. Run it against a server started with
 4096`, and read the trial's compaction entries to see whether the facts
 survived each summary. `gen.py` generated the task.
 
-## The extension tasks
-
-`ext_*` (four, from Heimdall's extension eval; H-01) ask for a psi Lua
-extension in the project's `.psi/extensions/<name>/`: a `tool_call` gate
-(`ext_lockfile_guard`), a `tool_result` rewrite with a flag
-(`ext_trim_output`), a new tool (`ext_todo_scan`) and a tool with session
-state plus a command (`ext_bookmarks`). They are not in the quick set.
-`just eval-ext` runs them with `docs/extensions.md` and `docs/api.md` in
-the model's context (as `~/.psi/AGENTS.md`, built from `docs/` at run time,
-so it can't drift), with a step cap of 20 (`just ext-steps=40 eval-ext`
-for more): passes took 7 to 16 steps, and the runs are read for harness
-problems rather than scored. Headless runs skip the untrusted project's
-`.psi`, so the extension never loads into the session writing it.
-
-Grading copies the extension without its own `*_test.lua` files, adds the
-task's hidden tests and runs `psi ext test` (`exttests` in `_lib`), one
-check per test case. Graders run `psi`, so `psi eval check` and the trials
-mount the eval binary into the grading container (`just eval-check` passes
-the static one).
-
 ## Commands
 
 Run these from the repository root (or pass `--evals`). Results go to
@@ -67,7 +46,6 @@ Run these from the repository root (or pass `--evals`). Results go to
 ```
 psi eval check                     # every grader: reference passes, untouched repo fails
 psi eval run                       # psi on the quick set, one trial each
-psi eval run --agent pi            # the same with pi
 psi eval run --tasks all           # every task
 psi eval run --tasks fix_env_parser,sh_logreport
 psi eval diff RUN_A RUN_B          # two runs side by side
@@ -75,8 +53,7 @@ psi inspect RUN/TASK/trial-0       # one trial as a timeline
 ```
 
 Trials run a static (musl) build of psi, mounted into the container:
-the image's glibc is older than this machine's, and psi's vendored Lua
-ties a glibc build to the glibc it was built against. `just eval-run`
+the image's glibc is older than this machine's. `just eval-run`
 builds it (`just eval-build`, which needs the `musl` package and the
 `x86_64-unknown-linux-musl` Rust target) and passes it with
 `--psi-binary`; `psi eval run` checks first that the binary starts in
@@ -96,23 +73,18 @@ no sampling fields, so the server's flags apply (H-08).
 
 1. **Setup.** The task's `repo/` is copied to `work/project/` inside a
    fresh git repository `work/`. The agent's home holds only its model
-   config, with the context window from `/props`: psi gets
-   `~/.psi/models.jsonc` (model `local`), pi gets
-   `~/.pi/agent/models.json` (provider `llamacpp`, model `local`, thinking
-   off).
+   config, with the context window from `/props`:
+   `~/.psi/models.jsonc` (model `local`).
 2. **The run.** A rootless podman container (`--userns=keep-id`) runs the
    agent in `/work/project` with a timeout (default 1200 s). Its only
    network route is the model server (`pasta:--splice-only,-T,<port>`); a
    check before the trials confirms the server is reachable and the
    internet and another host port are not (`network.txt`). psi runs as
    `psi -p <prompt> --json --max-turns <steps> --isolation off` (the container is the boundary; the binary running
-   `psi eval`, mounted read-only); pi runs as `pi --mode json -p <prompt>
-   --model llamacpp/local --tools read,bash,edit,write -e
-   /eval-pi/step-cap.ts`, offline.
+   `psi eval`, mounted read-only).
 3. **The record.** psi's own session file and wire log are copied out
-   (`session.jsonl`, `wire.jsonl`); pi's event stream (`run.jsonl`) is
-   converted into the same session entries, so inspection and scoring read
-   every agent alike (D-31).
+   (`session.jsonl`, `wire.jsonl`); they are the record inspection and
+   scoring read (D-31).
 4. **Grading.** The project as the agent left it (without `.git`) is
    copied into a fresh container with no network and graded by
    `hidden/check.sh` (`grade/checks.txt`).
@@ -133,8 +105,8 @@ Per trial, `<run>/<task>/trial-0/` holds `result.json`, `run.jsonl`,
 
 ## The smoke test
 
-`just eval-smoke` (part of `just check`) runs `psi eval run` for both
-agents on fix_invoice_rounding with the replay server as the model,
+`just eval-smoke` (part of `just check`) runs `psi eval run`
+on fix_invoice_rounding with the replay server as the model,
 scripted to write the reference solution. It checks the whole pipeline
 (podman, network check, agent, record, grading) in a few seconds, without
 a GPU.

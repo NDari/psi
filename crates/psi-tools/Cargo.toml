@@ -6,8 +6,6 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-globset.workspace = true
-ignore.workspace = true
 psi-ai = { path = "../psi-ai" }
 psi-safety = { path = "../psi-safety" }
 regex.workspace = true
