@@ -241,25 +241,25 @@ mod tests {
     #[test]
     fn shipped_tasks_load() {
         let all = load_tasks(&evals_code(), &Selection::All).unwrap();
-        assert_eq!(all.len(), 42);
+        assert_eq!(all.len(), 43);
         // All but the task from a real project carry a reference solution.
         let without: Vec<&str> = all
             .iter()
             .filter(|t| !t.has_reference())
             .map(|t| t.name.as_str())
             .collect();
-        assert_eq!(without, ["cog_bare_words"]);
+        assert_eq!(without, ["cog_bare_words", "cog_bare_words_plan"]);
         let quick = load_tasks(&evals_code(), &Selection::Quick).unwrap();
         assert_eq!(quick.len(), 10);
         assert!(quick.iter().all(|t| t.total > 0));
         // A set by its name, alone or with tasks; its own request limit.
         let trial = Selection::parse("trial");
         let tasks = load_tasks(&evals_code(), &trial).unwrap();
-        assert_eq!(tasks.len(), 9);
+        assert_eq!(tasks.len(), 10);
         assert_eq!(set_steps(&evals_code(), &trial), Some(120));
         assert_eq!(set_steps(&evals_code(), &Selection::Quick), None);
         let mixed = Selection::parse("trial,fix_pagination");
-        assert_eq!(load_tasks(&evals_code(), &mixed).unwrap().len(), 10);
+        assert_eq!(load_tasks(&evals_code(), &mixed).unwrap().len(), 11);
         assert_eq!(set_steps(&evals_code(), &mixed), None);
     }
 

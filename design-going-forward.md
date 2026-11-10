@@ -188,6 +188,11 @@ Each step ends with `just check` passing and a short note here of what was done.
   - `/diff task <n>` pages what one task changed, between the checkpoints at its start and end.
   - `/undo task <n>` restores the files, the git refs and the plan's ticks to where they were before task n, which takes back the tasks after it too. Plain `/undo` already steps back one task at a time, since each task starts with a checkpoint.
   - The end of a plan run points at these three, and `psi inspect` shows each task's start and the harness's report in the timeline.
+- **After step 5 (2026-11-10): the first model runs since the cut.** Details in `experiments.md`.
+  - `cog_bare_words` as one prompt (120 requests) and as a plan (`cog_bare_words_plan`, 40 requests a task): both model failures with no file edited. The limits bounded both, nothing asked, and the plan's fresh context stayed at 18.5K tokens where the single prompt filled the window three times.
+  - The quick set with the 27B (`~/.psi/evals/2026-11-10-0952-quick-after-step5-qwen27b`): 7 PASS, 3 MODEL-FAIL, 0 HARNESS-FAIL. The three failures ran into the request limit re-running their own checks or probes.
+  - Added: a line after a summary telling the model to go on from the summary's next step (in a replay, 10 of 10 samples then ran the reproducer instead of reading on in the doc the kept tail was in, against 0 of 10 without it; not yet seen in a live run), plan trials in the eval runner, and `--json` with `psi run`.
+  - Not built: a note for a task that has only read. In replays 18 of 20 samples edited after it, but it is new model-facing text and waits for the owner.
 
 ## Open questions
 

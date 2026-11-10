@@ -89,8 +89,22 @@ fn trial(ctx: &TrialCtx, task: &Task, dir: &Path) -> Result<TrialResult> {
     // The project is /work/project inside the git repository /work.
     git_init(&work)?;
     let prompt = task.prompt()?;
+    // A plan task: the plan goes into the project, and psi carries it out
+    // item by item (`psi run`) in place of the one prompt.
+    let plan = task.dir.join("plan.md");
+    let plan = plan.is_file().then_some(plan);
+    if let Some(p) = &plan {
+        std::fs::copy(p, project.join("plan.md")).ctx(|| "copying the plan".into())?;
+    }
+    // The task's own settings (its check), under the run's variant if any.
+    let settings = task.dir.join("settings.jsonc");
+    if settings.is_file() {
+        fsutil::create_dir_all(&home.join(".psi"))?;
+        std::fs::copy(&settings, home.join(".psi/settings.jsonc"))
+            .ctx(|| "copying the task's settings".into())?;
+    }
 
-    let (facts, mut entries) = psi_run(ctx, &home, &work, dir, &prompt)?;
+    let (facts, mut entries) = psi_run(ctx, &home, &work, dir, &prompt, plan.is_some())?;
     let ts = entries.last().map(|e| e.ts).unwrap_or(0);
     let end = IdGen::resume(&entries).push(
         ts,
@@ -156,6 +170,7 @@ fn psi_run(
     work: &Path,
     dir: &Path,
     prompt: &str,
+    plan: bool,
 ) -> Result<(RunFacts, Vec<Entry>)> {
     let binary = ctx
         .psi_binary
@@ -178,27 +193,21 @@ fn psi_run(
     )?;
     let timeout = ctx.timeout_s.to_string();
     let steps = ctx.steps.to_string();
+    // The container is the boundary (§12.5).
+    let mut cmd = vec!["timeout", "-k", "30", "-s", "INT", &timeout, "psi"];
+    cmd.extend(["--json", "--isolation", "off"]);
+    if plan {
+        // Each task of the plan gets the `limits` setting's requests, not
+        // the trial's step cap.
+        cmd.extend(["run", "plan.md"]);
+    } else {
+        cmd.extend(["--max-turns", &steps, "-p", prompt]);
+    }
     let exit_code = Container::new(&ctx.network, home)
         .mount(work, "/work", false)
         .mount(binary, "/usr/local/bin/psi", true)
         .workdir("/work/project")
-        .cmd([
-            "timeout",
-            "-k",
-            "30",
-            "-s",
-            "INT",
-            &timeout,
-            "psi",
-            "-p",
-            prompt,
-            "--json",
-            "--max-turns",
-            &steps,
-            // The container is the boundary (§12.5).
-            "--isolation",
-            "off",
-        ])
+        .cmd(cmd)
         .run(&dir.join("run.jsonl"), &dir.join("run.stderr"))?;
     let events = fsutil::read_to_string(&dir.join("run.jsonl"))?;
     let facts = psi_facts(&events, exit_code);

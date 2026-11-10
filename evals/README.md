@@ -118,6 +118,12 @@ small tasks here don't bring out. Such a task is:
 There is no `reference/`: `psi eval check` then checks only that the
 untouched project fails the grader. Add the task to `code/TRIAL`.
 
+A task can be a plan instead of one prompt: with a `plan.md` next to
+`prompt.md`, the trial runs `psi run plan.md` in the project (each item a
+task with its own limits), and a `settings.jsonc` there becomes the
+trial's `~/.psi/settings.jsonc` (the end-of-task check). The grader is
+the same. `cog_bare_words_plan` is `cog_bare_words` written this way.
+
 ## What a trial does
 
 1. **Setup.** The task's `repo/` is copied to `work/project/` inside a

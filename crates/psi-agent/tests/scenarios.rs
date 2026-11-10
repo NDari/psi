@@ -731,7 +731,14 @@ async fn a_summary_extends_the_last_request_and_keeps_a_tail() {
     assert!(opening.contains(SUMMARY));
     assert!(opening.contains("[The last user message, repeated]\n\nPort the parser."));
     assert!(next.len() < first.len());
-    let tail = &next[2..];
+    // Last, after the tail: the line that points the model at its own
+    // plan. Without it the model goes on with what the tail ends in
+    // (cog_bare_words, 2026-11-09: 10 of 10 samples).
+    assert_eq!(
+        next.last().unwrap(),
+        &json!({"role": "user", "content": "[Note from psi] Earlier messages were replaced by your summary above. Go on from its Next step."})
+    );
+    let tail = &next[2..next.len() - 1];
     assert_eq!(tail[..], sum[sum.len() - 1 - tail.len()..sum.len() - 1]);
     // The session keeps everything.
     assert_eq!(tool_results(&a).len(), 31);

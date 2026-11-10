@@ -203,6 +203,35 @@ Flags worth sweeping: `-fa`, `-b`/`-ub`, `-ctk`/`-ctv` (KV cache type), `-t`, `-
 - Which fix, if it holds: the line after the tail (cheap; it keeps the tail, so the cache-reusing summary request and the tail's content stay), or no tail when its last result is a cut-off read. The design's rule is to work around first and change the harness when a problem comes back on ordinary tasks; this is the first ordinary task it showed on.
 - The same trial is the case for plans: as one prompt the work filled the window three times. Try it as a plan (`/plan`, `/run`) before reading too much into the summary.
 
+### The cog task as a plan: a fresh context, and the first task still never edits (added 2026-11-09)
+
+**Question:** the same work as `cog_bare_words`, written as a plan of four steps and carried out with `psi run` (`cog_bare_words_plan`, the plan in `evals/code/cog_bare_words_plan/plan.md`): does a small task in a fresh context get to the change?
+
+**Run 2026-11-09** (Qwen3.8 27B, the profile's sampling, 40 requests a task, `~/.psi/evals/2026-11-10-0442-cog-plan-qwen27b`): MODEL-FAIL, 1 of 3 checks. The first task used its 40 requests in 3 minutes, changed no file and was left open, so the plan stopped there.
+
+- **The context stayed small:** 18.5K tokens at the end, no summary. That part of the bet held.
+- **It had what it needed by request 15:** `evalWord`, `apply`, and `applyName` and `callExecutable` in `instructions.go`, which do what the step asks for.
+- **Then it kept reading, and part of that was a hunt for a function that does not exist.** From request 24 to 40, 9 of the 17 requests searched for `evalBlock` (the code has `evalBlockBody`) with the pattern a little different each time, some exact repeats, each returning nothing new. The other 8, in between, read more builtins in `fn.go` (`makeCompose`, `makeDip`, `makeIf`, `makeRepeat`) and did return new lines.
+- **No guard fired, and "a search that finds nothing new" would not have either:** the searches with nothing new come at most 3 in a row (requests 38 to 40), with reads of new code between them.
+
+**Replays 2026-11-10** (`psi replay` on the trial, the profile `qwen27b`, 10 samples each; one step of one recording):
+
+| Request | Change | Next action |
+|---|---|---|
+| 24 | none | 10 read or search more (1 for `evalBlock`), 0 edit |
+| 30 | none | 10 read or search more (5 for `evalBlock`), 0 edit |
+| 24 | note appended | 9 edit `env.go`, 1 reads |
+| 30 | note appended | 9 edit `env.go`, 1 reads |
+
+The note, as a user message at the end: "[Note from psi] This task has made N requests and changed no file. You have read enough: make the change now with edit, then run the check." (N = 23 and 29).
+
+- The hunt for `evalBlock` is one draw at request 24 and half the draws once it has started. Reading on without editing is what the model does there every time.
+- Told once that nothing is changed yet, it edits, in the function the step names. Whether the edit is right was not looked at.
+
+**Open:**
+- A note for a task that has only read, built into `psi run`. Not built: it is new model-facing text, and it only fits where a change is expected (a plan's task), not a question asked with `-p`. To decide: after how many requests (half the task's limit?), and whether once.
+- The single-prompt run with the note after a summary was stopped at 27 requests, before any summary, so the note is still untested live.
+
 ## Done
 
 ### Does the loop note last? (added 2026-11-09)

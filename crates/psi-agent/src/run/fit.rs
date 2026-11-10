@@ -5,14 +5,14 @@
 use std::time::Instant;
 
 use psi_ai::{AiError, ChatMessage, ChatRequest, Delta, RawToolCall, Response};
-use psi_session::EntryBody;
+use psi_session::{Block, EntryBody};
 use psi_tools::ToolOutput;
 use serde_json::json;
 
 use super::{Agent, Planned};
 use crate::compact::{
-    CHARS_PER_TOKEN, Chain, SUMMARIZER_SYSTEM, check_summary, estimate_tokens, flatten,
-    plain_summary_prompt, plan_cut, request_before, step_budget, summary_chain,
+    CHARS_PER_TOKEN, Chain, SUMMARIZER_SYSTEM, SUMMARY_NOTE, check_summary, estimate_tokens,
+    flatten, plain_summary_prompt, plan_cut, request_before, step_budget, summary_chain,
     summary_instruction, summary_words, tail_tokens, trigger,
 };
 use crate::events::AgentEvent;
@@ -276,6 +276,14 @@ impl Agent {
             first_kept_id,
             tokens_before: Some(tokens),
             replaces,
+        })?;
+        // After the kept tail, so the plan in the summary is what the
+        // model goes on from, not the step the tail ends in.
+        self.record(EntryBody::CustomMessage {
+            custom_type: "summary_note".into(),
+            content: vec![Block::Text {
+                text: SUMMARY_NOTE.into(),
+            }],
         })?;
         self.record(EntryBody::Custom {
             custom_type: "compaction".into(),

@@ -5,13 +5,15 @@
 # trial for how it ended; the count of passes says little.
 #
 # cog_bare_words is a real prompt on a real project (the kind that looped
-# in daily use); the rest are the tasks here with the most to read and
+# in daily use), and cog_bare_words_plan is the same work as a plan file
+# carried out item by item (`psi run`); the rest are the tasks here with the most to read and
 # change. More real prompts, on more than one project, belong here: each is
 # a task with prompt.md, a source file, a setup.sh if it needs one, and
 # hidden/ (evals/README.md, "A task from a real project").
 @steps 120
 
 cog_bare_words
+cog_bare_words_plan
 multi_config_object
 multi_ini_to_json
 multi_split_package

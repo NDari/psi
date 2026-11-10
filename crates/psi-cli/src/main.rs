@@ -22,8 +22,8 @@ struct Cli {
     #[arg(short = 'p', long = "print", value_name = "PROMPT")]
     print: Option<String>,
 
-    /// With -p: print the run's events as JSON lines instead of the answer.
-    #[arg(long, requires = "print")]
+    /// With -p or `psi run`: print the run's events as JSON lines instead of the answer.
+    #[arg(long)]
     json: bool,
 
     /// The model profile from ~/.psi/models.jsonc (default: the first, or llama-server on 9931).
@@ -289,6 +289,9 @@ fn agent_command(cli: Cli, plan: Option<PathBuf>) -> Result<ExitCode> {
     // as the interactive mode, with no request limit.
     if cli.print.as_deref().is_some_and(|p| p.trim().is_empty()) {
         bail!("psi -p got an empty prompt; give it one, or \"-\" to read it from stdin");
+    }
+    if cli.json && cli.print.is_none() && plan.is_none() {
+        bail!("--json goes with -p \"...\" or psi run");
     }
     if plan.is_some() && cli.print.is_some() {
         bail!("psi run carries out a plan; it takes no -p prompt");

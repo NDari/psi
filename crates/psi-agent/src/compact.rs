@@ -385,6 +385,15 @@ pub(crate) fn plain_summary_prompt(
     )
 }
 
+/// Added after the kept tail when a summary has taken the earlier
+/// messages' place. The tail is the latest thing in the context and shows
+/// the model in the middle of what it was doing before the summary, and it
+/// goes on with that, whatever its own summary planned: in the first
+/// `cog_bare_words` trial the request after a summary read on in the doc
+/// the tail ended in, in 10 of 10 samples; with this line, all 10 took the
+/// summary's next step (experiments.md, 2026-11-09).
+pub const SUMMARY_NOTE: &str = "[Note from psi] Earlier messages were replaced by your summary above. Go on from its Next step.";
+
 /// The system prompt of a summary request built from text (the fallback).
 pub(crate) const SUMMARIZER_SYSTEM: &str = "You write summaries of a coding agent's work, so the agent can continue from them. Write only the summary.";
 
