@@ -73,6 +73,72 @@ Flags worth sweeping: `-fa`, `-b`/`-ub`, `-ctk`/`-ctv` (KV cache type), `-t`, `-
 - Draft acceptance with MTP falls as sampling loosens, so each try is slower.
 - If it works, where it goes: before the nudge (the harness quietly asks again), or after the note fails.
 
+### A standing anti-loop rule the model wrote for itself (added 2026-11-10)
+
+**Question:** does a rule given before the work starts keep the 27B out of a loop, where the note given after a loop held in 1 of 3 live runs?
+
+**Context:** in a long pi session with the 27B the loops came again and again. The owner asked the model why and how to fix it, the model proposed the rule below, and with it in the session the repeats went away. One session, on pi, and the model's account of its own loop is not evidence. The rule (the owner's paste, a dash replaced):
+
+> Anti-loop rule: Before running any command, state in one line what new information it will produce that you don't already have. If you cannot name it, do not run it: read the relevant code instead. If the same command (same intent, only superficially different args) has been run twice and the answer didn't change your plan, stop, say "I am looping," and switch to reading code or asking a question. Never retry a probe expecting a different result without a changed hypothesis.
+
+**What the pi log shows** (read 2026-11-10, no model run; `~/.pi/agent/sessions/--home-ndari-projects-cog--/2026-11-10T21-35-55-596Z_01a1c763-*.jsonl`, the bare-words task on cog, pi 1.5.2, thinking level "medium" but 0 reasoning tokens in all 472 replies):
+
+| | Before the rule (21:36 to 22:34) | After (22:34 to 00:22) |
+|---|---|---|
+| Tool calls | 245 | 218 |
+| The same command as an earlier one but for the name of its `/tmp` file | 94, in 5 runs of 8 to 55 calls | 0 |
+| Exact repeats | 7 | 4, scattered |
+| Calls with a line of text before them | 28 | 173 |
+| Times the owner stepped in ("you are stuck again") | 5 | 0 |
+
+- The loops were not exact repeats: each call wrote the same program to a new file and ran it (`/tmp/dbg2.go` to `dbgT.go`, `probe.cog` to `probe12.cog`, `p.cog` to `p8.cog`, `s6.cog` to `sf.cog`, then 55 calls of `cat > /tmp/rc.cog <<'EOF' {2 +} :x let x 3 EOF; go run ./cmd/cog /tmp/rc.cog; ...` with the name going `rc`, `rd`, ...). All 94 were bare tool calls with no text. The owner's own message ended each one, and the fifth came after the owner's hint that recursion had never worked.
+- The rule came as a user message right after the fifth loop and the model's own account of it, and the model also wrote it into cog's `CLAUDE.md`. The summary at 22:56 kept the tail from before the rule, so the message stayed in the context to the end.
+- After it the model wrote a line before most calls ("Let me understand why by reading how `unset` works rather than probing."), never said "I am looping", and finished the task (the owner's "commit and push" at 00:12).
+- One session, and the work after the rule was partly a different kind (fixing tests, a doc sweep), so it does not say the rule is what changed it.
+
+What is new against what was tried: the rule asks for a line of text before each call, and it stays in force instead of arriving once after 12 repeats. In "Does the loop note last?" (below) run 1's repeats were bare tool calls with no text too.
+
+**How:** two steps, the measure as before and fixed up front (exact repeats, without `intent`; repeat, new or answer, with the new calls listed).
+
+1. Sampled replay, no build: on the 14 recorded loop requests, the rule added as a user message, seeds 1 to 3, with the loop note sent again beside it under the same server (on 2026-11-09 28 of its 42 samples left the loop). This only says whether it does as well as the note at the point of a loop. Sent with a copy of `cut_exp.py` from the 2026-11-09 run and not `psi replay`: the same requests, seeds, `max_tokens` and classifier, and `psi replay` prints only the first 120 characters of a call, too few to tell an exact repeat. Also counted, fixed before the run: the samples that have text before the call, the one thing the pi log showed the rule changing.
+2. Live, which is the real question: the rule in the project's context file (it reaches the system prompt with no build), on tasks that looped in recent runs (`feat_query_paging`, `multi_ini_to_json`, `sh_archive_fix`, `cog_bare_words`), each with and without it. One trial each way, back to back on the same server, `psi eval run --model qwen27b --n-ctx 65536`, 40 requests for the three small tasks and 120 for cog as in the earlier runs. The rule is the section the model wrote into cog's `CLAUDE.md` in the pi session: as `AGENTS.md` in the three small projects, added to the end of `CLAUDE.md` in cog (a copy of `evals/` under `~/.psi/evals/2026-11-10-loop-rule-live-setup`). Fixed before the run, per trial: what today's guards did (the nudge, the note, the stop: `psi guards`); the exact repeats and the longest run of turns in a row that only repeat earlier calls; the calls with text before them; whether the model says "I am looping" or ends on a question; how the trial ended. Calls that match an earlier one but for a scratch file's name are listed beside these and not counted as repeats. Checks passed are noted and not compared: one trial each.
+
+**Run 2026-11-10, step 1** (`~/.psi/evals/2026-11-10-1835-loop-rule-replay-qwen3.8-27b`: `samples.jsonl`, `run.log`, `summary.txt`, the script `rule_exp.py`; 84 samples, 49 minutes of server time; the server as on 2026-11-09, build b12110 and the same sampling, its window 129K where it was 64K). Each cell is repeat / new / answer of 3 seeds:
+
+| Session | note | rule |
+|---|---|---|
+| `1507_9187a24e` | 1 / 2 / 0 | 2 / 1 / 0 |
+| `1820_337ddaaa` | 2 / 1 / 0 | 1 / 2 / 0 |
+| `1904_4176ba71` | 3 / 0 / 0 | 0 / 3 / 0 |
+| `1736_ca300e42` | 1 / 2 / 0 | 2 / 1 / 0 |
+| `1812_45a2b294` | 2 / 1 / 0 | 2 / 1 / 0 |
+| `1827_7231f974` | 1 / 2 / 0 | 1 / 2 / 0 |
+| `1849_bc318ed3` | 0 / 3 / 0 | 2 / 1 / 0 |
+| `1841_b123cd94` | 0 / 3 / 0 | 0 / 3 / 0 |
+| `1854_d039213c` | 0 / 3 / 0 | 1 / 2 / 0 |
+| `2006_3a2c6732` | 2 / 1 / 0 | 1 / 2 / 0 |
+| `2019_1e222d3e` | 0 / 3 / 0 | 0 / 3 / 0 |
+| `2034_4dd3053d` | 2 / 1 / 0 | 2 / 1 / 0 |
+| `2046_5fa3abd5` | 0 / 3 / 0 | 0 / 3 / 0 |
+| `2116_b9ef5c1a` | 0 / 3 / 0 | 0 / 3 / 0 |
+| **All 42** | **14 / 28 / 0** | **14 / 28 / 0** |
+| With text before the call | 14 | 13 |
+| New calls that write the file the task asked for | 16 | 8 |
+
+- **At the point of a loop the rule does what the note does, no more:** 14 repeats of 42 each. The note's numbers are those of 2026-11-09 again (14 and 28), so the server answers as it did then.
+- **The rule did not bring a line of text before the call:** 13 of 42 samples had one, against 14 with the note, and every sample with text was a new call. Where it did, the line was the rule's own form ("New info needed: how `psi.exec` handles non-zero exit codes ... from the docs, not another run.", "I was looping").
+- **After the rule the new call is more often another lookup:** 8 of its 28 new calls write the extension, against 16 of the note's 28. The note says to use what you have; the rule says to read the code.
+- One step only, as before: nothing here says whether either lasts.
+
+**Open:**
+- On pi the rule followed five loops the owner had pointed out, so the model had its own loops in view when it got the rule. Step 2 gives it cold; a third form is the rule in place of the loop note, at the first stop.
+- Psi's guard would have seen none of the five loops (a new file name makes every call new, `known-issues.md`); only the limits would have ended them.
+- It works only if the model follows it, which the design rules out as a feature by itself. If it helps, the harness form is to require the line (bash's `intent`, optional today) or to refuse a repeat ("Not running an exact repeat", above).
+- `intent` did not prevent loops when the model filled it in: the 27B reworded it for the same command (2026-11-06). The rule asks for something narrower, what new information the call gives, which may or may not differ.
+- "Read the relevant code instead" could feed the other failure, reading without ever editing (`cog_bare_words`), and "asking a question" ends an unattended run with no work done.
+- Loops don't come in every run (3 of 5 on 2026-11-06), so a run or two without one says little.
+- Cost: four lines of system prompt on every request, and a line of output before every call.
+
 ### After a summary the model goes on with what the kept tail shows, not the summary's next step (added 2026-11-09)
 
 **Question:** in the first trial of `cog_bare_words` (Qwen3.8 27B, `~/.psi/evals/2026-11-10-0338-cog-bare-words-qwen27b`, MODEL-FAIL, 118 requests, no file edited), both summaries ended with a sound next step (reproduce the case, then change `evalWord` in `env.go`) and the model took it neither time: it went back to reading docs, looped on seven of them until the loop note at request 49, and read code in small slices until the context filled a third time. Why does it not go on from its own summary?
